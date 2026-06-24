@@ -1,0 +1,61 @@
+# 完整栈（PostgreSQL + Redis + 异步 Celery）。
+# 这是「生产形态」的可选路径；本机最简 demo 见 README（SQLite + Celery eager，无需 Docker）。
+# 启动后端栈：docker compose up
+# 前端在本地另跑：cd frontend && npm install && npm run dev（已代理 /api 到 localhost:8000）
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: srf
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  backend:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - ./backend:/app
+    command: bash -c "pip install -r requirements.txt && python manage.py migrate && python manage.py seed_base && python manage.py runserver 0.0.0.0:8000"
+    environment:
+      POSTGRES_DB: srf
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_HOST: db
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      CELERY_TASK_ALWAYS_EAGER: "False"
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+      - redis
+
+  worker:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - ./backend:/app
+    command: bash -c "pip install -r requirements.txt && celery -A config worker -l info"
+    environment:
+      POSTGRES_DB: srf
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_HOST: db
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      CELERY_TASK_ALWAYS_EAGER: "False"
+    depends_on:
+      - db
+      - redis
+
+volumes:
+  pgdata:

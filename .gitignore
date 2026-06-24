@@ -9,5 +9,10 @@ build/
 *.log
 .DS_Store
 
+# 后端运行时产物
+*.sqlite3
+backend/media/
+backend/sample_data/
+
 # 个人会议纪要，不纳入版本控制
 纪要.md
