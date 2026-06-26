@@ -66,6 +66,17 @@ class DepartmentSerializer(serializers.ModelSerializer):
         fields = ["id", "name", "level", "parent", "entity"]
 
 
+class ContactSerializer(serializers.ModelSerializer):
+    department_name = serializers.CharField(
+        source="department.name", read_only=True, default=""
+    )
+    entity = serializers.CharField(source="department.entity", read_only=True, default="")
+
+    class Meta:
+        model = m.Contact
+        fields = ["id", "name", "employee_no", "department", "department_name", "entity"]
+
+
 class AllocationSerializer(serializers.ModelSerializer):
     candidate_name = serializers.CharField(source="resume.candidate.name", read_only=True)
     position_name = serializers.CharField(source="resume.position_name", read_only=True)

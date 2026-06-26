@@ -103,6 +103,21 @@ class DepartmentViewSet(viewsets.ModelViewSet):
         return qs
 
 
+class ContactViewSet(viewsets.ModelViewSet):
+    serializer_class = serializers.ContactSerializer
+
+    def get_queryset(self):
+        qs = m.Contact.objects.select_related("department").order_by("id")
+        p = self.request.query_params
+        if p.get("name"):
+            qs = qs.filter(name__icontains=p["name"])
+        if p.get("employee_no"):
+            qs = qs.filter(employee_no__icontains=p["employee_no"])
+        if p.get("department_name"):
+            qs = qs.filter(department__name__icontains=p["department_name"])
+        return qs
+
+
 class AllocationViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = serializers.AllocationSerializer
 

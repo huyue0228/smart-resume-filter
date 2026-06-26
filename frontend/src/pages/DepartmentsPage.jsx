@@ -1,7 +1,7 @@
 import { useRef } from 'react'
 import { PageContainer, ProTable } from '@ant-design/pro-components'
 import { Tag } from 'antd'
-import { fetchDepartments } from '../api/services'
+import { fetchContacts } from '../api/services'
 import ImportButton from '../components/ImportButton'
 
 const IMPORT_FIELDS = [
@@ -12,22 +12,22 @@ export default function DepartmentsPage() {
   const actionRef = useRef()
 
   const columns = [
-    { title: '部门', dataIndex: 'name', fixed: 'left', width: 220, ellipsis: true },
+    { title: '姓名', dataIndex: 'name', fixed: 'left', width: 120 },
+    { title: '工号', dataIndex: 'employee_no', width: 140 },
+    { title: '所属部门', dataIndex: 'department_name', ellipsis: true, search: false },
     {
-      title: '层级',
-      dataIndex: 'level',
-      width: 100,
+      title: '招聘主体',
+      dataIndex: 'entity',
+      width: 140,
       search: false,
-      render: (_, r) =>
-        r.level === 1 ? <Tag color="purple">一层</Tag> : <Tag>二层</Tag>,
+      render: (_, r) => (r.entity ? <Tag color="blue">{r.entity}</Tag> : '-'),
     },
-    { title: '招聘主体', dataIndex: 'entity', width: 140, search: false },
   ]
 
   return (
     <PageContainer
       title="部门接口人"
-      content="部门层级与接口人信息，可导入维护（导入后用于简历下发）。"
+      content="二层部门接口人名单（姓名 / 工号 / 所属部门），简历下发的接收人。可导入维护。"
     >
       <ProTable
         actionRef={actionRef}
@@ -45,12 +45,13 @@ export default function DepartmentsPage() {
           />,
         ]}
         request={async (params) => {
-          const { current, pageSize, name } = params
+          const { current, pageSize, name, employee_no } = params
           try {
-            const { data } = await fetchDepartments({
+            const { data } = await fetchContacts({
               page: current,
               page_size: pageSize,
               name,
+              employee_no,
             })
             return { data: data?.results || [], total: data?.count || 0, success: true }
           } catch {

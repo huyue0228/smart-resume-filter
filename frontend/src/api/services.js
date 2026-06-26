@@ -31,6 +31,9 @@ export function fetchSchools(params) {
 export function fetchDepartments(params) {
   return client.get('/departments/', { params })
 }
+export function fetchContacts(params) {
+  return client.get('/contacts/', { params })
+}
 
 // ---- Pipeline ----
 // POST /api/pipeline/run/  body { step, mode }

@@ -9,6 +9,7 @@ router.register("candidates", views.CandidateViewSet, basename="candidate")
 router.register("jobs", views.JobViewSet, basename="job")
 router.register("schools", views.SchoolViewSet, basename="school")
 router.register("departments", views.DepartmentViewSet, basename="department")
+router.register("contacts", views.ContactViewSet, basename="contact")
 router.register("allocations", views.AllocationViewSet, basename="allocation")
 router.register("pipeline/runs", views.ProcessingRunViewSet, basename="processingrun")
 
