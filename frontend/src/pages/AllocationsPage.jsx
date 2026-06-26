@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import { PageContainer, ProTable } from '@ant-design/pro-components'
-import { Button, Tag, Space, Popconfirm, message } from 'antd'
+import { Button, Tag, Space, Popconfirm, Segmented, Modal, message } from 'antd'
 import { DownloadOutlined } from '@ant-design/icons'
 import {
   fetchAllocations,
@@ -8,6 +8,14 @@ import {
   exportAllocations,
 } from '../api/services'
 import { useRole } from '../contexts/RoleContext'
+import { useMode } from '../contexts/ModeContext'
+import { useProcessRunner } from '../components/useProcessRunner'
+
+// 切换规则/AI 后重算的步骤：岗位分类 + 分配
+const REPROCESS_STEPS = [
+  { step: 'step2', label: '岗位分类' },
+  { step: 'step5', label: '简历分配' },
+]
 
 const STATUS_ENUM = {
   pending: { text: '待下发', status: 'Default' },
@@ -30,10 +38,32 @@ function triggerDownload(data, filename) {
 export default function AllocationsPage() {
   const actionRef = useRef()
   const { isContact } = useRole()
+  const { mode, setMode } = useMode()
+  const { run, modal } = useProcessRunner()
   const [dispatchingId, setDispatchingId] = useState(null)
   const [selectedRowKeys, setSelectedRowKeys] = useState([])
   const [exporting, setExporting] = useState(false)
   const [lastQuery, setLastQuery] = useState({})
+
+  // 切换规则/AI：先询问，确认后重算 Step2 + Step5
+  const handleModeChange = (next) => {
+    if (next === mode) return
+    Modal.confirm({
+      title: `切换到${next === 'ai' ? 'AI' : '规则'}模式`,
+      content: '将按新模式重新进行岗位分类与简历分配，是否继续？',
+      okText: '重新处理',
+      onOk: async () => {
+        setMode(next)
+        const r = await run(
+          REPROCESS_STEPS,
+          next,
+          `正在按${next === 'ai' ? 'AI' : '规则'}模式重算`,
+        )
+        if (r.success) message.success('已按新模式重新分配')
+        actionRef.current?.reload()
+      },
+    })
+  }
 
   const handleDispatch = async (record) => {
     setDispatchingId(record.id)
@@ -125,6 +155,23 @@ export default function AllocationsPage() {
           ? '分配给你的简历，可单条或批量导出简历文件。'
           : 'Step5 分配结果，可逐条下发到 WeLink，并导出候选人简历文件。'
       }
+      extra={
+        isContact
+          ? undefined
+          : [
+              <Space key="mode" align="center">
+                <span style={{ color: '#666' }}>处理模式：</span>
+                <Segmented
+                  value={mode}
+                  onChange={handleModeChange}
+                  options={[
+                    { label: '规则模式', value: 'rule' },
+                    { label: 'AI 模式', value: 'ai' },
+                  ]}
+                />
+              </Space>,
+            ]
+      }
     >
       <ProTable
         actionRef={actionRef}
@@ -183,6 +230,7 @@ export default function AllocationsPage() {
           }
         }}
       />
+      {modal}
     </PageContainer>
   )
 }

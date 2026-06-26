@@ -39,8 +39,9 @@ export default function ImportButton({ fields, buttonText = '导入', title, onD
     setResult('')
     try {
       const { data } = await importData(formData)
-      setResult(data?.detail || '导入完成')
       message.success(data?.detail || '导入完成')
+      setOpen(false) // 关闭导入弹窗，便于后续自动处理进度条展示
+      reset()
       onDone?.(data)
     } catch {
       // 错误已由 axios 拦截器统一提示

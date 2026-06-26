@@ -15,6 +15,7 @@ router.register("pipeline/runs", views.ProcessingRunViewSet, basename="processin
 
 urlpatterns = [
     path("import/", views.ImportView.as_view()),
+    path("import/undo/", views.ImportUndoView.as_view()),
     path("pipeline/run/", views.PipelineRunView.as_view()),
     path("", include(router.urls)),
 ]

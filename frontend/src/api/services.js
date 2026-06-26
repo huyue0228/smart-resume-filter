@@ -11,6 +11,13 @@ export function importData(formData) {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
 }
+// 撤销（单级）：GET 查状态，POST 执行
+export function fetchUndoStatus() {
+  return client.get('/import/undo/')
+}
+export function undoLastImport() {
+  return client.post('/import/undo/')
+}
 
 // ---- Resumes ----
 // GET /api/resumes/  DRF paginated { count, results: [...] }

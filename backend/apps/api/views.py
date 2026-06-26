@@ -12,6 +12,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.core import models as m
+from apps.ingestion import snapshot
 from apps.ingestion.sources import RESUME_SUBDIR, import_files
 from apps.pipeline import runner
 
@@ -32,13 +33,43 @@ class ImportView(APIView):
                 {"detail": "未上传任何文件"}, status=status.HTTP_400_BAD_REQUEST
             )
         mode = request.data.get("mode", "incremental")
+        # 含简历数据的上传：先存撤销快照（上传前状态），再导入
+        takes_resume = bool(files.get("resume_list") or files.get("resume_package"))
+        if takes_resume:
+            snapshot.take_snapshot(label="上传简历前")
         try:
             counts = import_files(files, mode=mode)
         except Exception as exc:  # noqa: BLE001
             return Response(
                 {"detail": f"导入失败: {exc}"}, status=status.HTTP_400_BAD_REQUEST
             )
-        return Response({"detail": "导入完成", "counts": counts})
+        return Response(
+            {
+                "detail": "导入完成",
+                "counts": counts,
+                "undo_available": takes_resume,
+            }
+        )
+
+
+class ImportUndoView(APIView):
+    """单级撤销最近一次简历上传（含其处理结果）。"""
+
+    def get(self, request):
+        snap = snapshot.latest_snapshot()
+        return Response(
+            {
+                "available": snap is not None,
+                "label": snap.label if snap else "",
+                "created_at": snap.created_at if snap else None,
+            }
+        )
+
+    def post(self, request):
+        ok = snapshot.restore_latest()
+        return Response(
+            {"detail": "已撤销上次上传" if ok else "无可撤销的上传", "ok": ok}
+        )
 
 
 class ResumeViewSet(viewsets.ReadOnlyModelViewSet):

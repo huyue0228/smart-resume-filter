@@ -1,12 +1,28 @@
-import { useRef } from 'react'
+import { useRef, useEffect, useState } from 'react'
 import { PageContainer, ProTable } from '@ant-design/pro-components'
-import { Button, Tag, Space, message } from 'antd'
-import { fetchResumes } from '../api/services'
+import { Button, Tag, Space, Modal, message } from 'antd'
+import { UndoOutlined } from '@ant-design/icons'
+import {
+  fetchResumes,
+  fetchUndoStatus,
+  undoLastImport,
+} from '../api/services'
 import ImportButton from '../components/ImportButton'
+import { useProcessRunner } from '../components/useProcessRunner'
+import { useMode } from '../contexts/ModeContext'
 
 const RESUME_IMPORT_FIELDS = [
   { key: 'resume_list', label: '① 简历信息列表 (.xlsx)', accept: '.xlsx,.xls' },
   { key: 'resume_package', label: '② 简历包 (.zip，文件名含应聘ID)', accept: '.zip' },
+]
+
+// 上传后自动处理的五步（院校分类提前）
+const PROCESS_STEPS = [
+  { step: 'step1', label: '查重与志愿排序' },
+  { step: 'step3', label: '院校分类' },
+  { step: 'step2', label: '岗位分类' },
+  { step: 'step4', label: '需求录入' },
+  { step: 'step5', label: '简历分配' },
 ]
 
 const STATUS_OPTIONS = {
@@ -19,34 +35,61 @@ const STATUS_OPTIONS = {
 
 export default function ResumesPage() {
   const actionRef = useRef()
+  const { mode } = useMode()
+  const { run, modal } = useProcessRunner()
+  const [undo, setUndo] = useState({ available: false })
+
+  const refreshUndo = async () => {
+    try {
+      const { data } = await fetchUndoStatus()
+      setUndo(data || { available: false })
+    } catch {
+      setUndo({ available: false })
+    }
+  }
+
+  useEffect(() => {
+    refreshUndo()
+  }, [])
+
+  // 导入成功 → 自动按当前模式跑五步 → 刷新
+  const handleImported = async () => {
+    await refreshUndo()
+    const r = await run(
+      PROCESS_STEPS,
+      mode,
+      `正在处理简历（${mode === 'ai' ? 'AI' : '规则'}模式）`,
+    )
+    if (r.success) message.success('简历处理完成')
+    actionRef.current?.reload()
+  }
+
+  const handleUndo = () => {
+    Modal.confirm({
+      title: '撤销上次上传',
+      content: '将删除最近一次上传的简历及其处理结果，回到上传前状态。确定撤销？',
+      okText: '撤销',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        try {
+          const { data } = await undoLastImport()
+          message.success(data?.detail || '已撤销')
+          await refreshUndo()
+          actionRef.current?.reload()
+        } catch {
+          message.error('撤销失败')
+        }
+      },
+    })
+  }
 
   const columns = [
-    {
-      title: '姓名',
-      dataIndex: 'candidate_name',
-      fixed: 'left',
-      width: 100,
-    },
+    { title: '姓名', dataIndex: 'candidate_name', fixed: 'left', width: 100 },
     { title: '手机', dataIndex: 'phone', width: 130, search: false },
     { title: '主体', dataIndex: 'entity', width: 120, search: false },
-    {
-      title: '投递岗位',
-      dataIndex: 'position_name',
-      ellipsis: true,
-      search: false,
-    },
-    {
-      title: '志愿',
-      dataIndex: 'volunteer_rank',
-      width: 80,
-      search: false,
-    },
-    {
-      title: '岗位类别',
-      dataIndex: 'job_category',
-      width: 110,
-      search: false,
-    },
+    { title: '投递岗位', dataIndex: 'position_name', ellipsis: true, search: false },
+    { title: '志愿', dataIndex: 'volunteer_rank', width: 80, search: false },
+    { title: '岗位类别', dataIndex: 'job_category', width: 110, search: false },
     {
       title: '院校标签',
       dataIndex: 'school_tag',
@@ -87,12 +130,8 @@ export default function ResumesPage() {
       fixed: 'right',
       render: (_, record) => (
         <Space>
-          <a onClick={() => message.info(`查看 ${record.candidate_name}`)}>
-            查看
-          </a>
-          <a onClick={() => message.info(`编辑 ${record.candidate_name}`)}>
-            编辑
-          </a>
+          <a onClick={() => message.info(`查看 ${record.candidate_name}`)}>查看</a>
+          <a onClick={() => message.info(`编辑 ${record.candidate_name}`)}>编辑</a>
           <a
             style={{ color: '#cf1322' }}
             onClick={() => message.info(`删除 ${record.candidate_name}`)}
@@ -105,7 +144,10 @@ export default function ResumesPage() {
   ]
 
   return (
-    <PageContainer title="简历库" content="投递记录列表，支持时间 / 状态 / 关键词筛选。">
+    <PageContainer
+      title="简历库"
+      content="上传简历后自动完成查重、分类、院校、分配处理；可撤销最近一次上传。"
+    >
       <ProTable
         actionRef={actionRef}
         rowKey="id"
@@ -116,13 +158,18 @@ export default function ResumesPage() {
         toolBarRender={() => [
           <ImportButton
             key="import"
-            buttonText="导入简历"
-            title="导入简历（简历列表 + 简历包）"
+            buttonText="上传简历"
+            title="上传简历（简历列表 + 简历包），上传后自动处理"
             fields={RESUME_IMPORT_FIELDS}
-            onDone={() => actionRef.current?.reload()}
+            onDone={handleImported}
           />,
-          <Button key="add" onClick={() => message.info('新增')}>
-            新增
+          <Button
+            key="undo"
+            icon={<UndoOutlined />}
+            disabled={!undo.available}
+            onClick={handleUndo}
+          >
+            撤销上次上传
           </Button>,
           <Button key="export" onClick={() => message.info('导出')}>
             导出
@@ -150,6 +197,7 @@ export default function ResumesPage() {
           }
         }}
       />
+      {modal}
     </PageContainer>
   )
 }

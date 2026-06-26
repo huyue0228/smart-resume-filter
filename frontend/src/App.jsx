@@ -1,8 +1,8 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { RoleProvider, useRole } from './contexts/RoleContext'
+import { ModeProvider } from './contexts/ModeContext'
 import BasicLayout from './layouts/BasicLayout'
 import ResumesPage from './pages/ResumesPage'
-import PipelinePage from './pages/PipelinePage'
 import AllocationsPage from './pages/AllocationsPage'
 import JobsPage from './pages/JobsPage'
 import SchoolsPage from './pages/SchoolsPage'
@@ -34,7 +34,6 @@ function AppRoutes() {
         <Route path="/jobs" element={<JobsPage />} />
         <Route path="/schools" element={<SchoolsPage />} />
         <Route path="/departments" element={<DepartmentsPage />} />
-        <Route path="/pipeline" element={<PipelinePage />} />
         <Route path="/allocations" element={<AllocationsPage />} />
         <Route path="/config" element={<ConfigPage />} />
         <Route path="/users" element={<UsersPage />} />
@@ -47,7 +46,9 @@ function AppRoutes() {
 export default function App() {
   return (
     <RoleProvider>
-      <AppRoutes />
+      <ModeProvider>
+        <AppRoutes />
+      </ModeProvider>
     </RoleProvider>
   )
 }

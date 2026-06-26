@@ -182,3 +182,17 @@ class ProvinceRegion(models.Model):
 
     def __str__(self):
         return f"{self.province}-{self.region}"
+
+
+class ImportSnapshot(models.Model):
+    """单级撤销快照：每次上传简历前，序列化 Candidate/Resume/Allocation 存此处。
+
+    仅保留最近一份（单级撤销）。撤销 = 用 payload 还原这三张表，回到上传前状态。
+    """
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    label = models.CharField(max_length=128, blank=True)
+    payload = models.TextField(help_text="django serialize 的 json")
+
+    class Meta:
+        ordering = ["-created_at"]

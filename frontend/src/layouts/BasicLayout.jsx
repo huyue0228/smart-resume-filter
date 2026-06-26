@@ -8,7 +8,6 @@ import {
   ApartmentOutlined,
   BankOutlined,
   TeamOutlined,
-  NodeIndexOutlined,
   DeploymentUnitOutlined,
   SettingOutlined,
   ControlOutlined,
@@ -39,12 +38,6 @@ const fullRoute = {
         { path: '/schools', name: '院校清单', icon: <BankOutlined /> },
         { path: '/departments', name: '部门接口人', icon: <TeamOutlined /> },
       ],
-    },
-    {
-      path: '/process',
-      name: '处理流水线',
-      icon: <NodeIndexOutlined />,
-      routes: [{ path: '/pipeline', name: '流水线运行', icon: <NodeIndexOutlined /> }],
     },
     assignGroup,
     {
