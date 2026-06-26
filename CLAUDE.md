@@ -58,8 +58,9 @@ npm run build
 - `tasks.py` 是 Celery 包装；demo 下 `CELERY_TASK_ALWAYS_EAGER=True` 同步执行。
 
 ### API（`apps/api/`）
-- DRF DefaultRouter（resumes/candidates/jobs/schools/departments/allocations/runs）+ 显式 `import/` 与 `pipeline/run/`。
+- DRF DefaultRouter（resumes/candidates/jobs/schools/departments/**contacts**/allocations/runs）+ 显式 `import/` 与 `pipeline/run/`。接口人本人信息走 `/api/contacts/`（departments 只是部门树）。
 - `AllocationViewSet` 的下发 action 方法名是 `dispatch_welink`（url_path="dispatch"），**不要命名为 `dispatch`** —— 会覆盖 DRF ViewSet 自身的 `dispatch` 方法。
+- `AllocationViewSet.export_resumes`（`GET /api/allocations/export/?ids=`）从 `media/resumes/` 取简历文件打包 zip 返回（`HttpResponse`，非 DRF Response）；`?ids=` 缺省则按当前筛选导全部。
 - demo 全程 `AllowAny`（无鉴权），正式环境需启用 RBAC + 登录。
 
 ### 配置（`backend/config/settings.py`）
@@ -68,5 +69,7 @@ npm run build
 ## 约定
 
 - 前端是 **JavaScript（.jsx，非 TS）**。页面在 `frontend/src/pages/`，API 封装在 `src/api/`，布局 `src/layouts/BasicLayout.jsx`（ProLayout）。
+- **导入入口分散**：无独立导入页；各数据页用复用组件 `src/components/ImportButton.jsx`（弹窗上传，配置传哪类文件），后端复用同一 `/api/import/`。
+- **前端角色隔离（演示版）**：`src/contexts/RoleContext.jsx`（HR / contact，存 localStorage）。接口人仅见「分配结果」且只读导出（无下发）；菜单与路由在 `BasicLayout`/`App.jsx` 按角色过滤。**仅前端遮挡**，后端仍 AllowAny。
 - 注释与文档以中文为主，跟随现有风格。
 - `纪要.md`、`backend/sample_data/`、`*.sqlite3`、`backend/media/` 不纳入版本控制（见 .gitignore）。

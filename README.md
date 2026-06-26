@@ -68,10 +68,11 @@ cd frontend && npm install && npm run dev
 |------|------|------|
 | POST | `/api/import/` | 上传 4 表 + 简历包（multipart，字段 resume_list/jobs/schools/contacts/resume_package，mode=incremental\|replace） |
 | GET  | `/api/resumes/` | 投递清单（分页/筛选 search,status,imported_after,imported_before） |
-| GET  | `/api/candidates/` `/api/jobs/` `/api/schools/` `/api/departments/` | 主数据 CRUD |
+| GET  | `/api/candidates/` `/api/jobs/` `/api/schools/` `/api/departments/` `/api/contacts/` | 主数据 CRUD（接口人列表/检索走 contacts） |
 | POST | `/api/pipeline/run/` | 触发流水线 `{step: step1..step5\|all, mode: rule\|ai}` |
 | GET  | `/api/pipeline/runs/` | 运行记录 |
 | GET  | `/api/allocations/` | 分配结果 |
+| GET  | `/api/allocations/export/?ids=1,2` | 打包候选人简历文件为 zip（不传 ids 则按筛选导全部） |
 | POST | `/api/allocations/{id}/dispatch/` | WeLink 下发 |
 
 > 注：demo 关闭了鉴权（AllowAny）便于本机测试；正式环境需启用 RBAC + 登录（见技术方案）。
