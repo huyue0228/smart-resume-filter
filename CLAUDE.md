@@ -56,9 +56,11 @@ npm run build
 - 各步实现在 `services/`：dedup（Step1 志愿排序，户籍南北→GW/YLS，缺失按学校所在地，见 `regions.py`）、classify_job（Step2）、classify_school（Step3）、demand（Step4）、allocate（Step5：筛选 志愿1 + 目标院校 + 待处理状态，按部门 cap = max_hc × 倍数，倍数来自 Config `allocation_multiplier` 默认 5）。
 - **规则/AI 策略**：`strategies.py` 的 `get_strategy(mode)` 返回 RuleStrategy 或 AIStrategy，统一接口。AIStrategy 目前回退到规则并附说明（接 OpenAI 待做）。仅 Step2/Step5 用 mode。
 - `tasks.py` 是 Celery 包装；demo 下 `CELERY_TASK_ALWAYS_EAGER=True` 同步执行。
+- **无前端流水线页**：处理由前端逐步调 `/api/pipeline/run/` 驱动——简历库上传后自动跑全部五步，分配页切模式只跑 step2+step5，进度条来自前端按步推进（`src/components/useProcessRunner.jsx`）。
 
 ### API（`apps/api/`）
-- DRF DefaultRouter（resumes/candidates/jobs/schools/departments/**contacts**/allocations/runs）+ 显式 `import/` 与 `pipeline/run/`。接口人本人信息走 `/api/contacts/`（departments 只是部门树）。
+- DRF DefaultRouter（resumes/candidates/jobs/schools/departments/**contacts**/allocations/runs）+ 显式 `import/`、`import/undo/`、`pipeline/run/`。接口人本人信息走 `/api/contacts/`（departments 只是部门树）。
+- **单级撤销**：`import/` 含简历数据时先 `apps/ingestion/snapshot.py` 存 `ImportSnapshot`（序列化 Candidate/Resume/Allocation，仅留最近一份）；`import/undo/` GET 查状态、POST 还原。
 - `AllocationViewSet` 的下发 action 方法名是 `dispatch_welink`（url_path="dispatch"），**不要命名为 `dispatch`** —— 会覆盖 DRF ViewSet 自身的 `dispatch` 方法。
 - `AllocationViewSet.export_resumes`（`GET /api/allocations/export/?ids=`）从 `media/resumes/` 取简历文件打包 zip 返回（`HttpResponse`，非 DRF Response）；`?ids=` 缺省则按当前筛选导全部。
 - demo 全程 `AllowAny`（无鉴权），正式环境需启用 RBAC + 登录。
@@ -71,5 +73,6 @@ npm run build
 - 前端是 **JavaScript（.jsx，非 TS）**。页面在 `frontend/src/pages/`，API 封装在 `src/api/`，布局 `src/layouts/BasicLayout.jsx`（ProLayout）。
 - **导入入口分散**：无独立导入页；各数据页用复用组件 `src/components/ImportButton.jsx`（弹窗上传，配置传哪类文件），后端复用同一 `/api/import/`。
 - **前端角色隔离（演示版）**：`src/contexts/RoleContext.jsx`（HR / contact，存 localStorage）。接口人仅见「分配结果」且只读导出（无下发）；菜单与路由在 `BasicLayout`/`App.jsx` 按角色过滤。**仅前端遮挡**，后端仍 AllowAny。
+- **处理模式**：`src/contexts/ModeContext.jsx`（rule / ai，存 localStorage）。开关 UI 在「简历分配」页；上传简历自动处理时也读此模式。切模式 → 确认 → `useProcessRunner` 跑 step2+step5。
 - 注释与文档以中文为主，跟随现有风格。
 - `纪要.md`、`backend/sample_data/`、`*.sqlite3`、`backend/media/` 不纳入版本控制（见 .gitignore）。

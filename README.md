@@ -45,12 +45,11 @@ npm run dev     # http://localhost:5173 ，已代理 /api 到 8000
 ### 3) 走一遍流程
 
 1. 打开 http://localhost:5173
-2. 各数据页自带导入入口（已用 `load_sample` 则可跳过）：
-   - 「简历库 → 导入简历」：简历信息列表 xlsx + 简历包 zip
-   - 「岗位需求 → 导入岗位」、「院校清单 → 导入院校」、「部门接口人 → 导入接口人」：各自的 xlsx
-3. 「处理流水线」：点「一键全流程」或逐步运行；Step2/Step5 可切规则/AI
-4. 「简历库」查看打标结果；「简历分配」查看分配并「下发」
-5. 右上角「演示身份」可切 HR / 接口人：接口人仅能看到「分配结果」一页（前端演示用权限隔离，后端鉴权见 M6）
+2. 「简历库 → 上传简历」：选 简历信息列表 xlsx + 简历包 zip 上传，**上传后自动跑五步处理**（进度条），无需手动触发；如需撤销点「撤销上次上传」回到上传前
+   - 其余主数据（岗位/院校/接口人）各自页面有导入按钮；已用 `load_sample` 可跳过
+3. 「简历库」查看打标结果（志愿/岗位类别/院校标签）
+4. 「简历分配」查看分配并「下发」；页头「处理模式」可切 规则/AI（切换后自动重算分类与分配）；可导出候选人简历文件
+5. 右上角「演示身份」可切 HR / 接口人：接口人仅能看到「分配结果」一页且只读导出（前端演示用权限隔离，后端鉴权见 M6）
 
 ## 完整栈（可选：Postgres + Redis + 异步 Celery）
 
@@ -66,10 +65,11 @@ cd frontend && npm install && npm run dev
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/import/` | 上传 4 表 + 简历包（multipart，字段 resume_list/jobs/schools/contacts/resume_package，mode=incremental\|replace） |
+| POST | `/api/import/` | 上传 4 表 + 简历包（multipart，字段 resume_list/jobs/schools/contacts/resume_package，mode=incremental\|replace）；含简历数据时自动存撤销快照 |
+| GET / POST | `/api/import/undo/` | GET 查可否撤销；POST 撤销最近一次简历上传（还原上传前状态） |
 | GET  | `/api/resumes/` | 投递清单（分页/筛选 search,status,imported_after,imported_before） |
 | GET  | `/api/candidates/` `/api/jobs/` `/api/schools/` `/api/departments/` `/api/contacts/` | 主数据 CRUD（接口人列表/检索走 contacts） |
-| POST | `/api/pipeline/run/` | 触发流水线 `{step: step1..step5\|all, mode: rule\|ai}` |
+| POST | `/api/pipeline/run/` | 触发单步 `{step: step1..step5\|all, mode: rule\|ai}`（前端按步调用以驱动进度条） |
 | GET  | `/api/pipeline/runs/` | 运行记录 |
 | GET  | `/api/allocations/` | 分配结果 |
 | GET  | `/api/allocations/export/?ids=1,2` | 打包候选人简历文件为 zip（不传 ids 则按筛选导全部） |
