@@ -1,10 +1,9 @@
 import { useState } from 'react'
 import { Outlet, useNavigate, useLocation } from 'react-router-dom'
 import { ProLayout } from '@ant-design/pro-components'
-import { Dropdown } from 'antd'
+import { Dropdown, Tag } from 'antd'
 import {
   DatabaseOutlined,
-  ImportOutlined,
   ProfileOutlined,
   ApartmentOutlined,
   BankOutlined,
@@ -16,8 +15,18 @@ import {
   UserOutlined,
   SafetyCertificateOutlined,
 } from '@ant-design/icons'
+import { useRole, ROLES } from '../contexts/RoleContext'
 
-const route = {
+// 简历分配分组（接口人唯一可见）
+const assignGroup = {
+  path: '/assign',
+  name: '简历分配',
+  icon: <DeploymentUnitOutlined />,
+  routes: [{ path: '/allocations', name: '分配结果', icon: <DeploymentUnitOutlined /> }],
+}
+
+// HR / 管理员完整菜单。导入入口已并入各数据页（简历库 / 岗位 / 院校 / 接口人），不再单设导入页。
+const fullRoute = {
   path: '/',
   routes: [
     {
@@ -25,7 +34,6 @@ const route = {
       name: '数据管理',
       icon: <DatabaseOutlined />,
       routes: [
-        { path: '/import', name: '数据导入', icon: <ImportOutlined /> },
         { path: '/resumes', name: '简历库', icon: <ProfileOutlined /> },
         { path: '/jobs', name: '岗位需求', icon: <ApartmentOutlined /> },
         { path: '/schools', name: '院校清单', icon: <BankOutlined /> },
@@ -36,22 +44,9 @@ const route = {
       path: '/process',
       name: '处理流水线',
       icon: <NodeIndexOutlined />,
-      routes: [
-        { path: '/pipeline', name: '流水线运行', icon: <NodeIndexOutlined /> },
-      ],
+      routes: [{ path: '/pipeline', name: '流水线运行', icon: <NodeIndexOutlined /> }],
     },
-    {
-      path: '/assign',
-      name: '简历分配',
-      icon: <DeploymentUnitOutlined />,
-      routes: [
-        {
-          path: '/allocations',
-          name: '分配结果',
-          icon: <DeploymentUnitOutlined />,
-        },
-      ],
-    },
+    assignGroup,
     {
       path: '/system',
       name: '系统设置',
@@ -64,10 +59,20 @@ const route = {
   ],
 }
 
+// 接口人仅见分配结果
+const contactRoute = { path: '/', routes: [assignGroup] }
+
 export default function BasicLayout() {
   const navigate = useNavigate()
   const location = useLocation()
+  const { role, setRole, isContact } = useRole()
   const [pathname, setPathname] = useState(location.pathname)
+
+  const switchRole = (next) => {
+    setRole(next)
+    setPathname(next === 'contact' ? '/allocations' : '/resumes')
+    navigate(next === 'contact' ? '/allocations' : '/resumes')
+  }
 
   return (
     <ProLayout
@@ -76,7 +81,7 @@ export default function BasicLayout() {
       layout="mix"
       fixedHeader
       fixSiderbar
-      route={route}
+      route={isContact ? contactRoute : fullRoute}
       location={{ pathname }}
       onPageChange={(loc) => setPathname(loc?.pathname || location.pathname)}
       menuItemRender={(item, dom) => (
@@ -91,15 +96,28 @@ export default function BasicLayout() {
       )}
       avatarProps={{
         icon: <UserOutlined />,
-        title: '管理员',
+        title: (
+          <span>
+            {ROLES[role]?.label}
+            <Tag color={isContact ? 'orange' : 'blue'} style={{ marginLeft: 8 }}>
+              演示身份
+            </Tag>
+          </span>
+        ),
         size: 'small',
         render: (_, avatar) => (
           <Dropdown
             menu={{
+              selectedKeys: [role],
               items: [
-                { key: 'profile', label: '个人信息' },
-                { key: 'logout', label: '退出登录' },
+                { key: 'hr', label: '切换为 HR' },
+                { key: 'contact', label: '切换为 接口人' },
+                { type: 'divider' },
+                { key: 'profile', label: '个人信息', disabled: true },
               ],
+              onClick: ({ key }) => {
+                if (key === 'hr' || key === 'contact') switchRole(key)
+              },
             }}
           >
             {avatar}

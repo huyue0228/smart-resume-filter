@@ -52,3 +52,10 @@ export function fetchAllocations(params) {
 export function dispatchAllocation(id) {
   return client.post(`/allocations/${id}/dispatch/`)
 }
+// GET /api/allocations/export/?ids=1,2,3  -> zip blob（不传 ids 则导出当前筛选全部）
+export function exportAllocations(ids, params) {
+  return client.get('/allocations/export/', {
+    params: { ...(ids && ids.length ? { ids: ids.join(',') } : {}), ...params },
+    responseType: 'blob',
+  })
+}

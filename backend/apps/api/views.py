@@ -1,3 +1,9 @@
+import io
+import os
+import zipfile
+
+from django.conf import settings
+from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -6,7 +12,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.core import models as m
-from apps.ingestion.sources import import_files
+from apps.ingestion.sources import RESUME_SUBDIR, import_files
 from apps.pipeline import runner
 
 from . import serializers
@@ -61,18 +67,40 @@ class CandidateViewSet(viewsets.ModelViewSet):
 
 
 class JobViewSet(viewsets.ModelViewSet):
-    queryset = m.Job.objects.select_related("department").all()
     serializer_class = serializers.JobSerializer
+
+    def get_queryset(self):
+        qs = m.Job.objects.select_related("department").all().order_by("id")
+        p = self.request.query_params
+        if p.get("public_name"):
+            qs = qs.filter(public_name__icontains=p["public_name"])
+        if p.get("category"):
+            qs = qs.filter(category__icontains=p["category"])
+        return qs
 
 
 class SchoolViewSet(viewsets.ModelViewSet):
-    queryset = m.School.objects.all()
     serializer_class = serializers.SchoolSerializer
+
+    def get_queryset(self):
+        qs = m.School.objects.all().order_by("name")
+        p = self.request.query_params
+        if p.get("name"):
+            qs = qs.filter(name__icontains=p["name"])
+        if p.get("platform"):
+            qs = qs.filter(platform__icontains=p["platform"])
+        return qs
 
 
 class DepartmentViewSet(viewsets.ModelViewSet):
-    queryset = m.Department.objects.all()
     serializer_class = serializers.DepartmentSerializer
+
+    def get_queryset(self):
+        qs = m.Department.objects.all().order_by("id")
+        p = self.request.query_params
+        if p.get("name"):
+            qs = qs.filter(name__icontains=p["name"])
+        return qs
 
 
 class AllocationViewSet(viewsets.ReadOnlyModelViewSet):
@@ -104,6 +132,46 @@ class AllocationViewSet(viewsets.ReadOnlyModelViewSet):
         alloc.claimed_at = timezone.now()
         alloc.save(update_fields=["status", "claimed_at"])
         return Response({"detail": "已领取", "status": alloc.status})
+
+    @action(detail=False, methods=["get"], url_path="export")
+    def export_resumes(self, request):
+        """打包导出候选人简历文件为 zip。
+
+        ?ids=1,2,3 导出指定分配项；不传则导出当前筛选（含 status）下全部。
+        无简历文件的候选人记入 zip 内的「缺失简历文件清单.txt」。
+        """
+        qs = self.get_queryset()
+        ids = request.query_params.get("ids")
+        if ids:
+            id_list = [int(x) for x in ids.split(",") if x.strip().isdigit()]
+            qs = qs.filter(id__in=id_list)
+
+        resume_dir = os.path.join(settings.MEDIA_ROOT, RESUME_SUBDIR)
+        buf = io.BytesIO()
+        added, missing = 0, []
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for alloc in qs.select_related("resume__candidate"):
+                resume = alloc.resume
+                fname = resume.resume_file
+                path = os.path.join(resume_dir, fname) if fname else ""
+                if path and os.path.exists(path):
+                    zf.write(path, arcname=fname)
+                    added += 1
+                else:
+                    missing.append(f"{resume.candidate.name}（{resume.apply_id}）")
+            if missing:
+                zf.writestr(
+                    "缺失简历文件清单.txt",
+                    "以下候选人暂无简历文件（未上传简历包或未匹配）：\n"
+                    + "\n".join(missing),
+                )
+
+        buf.seek(0)
+        resp = HttpResponse(buf.getvalue(), content_type="application/zip")
+        resp["Content-Disposition"] = 'attachment; filename="resumes_export.zip"'
+        resp["X-Export-Count"] = str(added)
+        resp["X-Export-Missing"] = str(len(missing))
+        return resp
 
 
 class ProcessingRunViewSet(viewsets.ReadOnlyModelViewSet):

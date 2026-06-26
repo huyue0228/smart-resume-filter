@@ -3,15 +3,20 @@
 Excel 仅是一种数据源实现；下游业务只依赖 core 模型。
 """
 import io
+import os
 import re
 import zipfile
 
 import pandas as pd
+from django.conf import settings
 from django.db import transaction
 
 from apps.core import models as m
 
 from .identity import identity_hash
+
+# 简历文件落盘子目录（相对 MEDIA_ROOT），导出接口复用
+RESUME_SUBDIR = "resumes"
 
 
 def _val(row, key):
@@ -190,20 +195,27 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
             counts["resumes_created" if r_created else "resumes_updated"] += 1
             resume_by_apply[apply_id] = resume
 
-    # 简历包：文件名 姓名（应聘ID） → 经应聘ID 关联 Resume
+    # 简历包：文件名 姓名（应聘ID） → 经应聘ID 关联 Resume，并将文件落盘到 media/resumes/
     if files.get("resume_package"):
         pkg = files["resume_package"]
+        dest_dir = os.path.join(settings.MEDIA_ROOT, RESUME_SUBDIR)
+        os.makedirs(dest_dir, exist_ok=True)
         try:
             pkg.seek(0)
             with zipfile.ZipFile(io.BytesIO(pkg.read())) as zf:
                 for fname in zf.namelist():
+                    if fname.endswith("/"):
+                        continue
                     match = re.search(r"[（(]\s*([^（）()]+?)\s*[）)]", fname)
                     if not match:
                         continue
                     apply_id = match.group(1).strip()
                     resume = m.Resume.objects.filter(apply_id=apply_id).first()
                     if resume:
-                        resume.resume_file = fname
+                        base = os.path.basename(fname)
+                        with open(os.path.join(dest_dir, base), "wb") as out:
+                            out.write(zf.read(fname))
+                        resume.resume_file = base
                         resume.save(update_fields=["resume_file"])
         except zipfile.BadZipFile:
             pass

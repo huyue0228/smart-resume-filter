@@ -1,7 +1,13 @@
 import { useRef, useState } from 'react'
 import { PageContainer, ProTable } from '@ant-design/pro-components'
 import { Button, Tag, Space, Popconfirm, message } from 'antd'
-import { fetchAllocations, dispatchAllocation } from '../api/services'
+import { DownloadOutlined } from '@ant-design/icons'
+import {
+  fetchAllocations,
+  dispatchAllocation,
+  exportAllocations,
+} from '../api/services'
+import { useRole } from '../contexts/RoleContext'
 
 const STATUS_ENUM = {
   pending: { text: '待下发', status: 'Default' },
@@ -10,9 +16,24 @@ const STATUS_ENUM = {
   failed: { text: '下发失败', status: 'Error' },
 }
 
+function triggerDownload(data, filename) {
+  const url = URL.createObjectURL(new Blob([data]))
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
 export default function AllocationsPage() {
   const actionRef = useRef()
+  const { isContact } = useRole()
   const [dispatchingId, setDispatchingId] = useState(null)
+  const [selectedRowKeys, setSelectedRowKeys] = useState([])
+  const [exporting, setExporting] = useState(false)
+  const [lastQuery, setLastQuery] = useState({})
 
   const handleDispatch = async (record) => {
     setDispatchingId(record.id)
@@ -24,6 +45,28 @@ export default function AllocationsPage() {
       // toasted by interceptor
     } finally {
       setDispatchingId(null)
+    }
+  }
+
+  // ids 为空 -> 按当前筛选导出全部
+  const handleExport = async (ids) => {
+    setExporting(true)
+    try {
+      const resp = await exportAllocations(ids, lastQuery)
+      const count = Number(resp.headers?.['x-export-count'] ?? 0)
+      const missing = Number(resp.headers?.['x-export-missing'] ?? 0)
+      if (count === 0) {
+        message.warning('所选记录暂无可导出的简历文件')
+      } else {
+        triggerDownload(resp.data, 'resumes_export.zip')
+        message.success(
+          `已导出 ${count} 份简历${missing ? `，${missing} 份缺文件（见压缩包内清单）` : ''}`,
+        )
+      }
+    } catch {
+      message.error('导出失败')
+    } finally {
+      setExporting(false)
     }
   }
 
@@ -43,27 +86,31 @@ export default function AllocationsPage() {
     {
       title: '操作',
       valueType: 'option',
-      width: 140,
+      width: isContact ? 90 : 160,
       fixed: 'right',
       render: (_, record) => {
-        const disabled = record.status === 'dispatched'
+        const dispatched = record.status === 'dispatched'
         return (
           <Space>
-            <Popconfirm
-              title="确认下发该简历到 WeLink？"
-              onConfirm={() => handleDispatch(record)}
-              disabled={disabled}
-            >
-              <Button
-                type="link"
-                size="small"
-                disabled={disabled}
-                loading={dispatchingId === record.id}
+            <a onClick={() => handleExport([record.id])}>导出</a>
+            {!isContact && (
+              <Popconfirm
+                title="确认下发该简历到 WeLink？"
+                onConfirm={() => handleDispatch(record)}
+                disabled={dispatched}
               >
-                下发
-              </Button>
-            </Popconfirm>
-            {disabled && <Tag color="green">已下发</Tag>}
+                <Button
+                  type="link"
+                  size="small"
+                  style={{ padding: 0 }}
+                  disabled={dispatched}
+                  loading={dispatchingId === record.id}
+                >
+                  下发
+                </Button>
+              </Popconfirm>
+            )}
+            {!isContact && dispatched && <Tag color="green">已下发</Tag>}
           </Space>
         )
       },
@@ -73,7 +120,11 @@ export default function AllocationsPage() {
   return (
     <PageContainer
       title="简历分配"
-      content="Step5 分配结果，可逐条下发到 WeLink。"
+      content={
+        isContact
+          ? '分配给你的简历，可单条或批量导出简历文件。'
+          : 'Step5 分配结果，可逐条下发到 WeLink，并导出候选人简历文件。'
+      }
     >
       <ProTable
         actionRef={actionRef}
@@ -82,8 +133,40 @@ export default function AllocationsPage() {
         scroll={{ x: 1100 }}
         search={{ labelWidth: 'auto' }}
         pagination={{ defaultPageSize: 10, showSizeChanger: true }}
+        rowSelection={{
+          selectedRowKeys,
+          onChange: (keys) => setSelectedRowKeys(keys),
+        }}
+        tableAlertOptionRender={() => (
+          <Space>
+            <a onClick={() => handleExport(selectedRowKeys)}>导出选中</a>
+            <a onClick={() => setSelectedRowKeys([])}>取消选择</a>
+          </Space>
+        )}
+        toolBarRender={() => [
+          <Button
+            key="export-selected"
+            icon={<DownloadOutlined />}
+            disabled={selectedRowKeys.length === 0}
+            loading={exporting}
+            onClick={() => handleExport(selectedRowKeys)}
+          >
+            导出选中{selectedRowKeys.length ? `(${selectedRowKeys.length})` : ''}
+          </Button>,
+          <Button
+            key="export-all"
+            type="primary"
+            icon={<DownloadOutlined />}
+            loading={exporting}
+            onClick={() => handleExport([])}
+          >
+            导出全部
+          </Button>,
+        ]}
         request={async (params) => {
           const { current, pageSize, status } = params
+          const query = { status }
+          setLastQuery(query)
           try {
             const { data } = await fetchAllocations({
               page: current,

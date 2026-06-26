@@ -2,6 +2,12 @@ import { useRef } from 'react'
 import { PageContainer, ProTable } from '@ant-design/pro-components'
 import { Button, Tag, Space, message } from 'antd'
 import { fetchResumes } from '../api/services'
+import ImportButton from '../components/ImportButton'
+
+const RESUME_IMPORT_FIELDS = [
+  { key: 'resume_list', label: '① 简历信息列表 (.xlsx)', accept: '.xlsx,.xls' },
+  { key: 'resume_package', label: '② 简历包 (.zip，文件名含应聘ID)', accept: '.zip' },
+]
 
 const STATUS_OPTIONS = {
   pending: { text: '待处理', status: 'Default' },
@@ -108,7 +114,14 @@ export default function ResumesPage() {
         pagination={{ defaultPageSize: 10, showSizeChanger: true }}
         search={{ labelWidth: 'auto' }}
         toolBarRender={() => [
-          <Button key="add" type="primary" onClick={() => message.info('新增')}>
+          <ImportButton
+            key="import"
+            buttonText="导入简历"
+            title="导入简历（简历列表 + 简历包）"
+            fields={RESUME_IMPORT_FIELDS}
+            onDone={() => actionRef.current?.reload()}
+          />,
+          <Button key="add" onClick={() => message.info('新增')}>
             新增
           </Button>,
           <Button key="export" onClick={() => message.info('导出')}>
