@@ -1,14 +1,20 @@
-"""单级撤销快照：上传简历前保存 Candidate/Resume/Allocation，可一键还原。
+"""单级撤销快照：上传简历前保存候选、投递和分配工作流。"""
+import json
 
-仅保留最近一份。撤销后快照清除（再次可撤销需先有新上传）。
-"""
 from django.core import serializers
 from django.db import transaction
 
 from apps.core import models as m
 
-# 序列化顺序需保证 FK 先于引用方（Candidate → Resume → Allocation）
-_SNAPSHOT_MODELS = [m.Candidate, m.Resume, m.Allocation]
+_SNAPSHOT_MODELS = [
+    m.Candidate,
+    m.Resume,
+    m.ResumeProfile,
+    m.CandidateWorkflow,
+    m.AgentDispatchDecision,
+    m.AssignmentAttempt,
+    m.AssignmentHandoff,
+]
 
 
 def take_snapshot(label=""):
@@ -16,7 +22,7 @@ def take_snapshot(label=""):
     for Model in _SNAPSHOT_MODELS:
         objs.extend(Model.objects.all())
     payload = serializers.serialize("json", objs)
-    m.ImportSnapshot.objects.all().delete()  # 单级：只留最新一份
+    m.ImportSnapshot.objects.all().delete()
     return m.ImportSnapshot.objects.create(label=label, payload=payload)
 
 
@@ -24,16 +30,69 @@ def latest_snapshot():
     return m.ImportSnapshot.objects.order_by("-created_at").first()
 
 
+def _deserialize_payload(payload):
+    raw = json.loads(payload or "[]")
+    workflows = []
+    decisions = []
+    attempts = []
+    handoffs = []
+    others = []
+    for item in raw:
+        if item.get("model") == "core.candidateworkflow":
+            workflows.append(item)
+        elif item.get("model") == "core.agentdispatchdecision":
+            decisions.append(item)
+        elif item.get("model") == "core.assignmentattempt":
+            attempts.append(item)
+        elif item.get("model") == "core.assignmenthandoff":
+            handoffs.append(item)
+        else:
+            others.append(item)
+    return others, workflows, decisions, attempts, handoffs
+
+
 @transaction.atomic
 def restore_latest():
     snap = latest_snapshot()
     if not snap:
         return False
-    # 反向清空（先删引用方），再按快照顺序还原（Candidate 先建，满足 Resume FK）
-    m.Allocation.objects.all().delete()
+
+    others, workflows, decisions, attempts, handoffs = _deserialize_payload(snap.payload)
+
+    m.AssignmentHandoff.objects.all().delete()
+    m.AssignmentAttempt.objects.all().delete()
+    m.AgentDispatchDecision.objects.all().delete()
+    m.ResumeProfile.objects.all().delete()
+    m.CandidateWorkflow.objects.all().delete()
     m.Resume.objects.all().delete()
     m.Candidate.objects.all().delete()
-    for obj in serializers.deserialize("json", snap.payload):
+
+    for obj in serializers.deserialize("json", json.dumps(others)):
         obj.save()
+
+    passed_attempts = {}
+    for item in workflows:
+        fields = item.get("fields", {})
+        passed_attempts[item["pk"]] = fields.get("passed_attempt")
+        fields["passed_attempt"] = None
+
+    for obj in serializers.deserialize("json", json.dumps(workflows)):
+        obj.save()
+
+    for obj in serializers.deserialize("json", json.dumps(decisions)):
+        obj.save()
+
+    for obj in serializers.deserialize("json", json.dumps(attempts)):
+        obj.save()
+
+    for obj in serializers.deserialize("json", json.dumps(handoffs)):
+        obj.save()
+
+    for workflow_pk, attempt_pk in passed_attempts.items():
+        if attempt_pk:
+            m.CandidateWorkflow.objects.filter(pk=workflow_pk).update(
+                passed_attempt_id=attempt_pk
+            )
+
     snap.delete()
     return True

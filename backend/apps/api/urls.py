@@ -10,7 +10,14 @@ router.register("jobs", views.JobViewSet, basename="job")
 router.register("schools", views.SchoolViewSet, basename="school")
 router.register("departments", views.DepartmentViewSet, basename="department")
 router.register("contacts", views.ContactViewSet, basename="contact")
-router.register("allocations", views.AllocationViewSet, basename="allocation")
+router.register("school-tag-rules", views.SchoolTagRuleViewSet, basename="schooltagrule")
+router.register("workflows", views.CandidateWorkflowViewSet, basename="workflow")
+router.register(
+    "workflow-attempts", views.AssignmentAttemptViewSet, basename="workflowattempt"
+)
+router.register(
+    "agent-decisions", views.AgentDispatchDecisionViewSet, basename="agentdecision"
+)
 router.register("pipeline/runs", views.ProcessingRunViewSet, basename="processingrun")
 
 urlpatterns = [

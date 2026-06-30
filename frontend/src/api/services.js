@@ -53,18 +53,24 @@ export function fetchPipelineRuns(params) {
   return client.get('/pipeline/runs/', { params })
 }
 
-// ---- Allocations ----
-// GET /api/allocations/  paginated
+// ---- Workflow attempts ----
 export function fetchAllocations(params) {
-  return client.get('/allocations/', { params })
+  return client.get('/workflow-attempts/', { params })
 }
-// POST /api/allocations/{id}/dispatch/  returns { detail, status }
 export function dispatchAllocation(id) {
-  return client.post(`/allocations/${id}/dispatch/`)
+  return client.post(`/workflow-attempts/${id}/dispatch/`)
 }
-// GET /api/allocations/export/?ids=1,2,3  -> zip blob（不传 ids 则导出当前筛选全部）
+export function bulkDispatchAllocations(body, params) {
+  return client.post('/workflow-attempts/bulk-dispatch/', body, { params })
+}
+export function assignSubContact(id, body) {
+  return client.post(`/workflow-attempts/${id}/assign-sub-contact/`, body)
+}
+export function submitAllocationFeedback(id, body) {
+  return client.post(`/workflow-attempts/${id}/feedback/`, body)
+}
 export function exportAllocations(ids, params) {
-  return client.get('/allocations/export/', {
+  return client.get('/workflow-attempts/export/', {
     params: { ...(ids && ids.length ? { ids: ids.join(',') } : {}), ...params },
     responseType: 'blob',
   })

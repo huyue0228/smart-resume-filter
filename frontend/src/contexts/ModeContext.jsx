@@ -1,6 +1,6 @@
 import { createContext, useContext, useState } from 'react'
 
-// 处理模式（规则 / AI），影响 Step2 岗位分类 与 Step5 分配。
+// 处理模式（规则 / AI），影响 Step2 简历分类、分配与下发。
 // 开关 UI 放在「简历分配」页；上传简历自动处理时也读取此模式。
 const ModeContext = createContext(null)
 

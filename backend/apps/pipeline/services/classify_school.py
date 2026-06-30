@@ -10,12 +10,10 @@ def run(scope=None):
         hp = school_map.get(cand.highest_degree_school, "") if cand.highest_degree_school else ""
         cand.first_degree_platform = fp or "非目标院校"
         cand.highest_degree_platform = hp or "非目标院校"
-        cand.is_target_school = bool(fp or hp)
         cand.save(
             update_fields=[
                 "first_degree_platform",
                 "highest_degree_platform",
-                "is_target_school",
             ]
         )
         count += 1

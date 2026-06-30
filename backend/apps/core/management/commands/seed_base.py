@@ -14,7 +14,7 @@ SOUTH = [
 
 
 class Command(BaseCommand):
-    help = "初始化省份南北字典与基础配置（分配倍数）"
+    help = "初始化省份南北字典与基础配置"
 
     def handle(self, *args, **options):
         for p in NORTH:
@@ -22,6 +22,19 @@ class Command(BaseCommand):
         for p in SOUTH:
             m.ProvinceRegion.objects.update_or_create(province=p, defaults={"region": "南"})
         m.Config.objects.update_or_create(
-            key="allocation_multiplier", defaults={"value": 5}
+            key="ai_timeout_seconds", defaults={"value": 60}
         )
-        self.stdout.write(self.style.SUCCESS("基础数据已初始化（省份字典 + 分配倍数=5）"))
+        m.Config.objects.update_or_create(
+            key="welink_enabled", defaults={"value": False}
+        )
+        if not m.SchoolTagRule.objects.exists():
+            m.SchoolTagRule.objects.create(
+                name="Demo 默认目标院校",
+                first_degree_tags=["平台A", "平台B", "平台C"],
+                highest_degree_tags=["平台A", "平台B", "平台C"],
+                is_active=True,
+                priority=0,
+            )
+        self.stdout.write(
+            self.style.SUCCESS("基础数据已初始化（省份字典 + 基础配置 + Demo 院校规则）")
+        )

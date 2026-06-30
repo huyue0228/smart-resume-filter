@@ -57,19 +57,45 @@ def _read_excel(file_obj):
     return pd.read_excel(file_obj, dtype=object)
 
 
-def _get_department(level1_name, level2_name, entity=""):
-    """按 一层/二层 名称建department 树，返回二层（无二层则返回一层）。"""
+def _get_department(level1_name, level2_name, entity="", level3_name=""):
+    """按 一层/二层/三级 名称建 department 树，默认返回最末级部门。"""
     l1 = None
     if level1_name:
         l1, _ = m.Department.objects.get_or_create(
             name=level1_name, parent=None, defaults={"level": 1, "entity": entity}
         )
+        if l1.entity != entity and entity:
+            l1.entity = entity
+            l1.save(update_fields=["entity"])
     if level2_name:
         l2, _ = m.Department.objects.get_or_create(
             name=level2_name, parent=l1, defaults={"level": 2, "entity": entity}
         )
+        if l2.entity != entity and entity:
+            l2.entity = entity
+            l2.save(update_fields=["entity"])
+        if level3_name:
+            l3, _ = m.Department.objects.get_or_create(
+                name=level3_name,
+                parent=l2,
+                defaults={"level": 3, "entity": entity or l2.entity},
+            )
+            return l3
         return l2
     return l1
+
+
+def _contact_level(row, dept):
+    raw = _val(row, "接口人层级") or _val(row, "层级")
+    if "三级" in raw or "3" == raw:
+        return m.Contact.LEVEL_TERTIARY
+    if "二级" in raw or "2" == raw:
+        return m.Contact.LEVEL_SECONDARY
+    return (
+        m.Contact.LEVEL_TERTIARY
+        if dept and dept.level == 3
+        else m.Contact.LEVEL_SECONDARY
+    )
 
 
 def _split_majors(text):
@@ -93,7 +119,11 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
     }
 
     if mode == "replace":
-        m.Allocation.objects.all().delete()
+        m.AssignmentHandoff.objects.all().delete()
+        m.AssignmentAttempt.objects.all().delete()
+        m.AgentDispatchDecision.objects.all().delete()
+        m.ResumeProfile.objects.all().delete()
+        m.CandidateWorkflow.objects.all().delete()
         m.Resume.objects.all().delete()
         m.Candidate.objects.all().delete()
         if files.get("jobs"):
@@ -124,9 +154,25 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
             name = _val(row, "姓名")
             if not no:
                 continue
-            dept = _get_department(_val(row, "一层部门"), _val(row, "二层部门"))
+            dept = _get_department(
+                _val(row, "一层部门"),
+                _val(row, "二层部门"),
+                _val(row, "主体"),
+                _val(row, "三级部门"),
+            )
             m.Contact.objects.update_or_create(
-                employee_no=no, defaults={"name": name, "department": dept}
+                employee_no=no,
+                defaults={
+                    "name": name,
+                    "department": dept,
+                    "contact_level": _contact_level(row, dept),
+                    "can_delegate": not (
+                        _val(row, "可转派") and not _to_bool(_val(row, "可转派"))
+                    ),
+                    "is_active": not (
+                        _val(row, "是否启用") and not _to_bool(_val(row, "是否启用"))
+                    ),
+                },
             )
             counts["contacts"] += 1
 

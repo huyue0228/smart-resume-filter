@@ -10,9 +10,15 @@ for model in (
     models.JobMajor,
     models.Candidate,
     models.Resume,
-    models.Allocation,
+    models.ResumeProfile,
+    models.SchoolTagRule,
+    models.CandidateWorkflow,
+    models.AssignmentAttempt,
+    models.AssignmentHandoff,
+    models.AgentDispatchDecision,
     models.ProcessingRun,
     models.Config,
     models.ProvinceRegion,
+    models.ImportSnapshot,
 ):
     admin.site.register(model)

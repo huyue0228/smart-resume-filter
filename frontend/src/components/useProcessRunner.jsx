@@ -22,9 +22,11 @@ export function useProcessRunner() {
     for (let i = 0; i < steps.length; i++) {
       setS((p) => ({ ...p, idx: i, label: steps[i].label }))
       try {
-        await runPipeline({ step: steps[i].step, mode })
-      } catch {
-        setS((p) => ({ ...p, error: `「${steps[i].label}」处理失败` }))
+        const { data } = await runPipeline({ step: steps[i].step, mode })
+        if (data?.status === 'failed') throw new Error(data?.message || '处理失败')
+      } catch (error) {
+        const detail = error?.message ? `：${error.message}` : ''
+        setS((p) => ({ ...p, error: `「${steps[i].label}」处理失败${detail}` }))
         await sleep(1400)
         setS((p) => ({ ...p, open: false }))
         return { success: false, failedAt: steps[i] }

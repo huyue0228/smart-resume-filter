@@ -63,8 +63,8 @@ export default function BasicLayout() {
 
   const switchRole = (next) => {
     setRole(next)
-    setPathname(next === 'contact' ? '/allocations' : '/resumes')
-    navigate(next === 'contact' ? '/allocations' : '/resumes')
+    setPathname(next === 'hr' ? '/resumes' : '/allocations')
+    navigate(next === 'hr' ? '/resumes' : '/allocations')
   }
 
   return (
@@ -104,12 +104,13 @@ export default function BasicLayout() {
               selectedKeys: [role],
               items: [
                 { key: 'hr', label: '切换为 HR' },
-                { key: 'contact', label: '切换为 接口人' },
+                { key: 'secondary_contact', label: '切换为 二级接口人' },
+                { key: 'tertiary_contact', label: '切换为 三级接口人' },
                 { type: 'divider' },
                 { key: 'profile', label: '个人信息', disabled: true },
               ],
               onClick: ({ key }) => {
-                if (key === 'hr' || key === 'contact') switchRole(key)
+                if (key in ROLES) switchRole(key)
               },
             }}
           >

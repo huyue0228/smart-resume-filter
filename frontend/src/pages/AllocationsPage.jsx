@@ -1,27 +1,48 @@
 import { useRef, useState } from 'react'
 import { PageContainer, ProTable } from '@ant-design/pro-components'
-import { Button, Tag, Space, Popconfirm, Segmented, Modal, message } from 'antd'
+import {
+  Button,
+  Tag,
+  Space,
+  Popconfirm,
+  Segmented,
+  Modal,
+  message,
+  Select,
+  Radio,
+  Input,
+} from 'antd'
 import { DownloadOutlined } from '@ant-design/icons'
 import {
   fetchAllocations,
   dispatchAllocation,
+  bulkDispatchAllocations,
+  assignSubContact,
+  submitAllocationFeedback,
   exportAllocations,
+  fetchContacts,
 } from '../api/services'
 import { useRole } from '../contexts/RoleContext'
 import { useMode } from '../contexts/ModeContext'
 import { useProcessRunner } from '../components/useProcessRunner'
 
-// 切换规则/AI 后重算的步骤：岗位分类 + 分配
 const REPROCESS_STEPS = [
-  { step: 'step2', label: '岗位分类' },
-  { step: 'step5', label: '简历分配' },
+  { step: 'step2', label: '简历分类、分配与下发' },
 ]
 
 const STATUS_ENUM = {
-  pending: { text: '待下发', status: 'Default' },
-  dispatched: { text: '已下发', status: 'Success' },
-  claimed: { text: '已领取', status: 'Processing' },
-  failed: { text: '下发失败', status: 'Error' },
+  pending_dispatch: { text: '待下发', status: 'Default' },
+  dispatched_l2: { text: '已下发二级', status: 'Processing' },
+  assigned_l3: { text: '已转派三级', status: 'Processing' },
+  passed: { text: '已通过', status: 'Success' },
+  rejected: { text: '未通过', status: 'Error' },
+  cancelled: { text: '已取消', status: 'Default' },
+}
+
+const SOURCE_TEXT = {
+  rule: '规则',
+  ai: 'AI',
+  manual: '手动',
 }
 
 function triggerDownload(data, filename) {
@@ -37,20 +58,34 @@ function triggerDownload(data, filename) {
 
 export default function AllocationsPage() {
   const actionRef = useRef()
-  const { isContact } = useRole()
+  const { role, isContact, isSecondaryContact, isTertiaryContact } = useRole()
   const { mode, setMode } = useMode()
   const { run, modal } = useProcessRunner()
   const [dispatchingId, setDispatchingId] = useState(null)
+  const [bulkDispatching, setBulkDispatching] = useState(false)
   const [selectedRowKeys, setSelectedRowKeys] = useState([])
   const [exporting, setExporting] = useState(false)
   const [lastQuery, setLastQuery] = useState({})
+  const [assignModal, setAssignModal] = useState({
+    open: false,
+    record: null,
+    contacts: [],
+    selected: undefined,
+    loading: false,
+  })
+  const [feedbackModal, setFeedbackModal] = useState({
+    open: false,
+    record: null,
+    result: 'passed',
+    note: '',
+    loading: false,
+  })
 
-  // 切换规则/AI：先询问，确认后重算 Step2 + Step5
   const handleModeChange = (next) => {
     if (next === mode) return
     Modal.confirm({
       title: `切换到${next === 'ai' ? 'AI' : '规则'}模式`,
-      content: '将按新模式重新进行岗位分类与简历分配，是否继续？',
+      content: '将按新模式重新进行简历分类、分配与下发，是否继续？',
       okText: '重新处理',
       onOk: async () => {
         setMode(next)
@@ -78,7 +113,113 @@ export default function AllocationsPage() {
     }
   }
 
-  // ids 为空 -> 按当前筛选导出全部
+  const handleBulkDispatch = (ids) => {
+    const isSelected = ids?.length > 0
+    Modal.confirm({
+      title: isSelected ? '批量下发选中简历？' : '一键下发当前筛选下全部简历？',
+      content: isSelected
+        ? `将下发选中的 ${ids.length} 条待下发记录，其他状态会自动跳过。`
+        : '将按当前表格筛选条件下发全部待下发记录，其他状态会自动跳过。',
+      okText: isSelected ? '下发选中' : '下发全部',
+      onOk: async () => {
+        setBulkDispatching(true)
+        try {
+          const { data } = await bulkDispatchAllocations(
+            { ids: isSelected ? ids : [] },
+            isSelected ? undefined : lastQuery,
+          )
+          message.success(data?.detail || '批量下发完成')
+          setSelectedRowKeys([])
+          actionRef.current?.reload()
+        } catch {
+          // toasted by interceptor
+        } finally {
+          setBulkDispatching(false)
+        }
+      },
+    })
+  }
+
+  const openAssignModal = async (record) => {
+    setAssignModal({
+      open: true,
+      record,
+      contacts: [],
+      selected: record.sub_contact || undefined,
+      loading: true,
+    })
+    try {
+      const { data } = await fetchContacts({
+        contact_level: 'tertiary',
+        parent_department: record.department,
+        is_active: 'true',
+        page_size: 200,
+      })
+      setAssignModal((prev) => ({
+        ...prev,
+        contacts: data?.results || [],
+        loading: false,
+      }))
+    } catch {
+      setAssignModal((prev) => ({ ...prev, loading: false }))
+    }
+  }
+
+  const handleAssignSubContact = async () => {
+    if (!assignModal.selected) {
+      message.warning('请选择三级接口人')
+      return
+    }
+    setAssignModal((prev) => ({ ...prev, loading: true }))
+    try {
+      await assignSubContact(assignModal.record.id, {
+        sub_contact_id: assignModal.selected,
+      })
+      message.success('已转派给三级接口人')
+      setAssignModal({
+        open: false,
+        record: null,
+        contacts: [],
+        selected: undefined,
+        loading: false,
+      })
+      actionRef.current?.reload()
+    } catch {
+      setAssignModal((prev) => ({ ...prev, loading: false }))
+    }
+  }
+
+  const openFeedbackModal = (record) => {
+    setFeedbackModal({
+      open: true,
+      record,
+      result: 'passed',
+      note: '',
+      loading: false,
+    })
+  }
+
+  const handleFeedback = async () => {
+    setFeedbackModal((prev) => ({ ...prev, loading: true }))
+    try {
+      await submitAllocationFeedback(feedbackModal.record.id, {
+        result: feedbackModal.result,
+        note: feedbackModal.note,
+      })
+      message.success('反馈已提交')
+      setFeedbackModal({
+        open: false,
+        record: null,
+        result: 'passed',
+        note: '',
+        loading: false,
+      })
+      actionRef.current?.reload()
+    } catch {
+      setFeedbackModal((prev) => ({ ...prev, loading: false }))
+    }
+  }
+
   const handleExport = async (ids) => {
     setExporting(true)
     try {
@@ -103,44 +244,78 @@ export default function AllocationsPage() {
   const columns = [
     { title: '候选人', dataIndex: 'candidate_name', width: 120, fixed: 'left' },
     { title: '投递岗位', dataIndex: 'position_name', ellipsis: true },
+    {
+      title: '来源',
+      dataIndex: 'source',
+      width: 80,
+      search: false,
+      render: (value) => SOURCE_TEXT[value] || value || '-',
+    },
     { title: '分配部门', dataIndex: 'department_name', width: 160 },
-    { title: '接口人', dataIndex: 'contact_name', width: 120 },
-    { title: '分配理由', dataIndex: 'reason', ellipsis: true, search: false },
+    { title: '二级接口人', dataIndex: 'contact_name', width: 120 },
+    { title: '三级接口人', dataIndex: 'sub_contact_name', width: 120 },
+    { title: '分配理由', dataIndex: 'match_reason', ellipsis: true, search: false },
     {
       title: '状态',
       dataIndex: 'status',
-      width: 110,
+      width: 120,
       valueType: 'select',
       valueEnum: STATUS_ENUM,
     },
     {
       title: '操作',
       valueType: 'option',
-      width: isContact ? 90 : 160,
+      width: isContact ? 150 : 170,
       fixed: 'right',
       render: (_, record) => {
-        const dispatched = record.status === 'dispatched'
+        const canDispatch = !isContact && record.status === 'pending_dispatch'
+        const canAssign =
+          isSecondaryContact &&
+          ['dispatched_l2', 'assigned_l3'].includes(record.status) &&
+          !record.feedback_at
+        const canFeedback =
+          isTertiaryContact && record.status === 'assigned_l3' && !record.feedback_at
         return (
           <Space>
             <a onClick={() => handleExport([record.id])}>导出</a>
-            {!isContact && (
+            {canDispatch && (
               <Popconfirm
-                title="确认下发该简历到 WeLink？"
+                title="确认下发该简历到二级接口人？"
                 onConfirm={() => handleDispatch(record)}
-                disabled={dispatched}
               >
                 <Button
                   type="link"
                   size="small"
                   style={{ padding: 0 }}
-                  disabled={dispatched}
                   loading={dispatchingId === record.id}
                 >
-                  下发
+                  下发二级
                 </Button>
               </Popconfirm>
             )}
-            {!isContact && dispatched && <Tag color="green">已下发</Tag>}
+            {canAssign && (
+              <Button
+                type="link"
+                size="small"
+                style={{ padding: 0 }}
+                onClick={() => openAssignModal(record)}
+              >
+                {record.sub_contact ? '改派' : '转派'}
+              </Button>
+            )}
+            {canFeedback && (
+              <Button
+                type="link"
+                size="small"
+                style={{ padding: 0 }}
+                onClick={() => openFeedbackModal(record)}
+              >
+                反馈
+              </Button>
+            )}
+            {!canDispatch && !canAssign && !canFeedback && record.feedback_at && (
+              <Tag color="green">已反馈</Tag>
+            )}
           </Space>
         )
       },
@@ -152,8 +327,10 @@ export default function AllocationsPage() {
       title="简历分配"
       content={
         isContact
-          ? '分配给你的简历，可单条或批量导出简历文件。'
-          : 'Step5 分配结果，可逐条下发到 WeLink，并导出候选人简历文件。'
+          ? isSecondaryContact
+            ? 'HR 下发给你的分配尝试，可选择本二级部门下的三级接口人转派。'
+            : '转派给你的分配尝试，可导出简历并提交通过/未通过反馈。'
+          : '简历分类、分配与下发尝试，可逐条下发到二级接口人，并导出候选人简历文件。'
       }
       extra={
         isContact
@@ -177,7 +354,7 @@ export default function AllocationsPage() {
         actionRef={actionRef}
         rowKey="id"
         columns={columns}
-        scroll={{ x: 1100 }}
+        scroll={{ x: 1250 }}
         search={{ labelWidth: 'auto' }}
         pagination={{ defaultPageSize: 10, showSizeChanger: true }}
         rowSelection={{
@@ -187,10 +364,32 @@ export default function AllocationsPage() {
         tableAlertOptionRender={() => (
           <Space>
             <a onClick={() => handleExport(selectedRowKeys)}>导出选中</a>
+            {!isContact && (
+              <a onClick={() => handleBulkDispatch(selectedRowKeys)}>下发选中</a>
+            )}
             <a onClick={() => setSelectedRowKeys([])}>取消选择</a>
           </Space>
         )}
         toolBarRender={() => [
+          !isContact && (
+            <Button
+              key="dispatch-selected"
+              disabled={selectedRowKeys.length === 0}
+              loading={bulkDispatching}
+              onClick={() => handleBulkDispatch(selectedRowKeys)}
+            >
+              下发选中{selectedRowKeys.length ? `(${selectedRowKeys.length})` : ''}
+            </Button>
+          ),
+          !isContact && (
+            <Button
+              key="dispatch-all"
+              loading={bulkDispatching}
+              onClick={() => handleBulkDispatch([])}
+            >
+              一键全部下发
+            </Button>
+          ),
           <Button
             key="export-selected"
             icon={<DownloadOutlined />}
@@ -212,13 +411,13 @@ export default function AllocationsPage() {
         ]}
         request={async (params) => {
           const { current, pageSize, status } = params
-          const query = { status }
+          const query = { status, demo_role: isContact ? role : undefined }
           setLastQuery(query)
           try {
             const { data } = await fetchAllocations({
               page: current,
               page_size: pageSize,
-              status,
+              ...query,
             })
             return {
               data: data?.results || [],
@@ -230,6 +429,78 @@ export default function AllocationsPage() {
           }
         }}
       />
+      <Modal
+        title="转派三级接口人"
+        open={assignModal.open}
+        confirmLoading={assignModal.loading}
+        onOk={handleAssignSubContact}
+        onCancel={() =>
+          setAssignModal({
+            open: false,
+            record: null,
+            contacts: [],
+            selected: undefined,
+            loading: false,
+          })
+        }
+        okText="转派"
+      >
+        <Select
+          style={{ width: '100%' }}
+          placeholder="选择本二级部门下的三级接口人"
+          value={assignModal.selected}
+          loading={assignModal.loading}
+          options={assignModal.contacts.map((contact) => ({
+            value: contact.id,
+            label: `${contact.name}（${contact.department_name || '未绑定部门'}）`,
+          }))}
+          onChange={(value) =>
+            setAssignModal((prev) => ({ ...prev, selected: value }))
+          }
+        />
+      </Modal>
+      <Modal
+        title="提交反馈"
+        open={feedbackModal.open}
+        confirmLoading={feedbackModal.loading}
+        onOk={handleFeedback}
+        onCancel={() =>
+          setFeedbackModal({
+            open: false,
+            record: null,
+            result: 'passed',
+            note: '',
+            loading: false,
+          })
+        }
+        okText="提交"
+      >
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <Radio.Group
+            value={feedbackModal.result}
+            onChange={(event) =>
+              setFeedbackModal((prev) => ({
+                ...prev,
+                result: event.target.value,
+              }))
+            }
+          >
+            <Radio.Button value="passed">通过</Radio.Button>
+            <Radio.Button value="rejected">未通过</Radio.Button>
+          </Radio.Group>
+          <Input.TextArea
+            rows={4}
+            placeholder="备注（可选）"
+            value={feedbackModal.note}
+            onChange={(event) =>
+              setFeedbackModal((prev) => ({
+                ...prev,
+                note: event.target.value,
+              }))
+            }
+          />
+        </Space>
+      </Modal>
       {modal}
     </PageContainer>
   )

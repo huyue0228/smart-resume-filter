@@ -16,6 +16,42 @@ export default function DepartmentsPage() {
     { title: '工号', dataIndex: 'employee_no', width: 140 },
     { title: '所属部门', dataIndex: 'department_name', ellipsis: true, search: false },
     {
+      title: '部门层级',
+      dataIndex: 'department_level',
+      width: 100,
+      search: false,
+      render: (value) => (value === 3 ? '三级部门' : value === 2 ? '二级部门' : '-'),
+    },
+    {
+      title: '接口人层级',
+      dataIndex: 'contact_level',
+      width: 120,
+      valueEnum: {
+        secondary: { text: '二级接口人' },
+        tertiary: { text: '三级接口人' },
+      },
+    },
+    {
+      title: '可转派',
+      dataIndex: 'can_delegate',
+      width: 90,
+      search: false,
+      render: (_, record) =>
+        record.contact_level === 'secondary' && record.can_delegate ? (
+          <Tag color="green">是</Tag>
+        ) : (
+          '-'
+        ),
+    },
+    {
+      title: '状态',
+      dataIndex: 'is_active',
+      width: 90,
+      search: false,
+      render: (value) =>
+        value ? <Tag color="green">启用</Tag> : <Tag color="default">停用</Tag>,
+    },
+    {
       title: '招聘主体',
       dataIndex: 'entity',
       width: 140,
@@ -27,7 +63,7 @@ export default function DepartmentsPage() {
   return (
     <PageContainer
       title="部门接口人"
-      content="二层部门接口人名单（姓名 / 工号 / 所属部门），简历下发的接收人。可导入维护。"
+      content="二级/三级部门接口人名单，可导入维护；二级接口人负责转派，三级接口人负责反馈。"
     >
       <ProTable
         actionRef={actionRef}

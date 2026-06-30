@@ -1,7 +1,4 @@
-"""流水线编排：单步或一键全流程，记录 ProcessingRun。
-
-步骤顺序：院校分类(Step3)提前，保证 Step5 分配时目标院校已就绪。
-"""
+"""流水线编排：单步或一键全流程，记录 ProcessingRun。"""
 from django.utils import timezone
 
 from apps.core.models import ProcessingRun
@@ -10,14 +7,15 @@ from .services import allocate, classify_job, classify_school, dedup, demand
 
 STEP_FUNCS = {
     "step1": lambda mode, scope: dedup.run(scope),
-    "step2": lambda mode, scope: classify_job.run(scope, mode),
+    "step2": lambda mode, scope: allocate.run(scope, mode),
     "step3": lambda mode, scope: classify_school.run(scope),
     "step4": lambda mode, scope: demand.run(scope),
+    # 兼容旧 demo 入口。当前设计中分配已经合并进 Step2。
     "step5": lambda mode, scope: allocate.run(scope, mode),
 }
 
-# 一键全流程执行顺序（院校分类提前）
-STEP_ORDER = ["step1", "step3", "step2", "step4", "step5"]
+# 一键全流程：前置院校分类、需求录入先完成，再执行候选人主流程。
+STEP_ORDER = ["step3", "step4", "step1", "step2"]
 
 
 def run_step(step, mode="rule", scope=None):
