@@ -12,6 +12,21 @@ Tech stack:
 - Frontend: Vite + React 18 + Ant Design Pro, JavaScript `.jsx` only.
 - Docs: `docs/` contains four design documents: `需求描述.md`, `后端设计.md`, `数据库设计.md`, `前端设计.md`.
 
+## Docs Workflow
+
+The four design documents under `docs/` are the source of truth for product and implementation decisions. Before changing backend, frontend, database models, or workflow behavior, read the relevant design document first and keep implementation aligned with it.
+
+When modifying design documents under `docs/`:
+
+1. Read the current related docs before editing; do not rely on memory.
+2. Update the target document, keeping the original requirement intent unless the user explicitly changes it.
+3. Ask the document-sync agent to check and synchronize related wording across `需求描述.md`, `后端设计.md`, `数据库设计.md`, and `前端设计.md`.
+4. Ask the same persistent reviewer agent to review the document changes. Reuse the existing reviewer in the session; only create a new reviewer if the old one is unavailable.
+5. Run `git diff --check -- docs/需求描述.md docs/后端设计.md docs/前端设计.md docs/数据库设计.md` and use `rg` when needed to check for stale wording.
+6. Stage and commit the involved docs after review passes. Do not push unless the user explicitly asks.
+
+Do not create additional design documents casually. Prefer updating the four established documents to avoid multi-document drift.
+
 ## Common Commands
 
 Backend, from `backend/`:
@@ -65,7 +80,9 @@ There is no dedicated test suite in the current repo.
 - Entry point: `backend/apps/pipeline/runner.py`, `run_step(step, mode, scope)`.
 - The `all` order is intentionally `step1`, `step3`, `step2`, `step4`; do not assume numeric order. `step5` is only a legacy allocation alias, and new frontend/backend work should prefer the Step2 allocation flow. Step3 must run before allocation so school tags are ready.
 - Step implementations live in `backend/apps/pipeline/services/`.
-- `strategies.py` exposes `RuleStrategy` and `AIStrategy`; `AIStrategy` currently falls back to rules with explanatory text.
+- `strategies.py` exposes `RuleStrategy` and `AIStrategy`; existing code may still contain AI placeholder or rule-fallback behavior, but new development must follow the AI Agent screening design in the four docs.
+- AI Agent screening is a hard-rule-constrained recommendation flow: it only evaluates the candidate's current effective volunteer, never skips volunteer order or school admission rules, and never automatically falls back to Rule after AI failure.
+- AI failures, timeouts, parse failures, invalid output, missing references, and guardrail blocks should be recorded for HR handling. HR chooses retry AI, switch to Rule, manual assignment, or archive handling.
 - Frontend drives processing by calling `/api/pipeline/run/` step by step via `frontend/src/components/useProcessRunner.jsx`.
 
 ## API Notes
