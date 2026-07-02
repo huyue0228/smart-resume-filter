@@ -368,6 +368,15 @@ class AssignmentAttemptViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(serializers.AssignmentAttemptSerializer(attempt).data)
 
+    @action(detail=True, methods=["post"], url_path="confirm-review")
+    def confirm_review(self, request, pk=None):
+        attempt = self.get_object()
+        try:
+            attempt = allocate_service.confirm_review(attempt)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(serializers.AssignmentAttemptSerializer(attempt).data)
+
     @action(detail=True, methods=["post"], url_path="feedback")
     def feedback(self, request, pk=None):
         attempt = self.get_object()

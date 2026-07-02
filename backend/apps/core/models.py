@@ -266,6 +266,7 @@ class AssignmentAttempt(models.Model):
     ]
 
     STATUS_PENDING_DISPATCH = "pending_dispatch"
+    STATUS_PENDING_REVIEW = "pending_review"
     STATUS_DISPATCHED_L2 = "dispatched_l2"
     STATUS_ASSIGNED_L3 = "assigned_l3"
     STATUS_PASSED = "passed"
@@ -273,6 +274,7 @@ class AssignmentAttempt(models.Model):
     STATUS_CANCELLED = "cancelled"
     STATUS_CHOICES = [
         (STATUS_PENDING_DISPATCH, "待下发"),
+        (STATUS_PENDING_REVIEW, "待 HR 复核"),
         (STATUS_DISPATCHED_L2, "已下发二级"),
         (STATUS_ASSIGNED_L3, "已转派三级"),
         (STATUS_PASSED, "已通过"),

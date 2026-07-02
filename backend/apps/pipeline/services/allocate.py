@@ -27,6 +27,8 @@ def _matches_rule(candidate, rule):
 
 
 def _matched_rule(candidate, rules):
+    if not rules:
+        return None
     for rule in rules:
         if _matches_rule(candidate, rule):
             return rule
@@ -177,6 +179,7 @@ def _create_attempt(
     agent_decision=None,
     confidence_score=None,
     review_required=False,
+    status=None,
 ):
     now = timezone.now()
     sub_department = sub_contact.department if sub_contact else None
@@ -185,7 +188,8 @@ def _create_attempt(
         resume=resume,
         attempt_no=_next_attempt_no(workflow),
         source=source,
-        status=(
+        status=status
+        or (
             m.AssignmentAttempt.STATUS_ASSIGNED_L3
             if sub_contact
             else m.AssignmentAttempt.STATUS_PENDING_DISPATCH
@@ -281,13 +285,27 @@ def _ensure_resume_profile(resume):
     return profile
 
 
+def _config_float(key, default):
+    config = m.Config.objects.filter(key=key).first()
+    value = config.value if config else default
+    if isinstance(value, dict):
+        value = value.get("value", default)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _create_agent_decision(workflow, resume, profile, job, contact, reason):
     confidence = 0.78 if job and contact else 0.35
-    recommendation = (
-        m.AgentDispatchDecision.RECOMMEND_DISPATCH
-        if confidence >= 0.65
-        else m.AgentDispatchDecision.RECOMMEND_REVIEW
-    )
+    dispatch_threshold = _config_float("ai_dispatch_threshold", 0.75)
+    review_threshold = _config_float("ai_review_threshold", 0.5)
+    if confidence >= dispatch_threshold:
+        recommendation = m.AgentDispatchDecision.RECOMMEND_DISPATCH
+    elif confidence >= review_threshold:
+        recommendation = m.AgentDispatchDecision.RECOMMEND_REVIEW
+    else:
+        recommendation = m.AgentDispatchDecision.RECOMMEND_ARCHIVE
     risks = [] if recommendation == m.AgentDispatchDecision.RECOMMEND_DISPATCH else ["岗位或接口人匹配不足"]
     return m.AgentDispatchDecision.objects.create(
         workflow=workflow,
@@ -315,7 +333,7 @@ def _create_agent_decision(workflow, resume, profile, job, contact, reason):
 def _create_next_auto_attempt(workflow, rules, mode="rule"):
     candidate = workflow.candidate
     matched_rule = _matched_rule(candidate, rules)
-    if not matched_rule:
+    if rules and not matched_rule:
         _archive(
             workflow,
             m.CandidateWorkflow.ARCHIVE_SCHOOL_RULE_NOT_MATCHED,
@@ -350,13 +368,27 @@ def _create_next_auto_attempt(workflow, rules, mode="rule"):
             decision = _create_agent_decision(
                 workflow, resume, profile, job, contact, classify_reason
             )
-            if decision.recommendation != m.AgentDispatchDecision.RECOMMEND_DISPATCH:
+            if decision.recommendation == m.AgentDispatchDecision.RECOMMEND_ARCHIVE:
                 _archive(
                     workflow,
                     m.CandidateWorkflow.ARCHIVE_AGENT_NO_RECOMMENDATION,
-                    "AI(demo) 未达到自动下发置信度，需要 HR 人工复核",
+                    "AI(demo) 低于复核置信度，建议归档或人工处理",
                 )
                 return None
+            if decision.recommendation == m.AgentDispatchDecision.RECOMMEND_REVIEW:
+                return _create_attempt(
+                    workflow=workflow,
+                    resume=resume,
+                    contact=contact,
+                    source=m.AssignmentAttempt.SOURCE_AI,
+                    mode=mode,
+                    matched_rule=matched_rule,
+                    agent_decision=decision,
+                    confidence_score=decision.confidence_score,
+                    match_reason=decision.reason,
+                    review_required=True,
+                    status=m.AssignmentAttempt.STATUS_PENDING_REVIEW,
+                )
             return _create_attempt(
                 workflow=workflow,
                 resume=resume,
@@ -376,7 +408,11 @@ def _create_next_auto_attempt(workflow, rules, mode="rule"):
             source=m.AssignmentAttempt.SOURCE_RULE,
             mode=mode,
             matched_rule=matched_rule,
-            match_reason=f"命中院校规则：{matched_rule.name}",
+            match_reason=(
+                f"命中院校规则：{matched_rule.name}"
+                if matched_rule
+                else "未启用院校准入规则，按设计视为通过"
+            ),
         )
 
     if not had_resume:
@@ -403,8 +439,6 @@ def _create_next_auto_attempt(workflow, rules, mode="rule"):
 @transaction.atomic
 def run(scope=None, mode="rule"):
     rules = _active_rules()
-    if not rules:
-        raise ValueError("请先配置并启用院校标签准入规则")
 
     cancelled = 0
     created = 0
@@ -613,13 +647,6 @@ def submit_feedback(attempt, result, note=""):
         ]
     )
     rules = _active_rules()
-    if not rules:
-        _archive(
-            workflow,
-            m.CandidateWorkflow.ARCHIVE_NO_ACTIVE_SCHOOL_RULE,
-            "反馈未通过后续分配时没有启用院校标签准入规则",
-        )
-        return attempt
     created = _create_next_auto_attempt(
         workflow, rules, mode=workflow.dispatch_strategy or attempt.match_mode or "rule"
     )
@@ -627,4 +654,14 @@ def submit_feedback(attempt, result, note=""):
         workflow.archive_reason = m.CandidateWorkflow.ARCHIVE_ALL_REJECTED
         workflow.archive_detail = "全部可尝试志愿均已反馈未通过"
         workflow.save(update_fields=["archive_reason", "archive_detail", "updated_at"])
+    return attempt
+
+
+@transaction.atomic
+def confirm_review(attempt):
+    if attempt.status != m.AssignmentAttempt.STATUS_PENDING_REVIEW:
+        raise ValueError("仅待 HR 复核的 AI 尝试可以确认下发")
+    attempt.status = m.AssignmentAttempt.STATUS_PENDING_DISPATCH
+    attempt.review_required = False
+    attempt.save(update_fields=["status", "review_required", "updated_at"])
     return attempt

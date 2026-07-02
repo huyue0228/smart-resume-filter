@@ -1,4 +1,4 @@
-"""初始化省份南北字典与基础配置。"""
+"""初始化 demo 基础配置。"""
 from django.core.management.base import BaseCommand
 
 from apps.core import models as m
@@ -14,7 +14,7 @@ SOUTH = [
 
 
 class Command(BaseCommand):
-    help = "初始化省份南北字典与基础配置"
+    help = "初始化 demo 基础配置"
 
     def handle(self, *args, **options):
         for p in NORTH:
@@ -27,14 +27,6 @@ class Command(BaseCommand):
         m.Config.objects.update_or_create(
             key="welink_enabled", defaults={"value": False}
         )
-        if not m.SchoolTagRule.objects.exists():
-            m.SchoolTagRule.objects.create(
-                name="Demo 默认目标院校",
-                first_degree_tags=["平台A", "平台B", "平台C"],
-                highest_degree_tags=["平台A", "平台B", "平台C"],
-                is_active=True,
-                priority=0,
-            )
         self.stdout.write(
-            self.style.SUCCESS("基础数据已初始化（省份字典 + 基础配置 + Demo 院校规则）")
+            self.style.SUCCESS("基础数据已初始化（省份字典 + 基础配置）")
         )

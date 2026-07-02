@@ -60,6 +60,9 @@ export function fetchAllocations(params) {
 export function dispatchAllocation(id) {
   return client.post(`/workflow-attempts/${id}/dispatch/`)
 }
+export function confirmReviewAllocation(id) {
+  return client.post(`/workflow-attempts/${id}/confirm-review/`)
+}
 export function bulkDispatchAllocations(body, params) {
   return client.post('/workflow-attempts/bulk-dispatch/', body, { params })
 }

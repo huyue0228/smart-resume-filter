@@ -16,6 +16,7 @@ import { DownloadOutlined } from '@ant-design/icons'
 import {
   fetchAllocations,
   dispatchAllocation,
+  confirmReviewAllocation,
   bulkDispatchAllocations,
   assignSubContact,
   submitAllocationFeedback,
@@ -32,6 +33,7 @@ const REPROCESS_STEPS = [
 
 const STATUS_ENUM = {
   pending_dispatch: { text: '待下发', status: 'Default' },
+  pending_review: { text: '待复核', status: 'Warning' },
   dispatched_l2: { text: '已下发二级', status: 'Processing' },
   assigned_l3: { text: '已转派三级', status: 'Processing' },
   passed: { text: '已通过', status: 'Success' },
@@ -105,6 +107,19 @@ export default function AllocationsPage() {
     try {
       const { data } = await dispatchAllocation(record.id)
       message.success(data?.detail || '下发成功')
+      actionRef.current?.reload()
+    } catch {
+      // toasted by interceptor
+    } finally {
+      setDispatchingId(null)
+    }
+  }
+
+  const handleConfirmReview = async (record) => {
+    setDispatchingId(record.id)
+    try {
+      await confirmReviewAllocation(record.id)
+      message.success('已确认，进入待下发')
       actionRef.current?.reload()
     } catch {
       // toasted by interceptor
@@ -269,6 +284,7 @@ export default function AllocationsPage() {
       fixed: 'right',
       render: (_, record) => {
         const canDispatch = !isContact && record.status === 'pending_dispatch'
+        const canConfirmReview = !isContact && record.status === 'pending_review'
         const canAssign =
           isSecondaryContact &&
           ['dispatched_l2', 'assigned_l3'].includes(record.status) &&
@@ -293,6 +309,21 @@ export default function AllocationsPage() {
                 </Button>
               </Popconfirm>
             )}
+            {canConfirmReview && (
+              <Popconfirm
+                title="确认采纳 AI 复核建议并进入待下发？"
+                onConfirm={() => handleConfirmReview(record)}
+              >
+                <Button
+                  type="link"
+                  size="small"
+                  style={{ padding: 0 }}
+                  loading={dispatchingId === record.id}
+                >
+                  确认下发
+                </Button>
+              </Popconfirm>
+            )}
             {canAssign && (
               <Button
                 type="link"
@@ -313,9 +344,11 @@ export default function AllocationsPage() {
                 反馈
               </Button>
             )}
-            {!canDispatch && !canAssign && !canFeedback && record.feedback_at && (
-              <Tag color="green">已反馈</Tag>
-            )}
+            {!canDispatch &&
+              !canConfirmReview &&
+              !canAssign &&
+              !canFeedback &&
+              record.feedback_at && <Tag color="green">已反馈</Tag>}
           </Space>
         )
       },
