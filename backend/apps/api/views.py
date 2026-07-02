@@ -436,6 +436,9 @@ class AgentDispatchDecisionViewSet(viewsets.ReadOnlyModelViewSet):
         qs = m.AgentDispatchDecision.objects.select_related(
             "workflow__candidate",
             "resume",
+            "processing_run",
+            "evaluated_job",
+            "recommended_job",
             "recommended_department",
             "recommended_contact",
         ).order_by("-created_at")
@@ -445,6 +448,25 @@ class AgentDispatchDecisionViewSet(viewsets.ReadOnlyModelViewSet):
         if p.get("workflow"):
             qs = qs.filter(workflow_id=p["workflow"])
         return qs
+
+    @action(detail=True, methods=["post"], url_path="retry")
+    def retry(self, request, pk=None):
+        decision = self.get_object()
+        try:
+            new_decision, attempt = allocate_service.retry_agent_decision(decision)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {
+                "detail": "已重新发起 AI 处理",
+                "decision": serializers.AgentDispatchDecisionSerializer(new_decision).data,
+                "attempt": (
+                    serializers.AssignmentAttemptSerializer(attempt).data
+                    if attempt
+                    else None
+                ),
+            }
+        )
 
 
 class ProcessingRunViewSet(viewsets.ReadOnlyModelViewSet):

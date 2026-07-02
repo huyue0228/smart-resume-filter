@@ -307,10 +307,17 @@ class AssignmentAttemptSerializer(serializers.ModelSerializer):
         return {
             "id": decision.id,
             "recommendation": decision.recommendation,
+            "recommended_job": decision.recommended_job_id,
+            "matched_job_category": decision.matched_job_category,
             "confidence_score": decision.confidence_score,
+            "score_breakdown": decision.score_breakdown,
+            "summary": decision.summary,
             "reason": decision.reason,
             "evidence": decision.evidence,
             "risks": decision.risks,
+            "risk_flags": decision.risk_flags,
+            "error_code": decision.error_code,
+            "error_message": decision.error_message,
         }
 
     class Meta:
@@ -404,6 +411,19 @@ class AgentDispatchDecisionSerializer(serializers.ModelSerializer):
     recommended_contact_name = serializers.CharField(
         source="recommended_contact.name", read_only=True, default=""
     )
+    evaluated_job_name = serializers.SerializerMethodField()
+    recommended_job_name = serializers.SerializerMethodField()
+
+    def _job_name(self, job):
+        if not job:
+            return ""
+        return job.public_name or job.position_name or f"Job#{job.pk}"
+
+    def get_evaluated_job_name(self, obj):
+        return self._job_name(obj.evaluated_job)
+
+    def get_recommended_job_name(self, obj):
+        return self._job_name(obj.recommended_job)
 
     class Meta:
         model = m.AgentDispatchDecision
@@ -411,20 +431,32 @@ class AgentDispatchDecisionSerializer(serializers.ModelSerializer):
             "id",
             "workflow",
             "resume",
+            "processing_run",
             "candidate_name",
             "apply_id",
             "position_name",
             "profile",
             "recommendation",
+            "evaluated_job",
+            "evaluated_job_name",
+            "recommended_job",
+            "recommended_job_name",
+            "matched_job_category",
             "recommended_department",
             "recommended_department_name",
             "recommended_contact",
             "recommended_contact_name",
             "confidence_score",
+            "score_breakdown",
+            "summary",
             "reason",
             "evidence",
             "risks",
+            "risk_flags",
+            "error_code",
+            "error_message",
             "model_name",
             "prompt_version",
+            "decision_version",
             "created_at",
         ]

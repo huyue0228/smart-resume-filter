@@ -9,6 +9,7 @@ from ..strategies import get_strategy
 
 
 UNFEEDBACKED_STATUSES = [
+    m.AssignmentAttempt.STATUS_PENDING_REVIEW,
     m.AssignmentAttempt.STATUS_PENDING_DISPATCH,
     m.AssignmentAttempt.STATUS_DISPATCHED_L2,
     m.AssignmentAttempt.STATUS_ASSIGNED_L3,
@@ -296,6 +297,19 @@ def _config_float(key, default):
         return default
 
 
+def _retry_allowed(decision):
+    if decision.error_code:
+        return True
+    if decision.recommendation == m.AgentDispatchDecision.RECOMMEND_ARCHIVE:
+        return True
+    if (
+        decision.confidence_score is not None
+        and decision.confidence_score < _config_float("ai_dispatch_threshold", 0.75)
+    ):
+        return True
+    return False
+
+
 def _create_agent_decision(workflow, resume, profile, job, contact, reason):
     confidence = 0.78 if job and contact else 0.35
     dispatch_threshold = _config_float("ai_dispatch_threshold", 0.75)
@@ -311,10 +325,21 @@ def _create_agent_decision(workflow, resume, profile, job, contact, reason):
         workflow=workflow,
         resume=resume,
         profile=profile,
+        processing_run=getattr(workflow, "_processing_run", None),
         recommendation=recommendation,
+        evaluated_job=job,
+        recommended_job=job,
+        matched_job_category=job.category if job else "",
         recommended_department=contact.department if contact else None,
         recommended_contact=contact,
         confidence_score=confidence,
+        score_breakdown={
+            "major_match": 0.75 if resume.candidate.highest_major else 0.45,
+            "job_requirement": 0.8 if job else 0.2,
+            "department_certainty": 0.8 if contact else 0.2,
+            "resume_quality": 0.6 if profile.parsed_text else 0.3,
+        },
+        summary="AI(demo) 生成候选人当前志愿分流建议",
         reason=reason or "AI(demo)：基于岗位名称、专业方向与需求表生成分流建议",
         evidence=[
             item
@@ -325,12 +350,111 @@ def _create_agent_decision(workflow, resume, profile, job, contact, reason):
             if item
         ],
         risks=risks,
+        risk_flags=risks,
         model_name="demo-agent",
         prompt_version="demo-v1",
+        decision_version="demo-v1",
     )
 
 
-def _create_next_auto_attempt(workflow, rules, mode="rule"):
+def _create_agent_failure_decision(
+    workflow,
+    resume,
+    *,
+    error_code,
+    error_message,
+    profile=None,
+):
+    return m.AgentDispatchDecision.objects.create(
+        workflow=workflow,
+        resume=resume,
+        profile=profile,
+        processing_run=getattr(workflow, "_processing_run", None),
+        recommendation=None,
+        evaluated_job=None,
+        recommended_job=None,
+        matched_job_category="",
+        recommended_department=None,
+        recommended_contact=None,
+        confidence_score=None,
+        score_breakdown={},
+        summary="AI 未形成有效下发建议",
+        reason="",
+        evidence=[],
+        risks=[error_message],
+        risk_flags=[error_code],
+        error_code=error_code,
+        error_message=error_message,
+        model_name="demo-agent",
+        prompt_version="demo-v1",
+        decision_version="demo-v1",
+    )
+
+
+def _process_ai_recommendation(
+    workflow,
+    resume,
+    *,
+    matched_rule,
+    job,
+    contact,
+    classify_reason="",
+):
+    _touch_workflow(workflow, resume, "ai")
+    if not resume.resume_file:
+        _create_agent_failure_decision(
+            workflow,
+            resume,
+            error_code="pdf_missing",
+            error_message="缺少 PDF 简历文件，AI 无法读取简历正文",
+        )
+        _archive(
+            workflow,
+            m.CandidateWorkflow.ARCHIVE_AGENT_NO_RECOMMENDATION,
+            "AI 缺少 PDF 简历文件，建议归档或人工处理",
+        )
+        return None
+
+    profile = _ensure_resume_profile(resume)
+    decision = _create_agent_decision(
+        workflow, resume, profile, job, contact, classify_reason
+    )
+    if decision.recommendation == m.AgentDispatchDecision.RECOMMEND_ARCHIVE:
+        _archive(
+            workflow,
+            m.CandidateWorkflow.ARCHIVE_AGENT_NO_RECOMMENDATION,
+            "AI(demo) 低于复核置信度，建议归档或人工处理",
+        )
+        return None
+    if decision.recommendation == m.AgentDispatchDecision.RECOMMEND_REVIEW:
+        return _create_attempt(
+            workflow=workflow,
+            resume=resume,
+            contact=contact,
+            source=m.AssignmentAttempt.SOURCE_AI,
+            mode="ai",
+            matched_rule=matched_rule,
+            agent_decision=decision,
+            confidence_score=decision.confidence_score,
+            match_reason=decision.reason,
+            review_required=True,
+            status=m.AssignmentAttempt.STATUS_PENDING_REVIEW,
+        )
+    return _create_attempt(
+        workflow=workflow,
+        resume=resume,
+        contact=contact,
+        source=m.AssignmentAttempt.SOURCE_AI,
+        mode="ai",
+        matched_rule=matched_rule,
+        agent_decision=decision,
+        confidence_score=decision.confidence_score,
+        match_reason=decision.reason,
+    )
+
+
+def _create_next_auto_attempt(workflow, rules, mode="rule", processing_run=None):
+    workflow._processing_run = processing_run
     candidate = workflow.candidate
     matched_rule = _matched_rule(candidate, rules)
     if rules and not matched_rule:
@@ -364,41 +488,13 @@ def _create_next_auto_attempt(workflow, rules, mode="rule"):
             continue
 
         if mode == "ai":
-            profile = _ensure_resume_profile(resume)
-            decision = _create_agent_decision(
-                workflow, resume, profile, job, contact, classify_reason
-            )
-            if decision.recommendation == m.AgentDispatchDecision.RECOMMEND_ARCHIVE:
-                _archive(
-                    workflow,
-                    m.CandidateWorkflow.ARCHIVE_AGENT_NO_RECOMMENDATION,
-                    "AI(demo) 低于复核置信度，建议归档或人工处理",
-                )
-                return None
-            if decision.recommendation == m.AgentDispatchDecision.RECOMMEND_REVIEW:
-                return _create_attempt(
-                    workflow=workflow,
-                    resume=resume,
-                    contact=contact,
-                    source=m.AssignmentAttempt.SOURCE_AI,
-                    mode=mode,
-                    matched_rule=matched_rule,
-                    agent_decision=decision,
-                    confidence_score=decision.confidence_score,
-                    match_reason=decision.reason,
-                    review_required=True,
-                    status=m.AssignmentAttempt.STATUS_PENDING_REVIEW,
-                )
-            return _create_attempt(
-                workflow=workflow,
-                resume=resume,
-                contact=contact,
-                source=m.AssignmentAttempt.SOURCE_AI,
-                mode=mode,
+            return _process_ai_recommendation(
+                workflow,
+                resume,
                 matched_rule=matched_rule,
-                agent_decision=decision,
-                confidence_score=decision.confidence_score,
-                match_reason=decision.reason,
+                job=job,
+                contact=contact,
+                classify_reason=classify_reason,
             )
 
         return _create_attempt(
@@ -437,7 +533,7 @@ def _create_next_auto_attempt(workflow, rules, mode="rule"):
 
 
 @transaction.atomic
-def run(scope=None, mode="rule"):
+def run(scope=None, mode="rule", processing_run=None):
     rules = _active_rules()
 
     cancelled = 0
@@ -473,7 +569,9 @@ def run(scope=None, mode="rule"):
                 "updated_at",
             ]
         )
-        if _create_next_auto_attempt(workflow, rules, mode=mode):
+        if _create_next_auto_attempt(
+            workflow, rules, mode=mode, processing_run=processing_run
+        ):
             created += 1
 
     return (
@@ -665,3 +763,73 @@ def confirm_review(attempt):
     attempt.review_required = False
     attempt.save(update_fields=["status", "review_required", "updated_at"])
     return attempt
+
+
+@transaction.atomic
+def retry_agent_decision(decision):
+    if not _retry_allowed(decision):
+        raise ValueError("仅失败、建议归档或低于自动下发阈值的 AI 决策可以重试")
+
+    workflow = decision.workflow
+    workflow._processing_run = decision.processing_run
+    resume = decision.resume
+    _cancel_unfeedbacked_attempts(
+        workflow,
+        m.AssignmentAttempt.CANCEL_RERUN,
+        source=m.AssignmentAttempt.SOURCE_AI,
+    )
+    rules = _active_rules()
+    matched_rule = _matched_rule(resume.candidate, rules)
+    if rules and not matched_rule:
+        new_decision = _create_agent_failure_decision(
+            workflow,
+            resume,
+            error_code="guardrail_blocked",
+            error_message="候选人第一学历标签和最高学历标签未命中任何启用规则",
+        )
+        return new_decision, None
+
+    strategy = get_strategy("ai")
+    jobs = list(m.Job.objects.select_related("department").all())
+    job, _category, classify_reason = _classify_resume(resume, strategy, jobs, "ai")
+    if not job:
+        new_decision = _create_agent_failure_decision(
+            workflow,
+            resume,
+            error_code="reference_not_found",
+            error_message="AI 重试时未找到可匹配岗位",
+        )
+        return new_decision, None
+    department = _secondary_department(job.department)
+    if not department:
+        new_decision = _create_agent_failure_decision(
+            workflow,
+            resume,
+            error_code="reference_not_found",
+            error_message="AI 重试时未找到可用二级部门",
+        )
+        return new_decision, None
+    contact = _first_secondary_contact(department)
+    if not contact:
+        new_decision = _create_agent_failure_decision(
+            workflow,
+            resume,
+            error_code="reference_not_found",
+            error_message="AI 重试时未找到可用二级接口人",
+        )
+        return new_decision, None
+
+    attempt = _process_ai_recommendation(
+        workflow,
+        resume,
+        matched_rule=matched_rule,
+        job=job,
+        contact=contact,
+        classify_reason=classify_reason,
+    )
+    new_decision = (
+        attempt.agent_decision
+        if attempt
+        else workflow.agent_decisions.order_by("-created_at", "-id").first()
+    )
+    return new_decision, attempt
