@@ -19,8 +19,15 @@ router.register(
     "agent-decisions", views.AgentDispatchDecisionViewSet, basename="agentdecision"
 )
 router.register("pipeline/runs", views.ProcessingRunViewSet, basename="processingrun")
+router.register("users", views.UserViewSet, basename="user")
+router.register("roles", views.RoleViewSet, basename="role")
+router.register("configs", views.ConfigViewSet, basename="config")
 
 urlpatterns = [
+    path("auth/login/", views.AuthLoginView.as_view()),
+    path("auth/logout/", views.AuthLogoutView.as_view()),
+    path("me/", views.MeView.as_view()),
+    path("permissions/", views.PermissionTreeView.as_view()),
     path("import/", views.ImportView.as_view()),
     path("import/undo/", views.ImportUndoView.as_view()),
     path("pipeline/run/", views.PipelineRunView.as_view()),

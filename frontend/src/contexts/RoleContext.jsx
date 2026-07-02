@@ -1,34 +1,89 @@
-import { createContext, useContext, useState } from 'react'
+import { createContext, useContext, useEffect, useMemo, useState } from 'react'
+import { fetchMe, login as loginApi, logout as logoutApi } from '../api/services'
 
-// 演示用的前端角色隔离（无真实登录）：
-//   hr                —— HR / 管理员，可见全部菜单
-//   secondary_contact —— 二级接口人，可转派三级接口人
-//   tertiary_contact  —— 三级接口人，可提交反馈
-// 后续 M6 接入真实 RBAC + 登录后，这里替换为从后端会话/Token 读取角色。
 const RoleContext = createContext(null)
 
 export const ROLES = {
   hr: { label: 'HR' },
+  admin: { label: '管理员' },
   secondary_contact: { label: '二级接口人' },
   tertiary_contact: { label: '三级接口人' },
 }
 
 export function RoleProvider({ children }) {
-  const [role, setRoleState] = useState(
-    () => localStorage.getItem('srf_role') || 'hr',
-  )
-  const setRole = (r) => {
-    setRoleState(r)
-    localStorage.setItem('srf_role', r)
+  const [token, setToken] = useState(() => localStorage.getItem('srf_token') || '')
+  const [user, setUser] = useState(null)
+  const [loading, setLoading] = useState(Boolean(token))
+
+  const refreshMe = async () => {
+    if (!localStorage.getItem('srf_token')) {
+      setUser(null)
+      setLoading(false)
+      return null
+    }
+    setLoading(true)
+    try {
+      const { data } = await fetchMe()
+      setUser(data)
+      return data
+    } finally {
+      setLoading(false)
+    }
   }
+
+  useEffect(() => {
+    refreshMe().catch(() => {
+      localStorage.removeItem('srf_token')
+      setToken('')
+      setUser(null)
+      setLoading(false)
+    })
+  }, [token])
+
+  const login = async (values) => {
+    const { data } = await loginApi(values)
+    localStorage.setItem('srf_token', data.token)
+    setToken(data.token)
+    setUser(data.user)
+    return data.user
+  }
+
+  const logout = async () => {
+    try {
+      await logoutApi()
+    } catch {
+      // token may already be invalid
+    }
+    localStorage.removeItem('srf_token')
+    setToken('')
+    setUser(null)
+  }
+
+  const permissions = useMemo(() => new Set(user?.permissions || []), [user])
+  const hasPermission = (code) => permissions.has(code)
+  const role = user?.role || 'hr'
+  const isSecondaryContact = Boolean(user?.contact) && hasPermission('attempt.view_received')
+  const isTertiaryContact = Boolean(user?.contact) && hasPermission('attempt.view_assigned')
+  const isContact = isSecondaryContact || isTertiaryContact
+
   return (
     <RoleContext.Provider
       value={{
+        token,
+        user,
+        loading,
         role,
-        setRole,
-        isContact: role !== 'hr',
-        isSecondaryContact: role === 'secondary_contact',
-        isTertiaryContact: role === 'tertiary_contact',
+        roles: user?.roles || [],
+        permissions: user?.permissions || [],
+        contact: user?.contact || null,
+        isAuthenticated: Boolean(token && user),
+        login,
+        logout,
+        refreshMe,
+        hasPermission,
+        isContact,
+        isSecondaryContact,
+        isTertiaryContact,
       }}
     >
       {children}

@@ -1,6 +1,178 @@
 from rest_framework import serializers
+from django.contrib.auth.models import Group
 
+from apps.accounts.models import User
+from apps.accounts.permissions import (
+    PERMISSION_TREE,
+    permission_code,
+    permission_codename,
+    user_permission_codes,
+    user_role_names,
+)
 from apps.core import models as m
+
+
+class CurrentUserSerializer(serializers.ModelSerializer):
+    roles = serializers.SerializerMethodField()
+    permissions = serializers.SerializerMethodField()
+    contact = serializers.SerializerMethodField()
+    data_scope = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = [
+            "id",
+            "username",
+            "first_name",
+            "last_name",
+            "email",
+            "role",
+            "roles",
+            "permissions",
+            "contact",
+            "data_scope",
+            "is_superuser",
+            "is_staff",
+        ]
+
+    def get_roles(self, obj):
+        return user_role_names(obj)
+
+    def get_permissions(self, obj):
+        return sorted(user_permission_codes(obj))
+
+    def get_contact(self, obj):
+        if not obj.contact:
+            return None
+        return ContactSerializer(obj.contact).data
+
+    def get_data_scope(self, obj):
+        permissions = user_permission_codes(obj)
+        if "attempt.view_all" in permissions:
+            return {"type": "all"}
+        if obj.contact and "attempt.view_received" in permissions:
+            return {"type": "received", "contact_id": obj.contact_id}
+        if obj.contact and "attempt.view_assigned" in permissions:
+            return {"type": "assigned", "contact_id": obj.contact_id}
+        return {"type": "none"}
+
+
+class UserSerializer(serializers.ModelSerializer):
+    role_ids = serializers.PrimaryKeyRelatedField(
+        source="groups",
+        queryset=Group.objects.all(),
+        many=True,
+        required=False,
+    )
+    roles = serializers.SerializerMethodField()
+    permissions = serializers.SerializerMethodField()
+    password = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    contact_name = serializers.CharField(source="contact.name", read_only=True, default="")
+
+    class Meta:
+        model = User
+        fields = [
+            "id",
+            "username",
+            "first_name",
+            "last_name",
+            "email",
+            "role",
+            "contact",
+            "contact_name",
+            "is_active",
+            "is_staff",
+            "is_superuser",
+            "role_ids",
+            "roles",
+            "permissions",
+            "password",
+        ]
+        read_only_fields = ["is_superuser"]
+
+    def get_roles(self, obj):
+        return user_role_names(obj)
+
+    def get_permissions(self, obj):
+        return sorted(user_permission_codes(obj))
+
+    def create(self, validated_data):
+        groups = validated_data.pop("groups", [])
+        password = validated_data.pop("password", "")
+        user = User(**validated_data)
+        if password:
+            user.set_password(password)
+        else:
+            user.set_unusable_password()
+        user.save()
+        if groups:
+            user.groups.set(groups)
+        return user
+
+    def update(self, instance, validated_data):
+        groups = validated_data.pop("groups", None)
+        password = validated_data.pop("password", None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        if password:
+            instance.set_password(password)
+        instance.save()
+        if groups is not None:
+            instance.groups.set(groups)
+        return instance
+
+
+class RoleSerializer(serializers.ModelSerializer):
+    permission_codes = serializers.ListField(
+        child=serializers.CharField(), required=False, write_only=True
+    )
+    permissions = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Group
+        fields = ["id", "name", "permissions", "permission_codes"]
+
+    def get_permissions(self, obj):
+        return sorted(
+            permission_code(permission.codename)
+            for permission in obj.permissions.all()
+            if "__" in permission.codename
+        )
+
+    def _set_permissions(self, group, codes):
+        from django.contrib.auth.models import Permission
+
+        codenames = [permission_codename(code) for code in codes]
+        permissions = Permission.objects.filter(codename__in=codenames)
+        group.permissions.set(permissions)
+
+    def create(self, validated_data):
+        codes = validated_data.pop("permission_codes", None)
+        group = super().create(validated_data)
+        if codes is not None:
+            self._set_permissions(group, codes)
+        return group
+
+    def update(self, instance, validated_data):
+        codes = validated_data.pop("permission_codes", None)
+        group = super().update(instance, validated_data)
+        if codes is not None:
+            self._set_permissions(group, codes)
+        return group
+
+
+class ConfigSerializer(serializers.Serializer):
+    key = serializers.CharField(read_only=True)
+    label = serializers.CharField(read_only=True)
+    description = serializers.CharField(read_only=True)
+    value_type = serializers.CharField(read_only=True)
+    value = serializers.JSONField()
+
+
+class PermissionTreeSerializer(serializers.Serializer):
+    @staticmethod
+    def tree():
+        return PERMISSION_TREE
 
 
 class ResumeListSerializer(serializers.ModelSerializer):

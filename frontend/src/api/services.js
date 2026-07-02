@@ -1,5 +1,43 @@
 import client from './client'
 
+// ---- Auth / RBAC ----
+export function login(body) {
+  return client.post('/auth/login/', body)
+}
+export function logout() {
+  return client.post('/auth/logout/')
+}
+export function fetchMe() {
+  return client.get('/me/')
+}
+export function fetchUsers(params) {
+  return client.get('/users/', { params })
+}
+export function createUser(body) {
+  return client.post('/users/', body)
+}
+export function updateUser(id, body) {
+  return client.patch(`/users/${id}/`, body)
+}
+export function fetchRoles(params) {
+  return client.get('/roles/', { params })
+}
+export function createRole(body) {
+  return client.post('/roles/', body)
+}
+export function updateRole(id, body) {
+  return client.patch(`/roles/${id}/`, body)
+}
+export function fetchPermissionTree() {
+  return client.get('/permissions/')
+}
+export function fetchConfigs() {
+  return client.get('/configs/')
+}
+export function updateConfig(key, value) {
+  return client.patch(`/configs/${key}/`, { value })
+}
+
 // ---- Data import ----
 // POST /api/import/  (multipart)
 // fields: resume_list, jobs, schools, contacts, resume_package (all optional files)
