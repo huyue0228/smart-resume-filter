@@ -1,6 +1,178 @@
 from rest_framework import serializers
+from django.contrib.auth.models import Group
 
+from apps.accounts.models import User
+from apps.accounts.permissions import (
+    PERMISSION_TREE,
+    permission_code,
+    permission_codename,
+    user_permission_codes,
+    user_role_names,
+)
 from apps.core import models as m
+
+
+class CurrentUserSerializer(serializers.ModelSerializer):
+    roles = serializers.SerializerMethodField()
+    permissions = serializers.SerializerMethodField()
+    contact = serializers.SerializerMethodField()
+    data_scope = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = [
+            "id",
+            "username",
+            "first_name",
+            "last_name",
+            "email",
+            "role",
+            "roles",
+            "permissions",
+            "contact",
+            "data_scope",
+            "is_superuser",
+            "is_staff",
+        ]
+
+    def get_roles(self, obj):
+        return user_role_names(obj)
+
+    def get_permissions(self, obj):
+        return sorted(user_permission_codes(obj))
+
+    def get_contact(self, obj):
+        if not obj.contact:
+            return None
+        return ContactSerializer(obj.contact).data
+
+    def get_data_scope(self, obj):
+        permissions = user_permission_codes(obj)
+        if "attempt.view_all" in permissions:
+            return {"type": "all"}
+        if obj.contact and "attempt.view_received" in permissions:
+            return {"type": "received", "contact_id": obj.contact_id}
+        if obj.contact and "attempt.view_assigned" in permissions:
+            return {"type": "assigned", "contact_id": obj.contact_id}
+        return {"type": "none"}
+
+
+class UserSerializer(serializers.ModelSerializer):
+    role_ids = serializers.PrimaryKeyRelatedField(
+        source="groups",
+        queryset=Group.objects.all(),
+        many=True,
+        required=False,
+    )
+    roles = serializers.SerializerMethodField()
+    permissions = serializers.SerializerMethodField()
+    password = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    contact_name = serializers.CharField(source="contact.name", read_only=True, default="")
+
+    class Meta:
+        model = User
+        fields = [
+            "id",
+            "username",
+            "first_name",
+            "last_name",
+            "email",
+            "role",
+            "contact",
+            "contact_name",
+            "is_active",
+            "is_staff",
+            "is_superuser",
+            "role_ids",
+            "roles",
+            "permissions",
+            "password",
+        ]
+        read_only_fields = ["is_superuser"]
+
+    def get_roles(self, obj):
+        return user_role_names(obj)
+
+    def get_permissions(self, obj):
+        return sorted(user_permission_codes(obj))
+
+    def create(self, validated_data):
+        groups = validated_data.pop("groups", [])
+        password = validated_data.pop("password", "")
+        user = User(**validated_data)
+        if password:
+            user.set_password(password)
+        else:
+            user.set_unusable_password()
+        user.save()
+        if groups:
+            user.groups.set(groups)
+        return user
+
+    def update(self, instance, validated_data):
+        groups = validated_data.pop("groups", None)
+        password = validated_data.pop("password", None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        if password:
+            instance.set_password(password)
+        instance.save()
+        if groups is not None:
+            instance.groups.set(groups)
+        return instance
+
+
+class RoleSerializer(serializers.ModelSerializer):
+    permission_codes = serializers.ListField(
+        child=serializers.CharField(), required=False, write_only=True
+    )
+    permissions = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Group
+        fields = ["id", "name", "permissions", "permission_codes"]
+
+    def get_permissions(self, obj):
+        return sorted(
+            permission_code(permission.codename)
+            for permission in obj.permissions.all()
+            if "__" in permission.codename
+        )
+
+    def _set_permissions(self, group, codes):
+        from django.contrib.auth.models import Permission
+
+        codenames = [permission_codename(code) for code in codes]
+        permissions = Permission.objects.filter(codename__in=codenames)
+        group.permissions.set(permissions)
+
+    def create(self, validated_data):
+        codes = validated_data.pop("permission_codes", None)
+        group = super().create(validated_data)
+        if codes is not None:
+            self._set_permissions(group, codes)
+        return group
+
+    def update(self, instance, validated_data):
+        codes = validated_data.pop("permission_codes", None)
+        group = super().update(instance, validated_data)
+        if codes is not None:
+            self._set_permissions(group, codes)
+        return group
+
+
+class ConfigSerializer(serializers.Serializer):
+    key = serializers.CharField(read_only=True)
+    label = serializers.CharField(read_only=True)
+    description = serializers.CharField(read_only=True)
+    value_type = serializers.CharField(read_only=True)
+    value = serializers.JSONField()
+
+
+class PermissionTreeSerializer(serializers.Serializer):
+    @staticmethod
+    def tree():
+        return PERMISSION_TREE
 
 
 class ResumeListSerializer(serializers.ModelSerializer):
@@ -307,10 +479,17 @@ class AssignmentAttemptSerializer(serializers.ModelSerializer):
         return {
             "id": decision.id,
             "recommendation": decision.recommendation,
+            "recommended_job": decision.recommended_job_id,
+            "matched_job_category": decision.matched_job_category,
             "confidence_score": decision.confidence_score,
+            "score_breakdown": decision.score_breakdown,
+            "summary": decision.summary,
             "reason": decision.reason,
             "evidence": decision.evidence,
             "risks": decision.risks,
+            "risk_flags": decision.risk_flags,
+            "error_code": decision.error_code,
+            "error_message": decision.error_message,
         }
 
     class Meta:
@@ -404,6 +583,19 @@ class AgentDispatchDecisionSerializer(serializers.ModelSerializer):
     recommended_contact_name = serializers.CharField(
         source="recommended_contact.name", read_only=True, default=""
     )
+    evaluated_job_name = serializers.SerializerMethodField()
+    recommended_job_name = serializers.SerializerMethodField()
+
+    def _job_name(self, job):
+        if not job:
+            return ""
+        return job.public_name or job.position_name or f"Job#{job.pk}"
+
+    def get_evaluated_job_name(self, obj):
+        return self._job_name(obj.evaluated_job)
+
+    def get_recommended_job_name(self, obj):
+        return self._job_name(obj.recommended_job)
 
     class Meta:
         model = m.AgentDispatchDecision
@@ -411,20 +603,32 @@ class AgentDispatchDecisionSerializer(serializers.ModelSerializer):
             "id",
             "workflow",
             "resume",
+            "processing_run",
             "candidate_name",
             "apply_id",
             "position_name",
             "profile",
             "recommendation",
+            "evaluated_job",
+            "evaluated_job_name",
+            "recommended_job",
+            "recommended_job_name",
+            "matched_job_category",
             "recommended_department",
             "recommended_department_name",
             "recommended_contact",
             "recommended_contact_name",
             "confidence_score",
+            "score_breakdown",
+            "summary",
             "reason",
             "evidence",
             "risks",
+            "risk_flags",
+            "error_code",
+            "error_message",
             "model_name",
             "prompt_version",
+            "decision_version",
             "created_at",
         ]

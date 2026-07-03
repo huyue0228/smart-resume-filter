@@ -16,6 +16,7 @@ import { DownloadOutlined } from '@ant-design/icons'
 import {
   fetchAllocations,
   dispatchAllocation,
+  confirmReviewAllocation,
   bulkDispatchAllocations,
   assignSubContact,
   submitAllocationFeedback,
@@ -32,6 +33,7 @@ const REPROCESS_STEPS = [
 
 const STATUS_ENUM = {
   pending_dispatch: { text: '待下发', status: 'Default' },
+  pending_review: { text: '待复核', status: 'Warning' },
   dispatched_l2: { text: '已下发二级', status: 'Processing' },
   assigned_l3: { text: '已转派三级', status: 'Processing' },
   passed: { text: '已通过', status: 'Success' },
@@ -58,7 +60,7 @@ function triggerDownload(data, filename) {
 
 export default function AllocationsPage() {
   const actionRef = useRef()
-  const { role, isContact, isSecondaryContact, isTertiaryContact } = useRole()
+  const { hasPermission, isContact, isSecondaryContact, isTertiaryContact } = useRole()
   const { mode, setMode } = useMode()
   const { run, modal } = useProcessRunner()
   const [dispatchingId, setDispatchingId] = useState(null)
@@ -105,6 +107,19 @@ export default function AllocationsPage() {
     try {
       const { data } = await dispatchAllocation(record.id)
       message.success(data?.detail || '下发成功')
+      actionRef.current?.reload()
+    } catch {
+      // toasted by interceptor
+    } finally {
+      setDispatchingId(null)
+    }
+  }
+
+  const handleConfirmReview = async (record) => {
+    setDispatchingId(record.id)
+    try {
+      await confirmReviewAllocation(record.id)
+      message.success('已确认，进入待下发')
       actionRef.current?.reload()
     } catch {
       // toasted by interceptor
@@ -268,16 +283,20 @@ export default function AllocationsPage() {
       width: isContact ? 150 : 170,
       fixed: 'right',
       render: (_, record) => {
-        const canDispatch = !isContact && record.status === 'pending_dispatch'
+        const canDispatch =
+          hasPermission('attempt.dispatch') && record.status === 'pending_dispatch'
+        const canConfirmReview =
+          hasPermission('attempt.dispatch') && record.status === 'pending_review'
         const canAssign =
           isSecondaryContact &&
           ['dispatched_l2', 'assigned_l3'].includes(record.status) &&
           !record.feedback_at
+        const canExport = hasPermission('attempt.export')
         const canFeedback =
           isTertiaryContact && record.status === 'assigned_l3' && !record.feedback_at
         return (
           <Space>
-            <a onClick={() => handleExport([record.id])}>导出</a>
+            {canExport && <a onClick={() => handleExport([record.id])}>导出</a>}
             {canDispatch && (
               <Popconfirm
                 title="确认下发该简历到二级接口人？"
@@ -290,6 +309,21 @@ export default function AllocationsPage() {
                   loading={dispatchingId === record.id}
                 >
                   下发二级
+                </Button>
+              </Popconfirm>
+            )}
+            {canConfirmReview && (
+              <Popconfirm
+                title="确认采纳 AI 复核建议并进入待下发？"
+                onConfirm={() => handleConfirmReview(record)}
+              >
+                <Button
+                  type="link"
+                  size="small"
+                  style={{ padding: 0 }}
+                  loading={dispatchingId === record.id}
+                >
+                  确认下发
                 </Button>
               </Popconfirm>
             )}
@@ -313,9 +347,11 @@ export default function AllocationsPage() {
                 反馈
               </Button>
             )}
-            {!canDispatch && !canAssign && !canFeedback && record.feedback_at && (
-              <Tag color="green">已反馈</Tag>
-            )}
+            {!canDispatch &&
+              !canConfirmReview &&
+              !canAssign &&
+              !canFeedback &&
+              record.feedback_at && <Tag color="green">已反馈</Tag>}
           </Space>
         )
       },
@@ -363,15 +399,17 @@ export default function AllocationsPage() {
         }}
         tableAlertOptionRender={() => (
           <Space>
-            <a onClick={() => handleExport(selectedRowKeys)}>导出选中</a>
-            {!isContact && (
+            {hasPermission('attempt.export') && (
+              <a onClick={() => handleExport(selectedRowKeys)}>导出选中</a>
+            )}
+            {hasPermission('attempt.dispatch') && (
               <a onClick={() => handleBulkDispatch(selectedRowKeys)}>下发选中</a>
             )}
             <a onClick={() => setSelectedRowKeys([])}>取消选择</a>
           </Space>
         )}
         toolBarRender={() => [
-          !isContact && (
+          hasPermission('attempt.dispatch') && (
             <Button
               key="dispatch-selected"
               disabled={selectedRowKeys.length === 0}
@@ -381,7 +419,7 @@ export default function AllocationsPage() {
               下发选中{selectedRowKeys.length ? `(${selectedRowKeys.length})` : ''}
             </Button>
           ),
-          !isContact && (
+          hasPermission('attempt.dispatch') && (
             <Button
               key="dispatch-all"
               loading={bulkDispatching}
@@ -390,28 +428,32 @@ export default function AllocationsPage() {
               一键全部下发
             </Button>
           ),
-          <Button
-            key="export-selected"
-            icon={<DownloadOutlined />}
-            disabled={selectedRowKeys.length === 0}
-            loading={exporting}
-            onClick={() => handleExport(selectedRowKeys)}
-          >
-            导出选中{selectedRowKeys.length ? `(${selectedRowKeys.length})` : ''}
-          </Button>,
-          <Button
-            key="export-all"
-            type="primary"
-            icon={<DownloadOutlined />}
-            loading={exporting}
-            onClick={() => handleExport([])}
-          >
-            导出全部
-          </Button>,
+          hasPermission('attempt.export') && (
+            <Button
+              key="export-selected"
+              icon={<DownloadOutlined />}
+              disabled={selectedRowKeys.length === 0}
+              loading={exporting}
+              onClick={() => handleExport(selectedRowKeys)}
+            >
+              导出选中{selectedRowKeys.length ? `(${selectedRowKeys.length})` : ''}
+            </Button>
+          ),
+          hasPermission('attempt.export') && (
+            <Button
+              key="export-all"
+              type="primary"
+              icon={<DownloadOutlined />}
+              loading={exporting}
+              onClick={() => handleExport([])}
+            >
+              导出全部
+            </Button>
+          ),
         ]}
         request={async (params) => {
           const { current, pageSize, status } = params
-          const query = { status, demo_role: isContact ? role : undefined }
+          const query = { status }
           setLastQuery(query)
           try {
             const { data } = await fetchAllocations({

@@ -266,6 +266,7 @@ class AssignmentAttempt(models.Model):
     ]
 
     STATUS_PENDING_DISPATCH = "pending_dispatch"
+    STATUS_PENDING_REVIEW = "pending_review"
     STATUS_DISPATCHED_L2 = "dispatched_l2"
     STATUS_ASSIGNED_L3 = "assigned_l3"
     STATUS_PASSED = "passed"
@@ -273,6 +274,7 @@ class AssignmentAttempt(models.Model):
     STATUS_CANCELLED = "cancelled"
     STATUS_CHOICES = [
         (STATUS_PENDING_DISPATCH, "待下发"),
+        (STATUS_PENDING_REVIEW, "待 HR 复核"),
         (STATUS_DISPATCHED_L2, "已下发二级"),
         (STATUS_ASSIGNED_L3, "已转派三级"),
         (STATUS_PASSED, "已通过"),
@@ -459,7 +461,31 @@ class AgentDispatchDecision(models.Model):
         on_delete=models.SET_NULL,
         related_name="agent_decisions",
     )
-    recommendation = models.CharField(max_length=16, choices=RECOMMEND_CHOICES)
+    processing_run = models.ForeignKey(
+        "ProcessingRun",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="agent_decisions",
+    )
+    recommendation = models.CharField(
+        max_length=16, choices=RECOMMEND_CHOICES, null=True, blank=True
+    )
+    evaluated_job = models.ForeignKey(
+        Job,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="agent_evaluations",
+    )
+    recommended_job = models.ForeignKey(
+        Job,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="agent_recommendations",
+    )
+    matched_job_category = models.CharField(max_length=64, blank=True)
     recommended_department = models.ForeignKey(
         Department,
         null=True,
@@ -474,12 +500,18 @@ class AgentDispatchDecision(models.Model):
         on_delete=models.SET_NULL,
         related_name="agent_decisions",
     )
-    confidence_score = models.FloatField(default=0)
+    confidence_score = models.FloatField(null=True, blank=True)
+    score_breakdown = models.JSONField(default=dict, blank=True)
+    summary = models.TextField(blank=True)
     reason = models.TextField(blank=True)
     evidence = models.JSONField(default=list, blank=True)
     risks = models.JSONField(default=list, blank=True)
+    risk_flags = models.JSONField(default=list, blank=True)
+    error_code = models.CharField(max_length=64, blank=True)
+    error_message = models.TextField(blank=True)
     model_name = models.CharField(max_length=64, blank=True)
     prompt_version = models.CharField(max_length=32, blank=True)
+    decision_version = models.CharField(max_length=32, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

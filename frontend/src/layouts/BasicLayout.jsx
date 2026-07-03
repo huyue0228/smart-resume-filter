@@ -24,8 +24,7 @@ const assignGroup = {
   routes: [{ path: '/allocations', name: '分配结果', icon: <DeploymentUnitOutlined /> }],
 }
 
-// HR / 管理员完整菜单。导入入口已并入各数据页（简历库 / 岗位 / 院校 / 接口人），不再单设导入页。
-const fullRoute = {
+const allRoute = {
   path: '/',
   routes: [
     {
@@ -52,19 +51,50 @@ const fullRoute = {
   ],
 }
 
-// 接口人仅见分配结果
-const contactRoute = { path: '/', routes: [assignGroup] }
+function filterRoutesByPermission(routes, hasPermission) {
+  const permissionMap = {
+    '/resumes': 'resume.view',
+    '/jobs': 'job.view',
+    '/schools': 'school.view',
+    '/departments': 'department.view',
+    '/allocations': ['attempt.view_all', 'attempt.view_received', 'attempt.view_assigned'],
+    '/config': 'settings.manage_config',
+    '/users': 'settings.manage_permissions',
+  }
+  const keepRoute = (route) => {
+    const needed = permissionMap[route.path]
+    if (!needed) return true
+    const codes = Array.isArray(needed) ? needed : [needed]
+    return codes.some((code) => hasPermission(code))
+  }
+  const next = routes
+    .map((route) => {
+      const children = route.routes
+        ? filterRoutesByPermission(route.routes, hasPermission)
+        : undefined
+      return { ...route, routes: children }
+    })
+    .filter((route) => {
+      if (route.routes) return route.routes.length > 0
+      return keepRoute(route)
+    })
+  return next
+}
 
 export default function BasicLayout() {
   const navigate = useNavigate()
   const location = useLocation()
-  const { role, setRole, isContact } = useRole()
+  const { role, roles, user, logout, hasPermission, isContact } = useRole()
   const [pathname, setPathname] = useState(location.pathname)
 
-  const switchRole = (next) => {
-    setRole(next)
-    setPathname(next === 'hr' ? '/resumes' : '/allocations')
-    navigate(next === 'hr' ? '/resumes' : '/allocations')
+  const handleLogout = async () => {
+    await logout()
+    navigate('/login', { replace: true })
+  }
+
+  const route = {
+    ...allRoute,
+    routes: filterRoutesByPermission(allRoute.routes, hasPermission),
   }
 
   return (
@@ -74,7 +104,7 @@ export default function BasicLayout() {
       layout="mix"
       fixedHeader
       fixSiderbar
-      route={isContact ? contactRoute : fullRoute}
+      route={route}
       location={{ pathname }}
       onPageChange={(loc) => setPathname(loc?.pathname || location.pathname)}
       menuItemRender={(item, dom) => (
@@ -91,9 +121,9 @@ export default function BasicLayout() {
         icon: <UserOutlined />,
         title: (
           <span>
-            {ROLES[role]?.label}
+            {user?.username || ROLES[role]?.label}
             <Tag color={isContact ? 'orange' : 'blue'} style={{ marginLeft: 8 }}>
-              演示身份
+              {roles?.[0] || ROLES[role]?.label || '用户'}
             </Tag>
           </span>
         ),
@@ -101,16 +131,17 @@ export default function BasicLayout() {
         render: (_, avatar) => (
           <Dropdown
             menu={{
-              selectedKeys: [role],
               items: [
-                { key: 'hr', label: '切换为 HR' },
-                { key: 'secondary_contact', label: '切换为 二级接口人' },
-                { key: 'tertiary_contact', label: '切换为 三级接口人' },
+                {
+                  key: 'profile',
+                  label: `${user?.first_name || user?.username || '当前用户'}`,
+                  disabled: true,
+                },
                 { type: 'divider' },
-                { key: 'profile', label: '个人信息', disabled: true },
+                { key: 'logout', label: '退出登录' },
               ],
               onClick: ({ key }) => {
-                if (key in ROLES) switchRole(key)
+                if (key === 'logout') handleLogout()
               },
             }}
           >

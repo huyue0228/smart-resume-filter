@@ -3,26 +3,96 @@ import os
 import zipfile
 
 from django.conf import settings
+from django.contrib.auth import authenticate
+from django.contrib.auth.models import Group
 from django.http import HttpResponse
 from django.db.models import Q
+from rest_framework.authtoken.models import Token
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
+from rest_framework.permissions import AllowAny
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.accounts.models import User
+from apps.accounts.permissions import (
+    HasPermissionCode,
+    PERMISSION_TREE,
+    has_permission_code,
+    user_permission_codes,
+)
 from apps.core import models as m
 from apps.ingestion import snapshot
 from apps.ingestion.sources import RESUME_SUBDIR, import_files
+from apps.pipeline.ai_config import PUBLIC_AI_CONFIG_REGISTRY
 from apps.pipeline import runner
 from apps.pipeline.services import allocate as allocate_service
 
 from . import serializers
 
 
+CONFIG_REGISTRY = {
+    **PUBLIC_AI_CONFIG_REGISTRY,
+    "welink_enabled": {
+        "label": "WeLink 下发开关",
+        "description": "关闭时仅记录下发状态，不调用真实 WeLink。",
+        "value_type": "boolean",
+        "default": False,
+    },
+    "w3_auth_enabled": {
+        "label": "W3 认证开关",
+        "description": "预留开关；外部 W3 接口方案确认后再启用真实对接。",
+        "value_type": "boolean",
+        "default": False,
+    },
+}
+
+
+class PermissionedModelViewSet(viewsets.ModelViewSet):
+    permission_classes = [HasPermissionCode]
+
+
+class PermissionedReadOnlyModelViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [HasPermissionCode]
+
+
+class AuthLoginView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        username = request.data.get("username", "")
+        password = request.data.get("password", "")
+        user = authenticate(request, username=username, password=password)
+        if not user or not user.is_active:
+            return Response(
+                {"detail": "用户名或密码错误"}, status=status.HTTP_400_BAD_REQUEST
+            )
+        token, _ = Token.objects.get_or_create(user=user)
+        return Response(
+            {
+                "token": token.key,
+                "user": serializers.CurrentUserSerializer(user).data,
+            }
+        )
+
+
+class AuthLogoutView(APIView):
+    def post(self, request):
+        Token.objects.filter(user=request.user).delete()
+        return Response({"detail": "已退出登录"})
+
+
+class MeView(APIView):
+    def get(self, request):
+        return Response(serializers.CurrentUserSerializer(request.user).data)
+
+
 class ImportView(APIView):
     """数据导入：multipart 上传 4 张表 + 简历包。"""
 
+    permission_classes = [HasPermissionCode]
+    permission_code = "resume.import"
     parser_classes = [MultiPartParser, FormParser]
 
     FIELD_KEYS = ["resume_list", "jobs", "schools", "contacts", "resume_package"]
@@ -56,6 +126,9 @@ class ImportView(APIView):
 class ImportUndoView(APIView):
     """单级撤销最近一次简历上传（含其处理结果）。"""
 
+    permission_classes = [HasPermissionCode]
+    permission_code = "resume.import"
+
     def get(self, request):
         snap = snapshot.latest_snapshot()
         return Response(
@@ -73,8 +146,9 @@ class ImportUndoView(APIView):
         )
 
 
-class ResumeViewSet(viewsets.ReadOnlyModelViewSet):
+class ResumeViewSet(PermissionedReadOnlyModelViewSet):
     serializer_class = serializers.ResumeListSerializer
+    permission_code = "resume.view"
 
     def get_queryset(self):
         qs = m.Resume.objects.select_related("candidate", "job").order_by("-imported_at")
@@ -94,6 +168,8 @@ class ResumeViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=True, methods=["post"], url_path="manual-assign")
     def manual_assign(self, request, pk=None):
+        if not has_permission_code(request.user, "resume.manual_assign"):
+            return Response({"detail": "无手动分配权限"}, status=status.HTTP_403_FORBIDDEN)
         resume = self.get_object()
         contact_id = request.data.get("contact_id") or request.data.get("contact")
         if not contact_id:
@@ -117,8 +193,16 @@ class ResumeViewSet(viewsets.ReadOnlyModelViewSet):
         return Response(serializers.AssignmentAttemptSerializer(attempt).data)
 
 
-class CandidateViewSet(viewsets.ModelViewSet):
+class CandidateViewSet(PermissionedModelViewSet):
     serializer_class = serializers.CandidateSerializer
+    permission_codes_by_action = {
+        "list": "resume.view",
+        "retrieve": "resume.view",
+        "create": "resume.import",
+        "update": "resume.import",
+        "partial_update": "resume.import",
+        "destroy": "resume.import",
+    }
 
     def get_queryset(self):
         qs = (
@@ -158,8 +242,16 @@ class CandidateViewSet(viewsets.ModelViewSet):
         return qs.distinct()
 
 
-class JobViewSet(viewsets.ModelViewSet):
+class JobViewSet(PermissionedModelViewSet):
     serializer_class = serializers.JobSerializer
+    permission_codes_by_action = {
+        "list": "job.view",
+        "retrieve": "job.view",
+        "create": "job.manage",
+        "update": "job.manage",
+        "partial_update": "job.manage",
+        "destroy": "job.manage",
+    }
 
     def get_queryset(self):
         qs = m.Job.objects.select_related("department").all().order_by("id")
@@ -171,8 +263,16 @@ class JobViewSet(viewsets.ModelViewSet):
         return qs
 
 
-class SchoolViewSet(viewsets.ModelViewSet):
+class SchoolViewSet(PermissionedModelViewSet):
     serializer_class = serializers.SchoolSerializer
+    permission_codes_by_action = {
+        "list": "school.view",
+        "retrieve": "school.view",
+        "create": "school.manage",
+        "update": "school.manage",
+        "partial_update": "school.manage",
+        "destroy": "school.manage",
+    }
 
     def get_queryset(self):
         qs = m.School.objects.all().order_by("name")
@@ -184,8 +284,16 @@ class SchoolViewSet(viewsets.ModelViewSet):
         return qs
 
 
-class DepartmentViewSet(viewsets.ModelViewSet):
+class DepartmentViewSet(PermissionedModelViewSet):
     serializer_class = serializers.DepartmentSerializer
+    permission_codes_by_action = {
+        "list": "department.view",
+        "retrieve": "department.view",
+        "create": "department.manage",
+        "update": "department.manage",
+        "partial_update": "department.manage",
+        "destroy": "department.manage",
+    }
 
     def get_queryset(self):
         qs = m.Department.objects.all().order_by("id")
@@ -195,8 +303,16 @@ class DepartmentViewSet(viewsets.ModelViewSet):
         return qs
 
 
-class ContactViewSet(viewsets.ModelViewSet):
+class ContactViewSet(PermissionedModelViewSet):
     serializer_class = serializers.ContactSerializer
+    permission_codes_by_action = {
+        "list": "department.view",
+        "retrieve": "department.view",
+        "create": "department.manage",
+        "update": "department.manage",
+        "partial_update": "department.manage",
+        "destroy": "department.manage",
+    }
 
     def get_queryset(self):
         qs = m.Contact.objects.select_related("department").order_by("id")
@@ -218,8 +334,9 @@ class ContactViewSet(viewsets.ModelViewSet):
         return qs
 
 
-class SchoolTagRuleViewSet(viewsets.ModelViewSet):
+class SchoolTagRuleViewSet(PermissionedModelViewSet):
     serializer_class = serializers.SchoolTagRuleSerializer
+    permission_code = "settings.manage_config"
 
     def get_queryset(self):
         qs = m.SchoolTagRule.objects.all().order_by("priority", "id")
@@ -229,8 +346,9 @@ class SchoolTagRuleViewSet(viewsets.ModelViewSet):
         return qs
 
 
-class CandidateWorkflowViewSet(viewsets.ReadOnlyModelViewSet):
+class CandidateWorkflowViewSet(PermissionedReadOnlyModelViewSet):
     serializer_class = serializers.CandidateWorkflowSerializer
+    permission_code = "attempt.view_all"
 
     def get_queryset(self):
         qs = m.CandidateWorkflow.objects.select_related(
@@ -246,8 +364,18 @@ class CandidateWorkflowViewSet(viewsets.ReadOnlyModelViewSet):
         return qs.distinct()
 
 
-class AssignmentAttemptViewSet(viewsets.ReadOnlyModelViewSet):
+class AssignmentAttemptViewSet(PermissionedReadOnlyModelViewSet):
     serializer_class = serializers.AssignmentAttemptSerializer
+    permission_codes_by_action = {
+        "list": None,
+        "retrieve": None,
+        "dispatch_welink": "attempt.dispatch",
+        "bulk_dispatch": "attempt.dispatch",
+        "assign_sub_contact": "attempt.assign_sub_contact",
+        "confirm_review": "attempt.dispatch",
+        "feedback": "attempt.feedback",
+        "export_resumes": "attempt.export",
+    }
 
     def get_queryset(self):
         qs = m.AssignmentAttempt.objects.select_related(
@@ -260,6 +388,15 @@ class AssignmentAttemptViewSet(viewsets.ReadOnlyModelViewSet):
             "matched_rule",
             "agent_decision",
         ).order_by("-created_at")
+        permissions = user_permission_codes(self.request.user)
+        contact_id = getattr(self.request.user, "contact_id", None)
+        if "attempt.view_all" not in permissions:
+            scope = Q(pk__in=[])
+            if contact_id and "attempt.view_received" in permissions:
+                scope |= Q(contact_id=contact_id)
+            if contact_id and "attempt.view_assigned" in permissions:
+                scope |= Q(sub_contact_id=contact_id)
+            qs = qs.filter(scope)
         p = self.request.query_params
         if p.get("status"):
             qs = qs.filter(status=p["status"])
@@ -271,24 +408,6 @@ class AssignmentAttemptViewSet(viewsets.ReadOnlyModelViewSet):
             qs = qs.filter(sub_contact_id=p["sub_contact"])
         if p.get("department"):
             qs = qs.filter(department_id=p["department"])
-        if p.get("demo_role") == "secondary_contact":
-            contact = (
-                m.Contact.objects.filter(
-                    contact_level=m.Contact.LEVEL_SECONDARY, is_active=True
-                )
-                .order_by("id")
-                .first()
-            )
-            qs = qs.filter(contact=contact) if contact else qs.none()
-        if p.get("demo_role") == "tertiary_contact":
-            contact = (
-                m.Contact.objects.filter(
-                    contact_level=m.Contact.LEVEL_TERTIARY, is_active=True
-                )
-                .order_by("id")
-                .first()
-            )
-            qs = qs.filter(sub_contact=contact) if contact else qs.none()
         return qs
 
     @action(detail=True, methods=["post"], url_path="dispatch")
@@ -368,6 +487,15 @@ class AssignmentAttemptViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(serializers.AssignmentAttemptSerializer(attempt).data)
 
+    @action(detail=True, methods=["post"], url_path="confirm-review")
+    def confirm_review(self, request, pk=None):
+        attempt = self.get_object()
+        try:
+            attempt = allocate_service.confirm_review(attempt)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(serializers.AssignmentAttemptSerializer(attempt).data)
+
     @action(detail=True, methods=["post"], url_path="feedback")
     def feedback(self, request, pk=None):
         attempt = self.get_object()
@@ -420,13 +548,21 @@ class AssignmentAttemptViewSet(viewsets.ReadOnlyModelViewSet):
         return resp
 
 
-class AgentDispatchDecisionViewSet(viewsets.ReadOnlyModelViewSet):
+class AgentDispatchDecisionViewSet(PermissionedReadOnlyModelViewSet):
     serializer_class = serializers.AgentDispatchDecisionSerializer
+    permission_codes_by_action = {
+        "list": "attempt.view_all",
+        "retrieve": "attempt.view_all",
+        "retry": "attempt.dispatch",
+    }
 
     def get_queryset(self):
         qs = m.AgentDispatchDecision.objects.select_related(
             "workflow__candidate",
             "resume",
+            "processing_run",
+            "evaluated_job",
+            "recommended_job",
             "recommended_department",
             "recommended_contact",
         ).order_by("-created_at")
@@ -437,14 +573,37 @@ class AgentDispatchDecisionViewSet(viewsets.ReadOnlyModelViewSet):
             qs = qs.filter(workflow_id=p["workflow"])
         return qs
 
+    @action(detail=True, methods=["post"], url_path="retry")
+    def retry(self, request, pk=None):
+        decision = self.get_object()
+        try:
+            new_decision, attempt = allocate_service.retry_agent_decision(decision)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {
+                "detail": "已重新发起 AI 处理",
+                "decision": serializers.AgentDispatchDecisionSerializer(new_decision).data,
+                "attempt": (
+                    serializers.AssignmentAttemptSerializer(attempt).data
+                    if attempt
+                    else None
+                ),
+            }
+        )
 
-class ProcessingRunViewSet(viewsets.ReadOnlyModelViewSet):
+
+class ProcessingRunViewSet(PermissionedReadOnlyModelViewSet):
     queryset = m.ProcessingRun.objects.all()
     serializer_class = serializers.ProcessingRunSerializer
+    permission_code = "pipeline.view"
 
 
 class PipelineRunView(APIView):
     """触发流水线：单步或一键全流程（demo 同步执行）。"""
+
+    permission_classes = [HasPermissionCode]
+    permission_code = "pipeline.run"
 
     def post(self, request):
         step = request.data.get("step", "all")
@@ -459,3 +618,70 @@ class PipelineRunView(APIView):
                 "message": run.message,
             }
         )
+
+
+class UserViewSet(PermissionedModelViewSet):
+    serializer_class = serializers.UserSerializer
+    permission_code = "settings.manage_permissions"
+
+    def get_queryset(self):
+        qs = User.objects.select_related("contact").prefetch_related("groups").order_by("id")
+        p = self.request.query_params
+        if p.get("username"):
+            qs = qs.filter(username__icontains=p["username"])
+        if p.get("role"):
+            qs = qs.filter(role=p["role"])
+        if p.get("is_active") in ["true", "false"]:
+            qs = qs.filter(is_active=p["is_active"] == "true")
+        return qs
+
+
+class RoleViewSet(PermissionedModelViewSet):
+    queryset = Group.objects.prefetch_related("permissions").order_by("id")
+    serializer_class = serializers.RoleSerializer
+    permission_code = "settings.manage_permissions"
+
+
+class PermissionTreeView(APIView):
+    permission_classes = [HasPermissionCode]
+    permission_code = "settings.manage_permissions"
+
+    def get(self, request):
+        return Response(PERMISSION_TREE)
+
+
+class ConfigViewSet(viewsets.ViewSet):
+    permission_classes = [HasPermissionCode]
+    permission_code = "settings.manage_config"
+
+    def _item_data(self, key):
+        meta = CONFIG_REGISTRY[key]
+        config = m.Config.objects.filter(key=key).first()
+        value = config.value if config else meta["default"]
+        return {"key": key, "value": value, **meta}
+
+    def list(self, request):
+        return Response([self._item_data(key) for key in CONFIG_REGISTRY])
+
+    def retrieve(self, request, pk=None):
+        if pk not in CONFIG_REGISTRY:
+            return Response({"detail": "未知配置项"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(self._item_data(pk))
+
+    def partial_update(self, request, pk=None):
+        return self._save(request, pk)
+
+    def update(self, request, pk=None):
+        return self._save(request, pk)
+
+    def _save(self, request, pk):
+        if pk not in CONFIG_REGISTRY:
+            return Response({"detail": "未知配置项"}, status=status.HTTP_404_NOT_FOUND)
+        serializer = serializers.ConfigSerializer(
+            data={**self._item_data(pk), "value": request.data.get("value")}
+        )
+        serializer.is_valid(raise_exception=True)
+        m.Config.objects.update_or_create(
+            key=pk, defaults={"value": serializer.validated_data["value"]}
+        )
+        return Response(self._item_data(pk))

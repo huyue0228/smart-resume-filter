@@ -13,7 +13,7 @@ from django.db import transaction
 
 from apps.core import models as m
 
-from .identity import identity_hash
+from .identity import identity_hash, normalize_phone
 
 # 简历文件落盘子目录（相对 MEDIA_ROOT），导出接口复用
 RESUME_SUBDIR = "resumes"
@@ -105,6 +105,15 @@ def _split_majors(text):
     return [p for p in parts if p]
 
 
+def _gender_code(value):
+    text = str(value or "").strip().lower()
+    if text in ("男", "m", "male", "man", "1"):
+        return "M"
+    if text in ("女", "f", "female", "woman", "0"):
+        return "F"
+    return "U"
+
+
 @transaction.atomic
 def import_files(files: dict, mode: str = "incremental") -> dict:
     """导入 4 张表 + 简历包。files 的键：resume_list/jobs/schools/contacts/resume_package。"""
@@ -116,6 +125,7 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
         "jobs": 0,
         "schools": 0,
         "contacts": 0,
+        "candidates_skipped": 0,
     }
 
     if mode == "replace":
@@ -212,13 +222,16 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
             apply_id = _val(row, "应聘ID")
             if not (name and apply_id):
                 continue
+            if not normalize_phone(phone):
+                counts["candidates_skipped"] += 1
+                continue
             ihash = identity_hash(name, phone)
             cand, created = m.Candidate.objects.update_or_create(
                 identity_hash=ihash,
                 defaults={
                     "name": name,
                     "phone": phone,
-                    "gender": _val(row, "性别"),
+                    "gender": _gender_code(_val(row, "性别")),
                     "household_province": _val(row, "户口所在地"),
                     "first_degree_school": _val(row, "第一学历毕业院校"),
                     "highest_degree_school": _val(row, "最高学历毕业院校"),

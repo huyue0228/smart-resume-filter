@@ -6,12 +6,12 @@ from apps.core.models import ProcessingRun
 from .services import allocate, classify_job, classify_school, dedup, demand
 
 STEP_FUNCS = {
-    "step1": lambda mode, scope: dedup.run(scope),
-    "step2": lambda mode, scope: allocate.run(scope, mode),
-    "step3": lambda mode, scope: classify_school.run(scope),
-    "step4": lambda mode, scope: demand.run(scope),
+    "step1": lambda mode, scope, run: dedup.run(scope),
+    "step2": lambda mode, scope, run: allocate.run(scope, mode, processing_run=run),
+    "step3": lambda mode, scope, run: classify_school.run(scope),
+    "step4": lambda mode, scope, run: demand.run(scope),
     # 兼容旧 demo 入口。当前设计中分配已经合并进 Step2。
-    "step5": lambda mode, scope: allocate.run(scope, mode),
+    "step5": lambda mode, scope, run: allocate.run(scope, mode, processing_run=run),
 }
 
 # 一键全流程：前置院校分类、需求录入先完成，再执行候选人主流程。
@@ -25,10 +25,10 @@ def run_step(step, mode="rule", scope=None):
     )
     try:
         if step == "all":
-            msgs = [f"{s}: {STEP_FUNCS[s](mode, scope)}" for s in STEP_ORDER]
+            msgs = [f"{s}: {STEP_FUNCS[s](mode, scope, run)}" for s in STEP_ORDER]
             message = " | ".join(msgs)
         elif step in STEP_FUNCS:
-            message = STEP_FUNCS[step](mode, scope)
+            message = STEP_FUNCS[step](mode, scope, run)
         else:
             raise ValueError(f"未知步骤: {step}")
         run.status = "success"

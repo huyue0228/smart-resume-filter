@@ -1,84 +1,174 @@
 # 智能简历筛选系统
 
-校招简历筛选系统：覆盖「查重 → 分类 → 院校分类 → 需求录入 → 分配」五步流水线，支持规则 / AI 双模式。
-后端 Django + DRF（+ Celery/Redis 可选），前端 React + Ant Design Pro。
+校招智能简历筛选系统，覆盖「查重与志愿排序 -> 岗位分类 -> 院校分类 -> 需求录入 -> 简历分配」主流程。系统按正式项目方式建设：后端启用登录与 RBAC 权限校验，前端菜单和按钮由后端权限码驱动；W3 认证、WeLink 真实下发等外部接口在方案确认后接入。
 
-设计文档见 [`docs/`](docs/)：需求与技术方案、数据库设计、前端设计、原始需求。
+设计文档以 [`docs/需求描述.md`](docs/需求描述.md)、[`docs/后端设计.md`](docs/后端设计.md)、[`docs/数据库设计.md`](docs/数据库设计.md)、[`docs/前端设计.md`](docs/前端设计.md) 为准。
+
+## 技术栈
+
+- 后端：Django 4.2、Django REST Framework、Celery。
+- 前端：Vite、React 18、Ant Design Pro、JavaScript `.jsx`。
+- 本地开发：SQLite + Celery eager，同步执行任务，不依赖 Redis。
+- 生产预期：PostgreSQL + Redis + Celery worker。
 
 ## 目录结构
 
+```text
+backend/    Django + DRF 后端，包含 accounts/core/ingestion/pipeline/api
+frontend/   Vite + React 前端
+docs/       四篇核心设计文档与原始材料
 ```
-backend/    Django + DRF 后端（apps: core / accounts / ingestion / pipeline / api）
-frontend/   Vite + React + Ant Design 前端
-docs/       设计文档
-docker-compose.yml   完整栈（Postgres + Redis + 异步 Celery，可选）
-```
 
-## 本机最简 demo（推荐，无需 Docker）
+## 本地启动
 
-后端默认 **SQLite + Celery eager（同步执行）**，不需要 Postgres/Redis。
-
-### 1) 后端
+### 后端
 
 ```bash
 cd backend
-python3 -m venv .venv && source .venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 python manage.py migrate
-python manage.py seed_base      # 省份南北字典 + 分配倍数
-python manage.py gen_sample     # 生成样例 xlsx 到 backend/sample_data/
-python manage.py load_sample    # 导入样例数据（也可在前端「数据导入」页手动上传）
+python manage.py seed_base
+python manage.py gen_sample
+python manage.py load_sample
 python manage.py runserver 8000
 ```
 
-后端跑在 http://localhost:8000 ，API 前缀 `/api/`，Django Admin 在 `/admin/`
-（如需后台账号：`python manage.py createsuperuser`）。
+`seed_base` 会初始化：
 
-### 2) 前端
+- RBAC 权限点与预置角色。
+- AI、WeLink、W3 预留开关等配置项。
+- 多接口人功能测试账号和对应 Contact/Department。
+
+### 前端
 
 ```bash
 cd frontend
 npm install
-npm run dev     # http://localhost:5173 ，已代理 /api 到 8000
+npm run dev
 ```
 
-### 3) 走一遍流程
+前端默认运行在 [http://localhost:5173](http://localhost:5173)，并通过 Vite proxy 访问后端 `/api/`。
 
-1. 打开 http://localhost:5173
-2. 「简历库 → 上传简历」：选 简历信息列表 xlsx + 简历包 zip 上传，**上传后自动跑五步处理**（进度条），无需手动触发；如需撤销点「撤销上次上传」回到上传前
-   - 其余主数据（岗位/院校/接口人）各自页面有导入按钮；已用 `load_sample` 可跳过
-3. 「简历库」查看打标结果（志愿/岗位类别/院校标签）
-4. 「简历分配」查看分配并「下发」；页头「处理模式」可切 规则/AI（切换后自动重算分类与分配）；可导出候选人简历文件
-5. 右上角「演示身份」可切 HR / 接口人：接口人仅能看到「分配结果」一页且只读导出（前端演示用权限隔离，后端鉴权见 M6）
+## 本地账号
 
-## 完整栈（可选：Postgres + Redis + 异步 Celery）
+初始化后可使用以下账号登录，默认密码均为 `pass1234`。
+
+| 用户名 | 角色 | 用途 |
+| --- | --- | --- |
+| `admin` | 管理员 | 配置项、用户、角色、权限管理 |
+| `hr` | HR | 数据导入、流水线处理、分配、下发、AI 复核 |
+| `sec_tech` | 二级接口人 | 查看 HR 下发给技术二部的分配并转派三级 |
+| `sec_product` | 二级接口人 | 查看 HR 下发给产品二部的分配并转派三级 |
+| `ter_tech` | 三级接口人 | 查看转派给自己的分配并反馈 |
+| `ter_algo` | 三级接口人 | 查看转派给自己的分配并反馈 |
+| `ter_product` | 三级接口人 | 查看转派给自己的分配并反馈 |
+
+这些账号用于正式权限链路的本地测试。W3 认证接入后，应由外部身份映射到系统 `User`、RBAC 角色和接口人 `Contact`。
+
+## 权限与配置
+
+系统默认启用 Token 登录。前端登录后调用 `/api/me/` 获取用户、角色、权限码、绑定接口人和数据范围。
+
+权限边界：
+
+- 管理员：维护配置项、用户、角色、权限。
+- HR：导入主数据、运行处理流程、手动分配、下发二级接口人、查看全部分配。
+- 二级接口人：只能查看下发给自己的分配，只能转派给本二级部门下的三级接口人。
+- 三级接口人：只能查看转派给自己的分配，并提交通过/未通过反馈。
+
+配置项页面维护：
+
+- `ai_dispatch_threshold`
+- `ai_review_threshold`
+- `ai_timeout_seconds`
+- `ai_concurrency`
+- `ai_retry_count`
+- `ai_retry_backoff_seconds`
+- `welink_enabled`
+- `w3_auth_enabled`
+
+大模型连接配置不放在前端，也不进入普通配置表；后端统一由
+`backend/apps/pipeline/ai_config.py` 抽象。当前支持的环境变量：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `AI_PROVIDER` | `openai` | 大模型供应商标识 |
+| `AI_MODEL_NAME` | `OPENAI_MODEL` 或 `demo-agent` | AI 决策记录写入的模型名，后续真实调用也从这里取 |
+| `AI_API_KEY_ENV` | `OPENAI_API_KEY` | 指向真实 API Key 所在环境变量名 |
+| `AI_BASE_URL_ENV` | `OPENAI_BASE_URL` | 指向自定义 base URL 所在环境变量名 |
+| `AI_PROMPT_VERSION` | `demo-v1` | 提示词版本 |
+| `AI_DECISION_VERSION` | `demo-v1` | 决策 schema / 评分规则版本 |
+
+例如：
 
 ```bash
-docker compose up        # 启动 db / redis / backend / celery worker
-# 前端仍在本地跑：
-cd frontend && npm install && npm run dev
+export OPENAI_API_KEY="sk-..."
+export AI_MODEL_NAME="gpt-4.1"
+export AI_PROMPT_VERSION="resume-dispatch-v1"
+export AI_DECISION_VERSION="dispatch-schema-v1"
 ```
 
-后端切 PostgreSQL 通过环境变量 `POSTGRES_DB` 等；Celery 异步通过 `CELERY_TASK_ALWAYS_EAGER=False` + Redis broker。
+## 主要流程
+
+1. 使用 `admin` 或 `hr` 登录。
+2. 在简历库、岗位需求、院校清单、部门接口人页面导入对应 Excel/简历包；也可先执行 `gen_sample` 和 `load_sample`。
+3. 简历导入后自动触发主流程；也可在分配页切换规则/AI 模式后重新处理。
+4. HR 在「简历分配」查看待下发、待复核、已下发等分配尝试。
+5. HR 单条、批量或一键全部下发给二级接口人。
+6. 二级接口人登录后仅看到自己的分配，可导出简历并转派本部门三级接口人。
+7. 三级接口人登录后仅看到转派给自己的分配，可导出简历并提交反馈。
+8. HR/管理员可在配置项和用户权限页维护系统参数与 RBAC 绑定。
 
 ## API 速览
 
 | 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/import/` | 上传 4 表 + 简历包（multipart，字段 resume_list/jobs/schools/contacts/resume_package，mode=incremental\|replace）；含简历数据时自动存撤销快照 |
-| GET / POST | `/api/import/undo/` | GET 查可否撤销；POST 撤销最近一次简历上传（还原上传前状态） |
-| GET  | `/api/resumes/` | 投递清单（分页/筛选 search,status,imported_after,imported_before） |
-| GET  | `/api/candidates/` `/api/jobs/` `/api/schools/` `/api/departments/` `/api/contacts/` | 主数据 CRUD（接口人列表/检索走 contacts） |
-| POST | `/api/pipeline/run/` | 触发单步 `{step: step1..step5\|all, mode: rule\|ai}`（前端按步调用以驱动进度条） |
-| GET  | `/api/pipeline/runs/` | 运行记录 |
-| GET  | `/api/allocations/` | 分配结果 |
-| GET  | `/api/allocations/export/?ids=1,2` | 打包候选人简历文件为 zip（不传 ids 则按筛选导全部） |
-| POST | `/api/allocations/{id}/dispatch/` | WeLink 下发 |
+| --- | --- | --- |
+| POST | `/api/auth/login/` | 本地账号登录，返回 Token 与当前用户权限 |
+| POST | `/api/auth/logout/` | 退出登录并删除 Token |
+| GET | `/api/me/` | 当前用户、角色、权限码、接口人绑定和数据范围 |
+| GET/POST/PATCH | `/api/users/` | 用户管理 |
+| GET/POST/PATCH | `/api/roles/` | 角色管理与角色权限绑定 |
+| GET | `/api/permissions/` | 后端预置权限树 |
+| GET/PATCH | `/api/configs/` | 系统配置项 |
+| POST | `/api/import/` | 上传简历列表、岗位、院校、接口人和简历包 |
+| GET/POST | `/api/import/undo/` | 查看并撤销最近一次简历上传 |
+| GET | `/api/resumes/` | 投递清单 |
+| GET | `/api/candidates/` | 候选人聚合列表 |
+| GET/POST/PATCH | `/api/jobs/` `/api/schools/` `/api/departments/` `/api/contacts/` | 主数据维护 |
+| POST | `/api/pipeline/run/` | 触发处理流程，支持 `rule` / `ai` |
+| GET | `/api/pipeline/runs/` | 处理运行记录 |
+| GET | `/api/workflow-attempts/` | 分配尝试，后端按登录用户过滤数据范围 |
+| POST | `/api/workflow-attempts/{id}/dispatch/` | HR 单条下发 |
+| POST | `/api/workflow-attempts/bulk-dispatch/` | HR 批量或一键全部下发 |
+| POST | `/api/workflow-attempts/{id}/assign-sub-contact/` | 二级接口人转派三级接口人 |
+| POST | `/api/workflow-attempts/{id}/feedback/` | 三级接口人提交反馈 |
+| GET | `/api/workflow-attempts/export/` | 导出简历 zip |
+| GET/POST | `/api/agent-decisions/` | AI 决策查看与重试 |
 
-> 注：demo 关闭了鉴权（AllowAny）便于本机测试；正式环境需启用 RBAC + 登录（见技术方案）。
+## 验证命令
 
-## 第一版范围与后续
+后端：
 
-- 已实现：数据导入与身份归并、五步**规则模式**全链路、CRUD/分配 API、前端核心页面、样例数据。
-- AI 模式（Step2/Step5）目前为占位（回退规则并附说明），后续接 OpenAI。
-- 待接：RBAC/W3 登录、WeLink 真实下发、规则 vs AI 对比页、性能压测。
+```bash
+cd backend
+./.venv/bin/python manage.py check
+./.venv/bin/python manage.py test apps.pipeline apps.api apps.ingestion
+./.venv/bin/python manage.py makemigrations accounts core --check --dry-run
+```
+
+前端：
+
+```bash
+cd frontend
+npm run lint
+npm run build
+```
+
+## 生产与外部系统预留
+
+- W3 认证：当前保留 `w3_auth_enabled` 配置和本地 Token 登录。待 W3 接口方案确认后，应新增认证适配层，将 W3 身份映射到 `User`、角色和 `Contact`。
+- WeLink：当前下发流程已保留状态和消息 ID 字段，`welink_enabled` 控制是否启用真实外部下发。真实接口确认后在服务层替换发送实现。
+- 数据库：本地默认 SQLite；生产环境通过 `POSTGRES_DB`、`POSTGRES_USER`、`POSTGRES_PASSWORD`、`POSTGRES_HOST`、`POSTGRES_PORT` 切换 PostgreSQL。
+- Celery：本地默认 `CELERY_TASK_ALWAYS_EAGER=True`；生产环境应配置 Redis broker/backend 并启动 worker。

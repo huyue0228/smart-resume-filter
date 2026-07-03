@@ -67,7 +67,7 @@ export default function ImportButton({ fields, buttonText = '导入', title, onD
           setOpen(false)
           reset()
         }}
-        destroyOnClose
+        destroyOnHidden
       >
         <Space direction="vertical" size="middle" style={{ width: '100%' }}>
           {fields.map((field) => (
