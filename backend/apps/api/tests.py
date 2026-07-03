@@ -287,6 +287,29 @@ class RbacApiTests(TestCase):
         self.assertEqual(response.data["value"], 0.82)
         self.assertEqual(m.Config.objects.get(key="ai_dispatch_threshold").value, 0.82)
 
+    def test_admin_config_api_excludes_ai_connection_settings(self):
+        self.client.force_authenticate(self.admin)
+
+        response = self.client.get("/api/configs/")
+
+        self.assertEqual(response.status_code, 200)
+        keys = {item["key"] for item in response.data}
+        self.assertIn("ai_dispatch_threshold", keys)
+        self.assertNotIn("AI_MODEL_NAME", keys)
+        self.assertNotIn("AI_API_KEY_ENV", keys)
+        self.assertNotIn("AI_BASE_URL_ENV", keys)
+        self.assertFalse(
+            {"api_key", "api_key_env", "base_url", "base_url_env"}
+            & {field for item in response.data for field in item}
+        )
+
+        update_response = self.client.patch(
+            "/api/configs/AI_MODEL_NAME/",
+            {"value": "gpt-test"},
+            format="json",
+        )
+        self.assertEqual(update_response.status_code, 404)
+
     def test_permissions_endpoint_returns_tree_for_admin(self):
         self.client.force_authenticate(self.admin)
 

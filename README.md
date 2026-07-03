@@ -89,6 +89,27 @@ npm run dev
 - `welink_enabled`
 - `w3_auth_enabled`
 
+大模型连接配置不放在前端，也不进入普通配置表；后端统一由
+`backend/apps/pipeline/ai_config.py` 抽象。当前支持的环境变量：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `AI_PROVIDER` | `openai` | 大模型供应商标识 |
+| `AI_MODEL_NAME` | `OPENAI_MODEL` 或 `demo-agent` | AI 决策记录写入的模型名，后续真实调用也从这里取 |
+| `AI_API_KEY_ENV` | `OPENAI_API_KEY` | 指向真实 API Key 所在环境变量名 |
+| `AI_BASE_URL_ENV` | `OPENAI_BASE_URL` | 指向自定义 base URL 所在环境变量名 |
+| `AI_PROMPT_VERSION` | `demo-v1` | 提示词版本 |
+| `AI_DECISION_VERSION` | `demo-v1` | 决策 schema / 评分规则版本 |
+
+例如：
+
+```bash
+export OPENAI_API_KEY="sk-..."
+export AI_MODEL_NAME="gpt-4.1"
+export AI_PROMPT_VERSION="resume-dispatch-v1"
+export AI_DECISION_VERSION="dispatch-schema-v1"
+```
+
 ## 主要流程
 
 1. 使用 `admin` 或 `hr` 登录。

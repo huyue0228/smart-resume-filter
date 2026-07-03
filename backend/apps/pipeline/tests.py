@@ -1,6 +1,9 @@
+from unittest.mock import patch
+
 from django.test import TestCase
 
 from apps.core import models as m
+from apps.pipeline import ai_config
 from apps.pipeline.services import allocate
 
 
@@ -60,6 +63,32 @@ class AllocationDesignContractTests(TestCase):
         self.assertEqual(decision.recommendation, m.AgentDispatchDecision.RECOMMEND_REVIEW)
         self.assertGreaterEqual(decision.confidence_score, 0.5)
         self.assertLess(decision.confidence_score, 0.8)
+
+    def test_ai_model_versions_come_from_backend_config(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "AI_MODEL_NAME": "gpt-test",
+                "AI_PROMPT_VERSION": "prompt-2026-07",
+                "AI_DECISION_VERSION": "decision-2026-07",
+            },
+        ):
+            allocate.run(mode="ai")
+
+        decision = m.AgentDispatchDecision.objects.get()
+        self.assertEqual(decision.model_name, "gpt-test")
+        self.assertEqual(decision.prompt_version, "prompt-2026-07")
+        self.assertEqual(decision.decision_version, "decision-2026-07")
+
+    def test_ai_runtime_config_uses_database_overrides(self):
+        m.Config.objects.create(key="ai_timeout_seconds", value=120)
+        m.Config.objects.create(key="ai_retry_count", value=3)
+
+        config = ai_config.get_ai_runtime_config()
+
+        self.assertEqual(config.timeout_seconds, 120)
+        self.assertEqual(config.retry_count, 3)
+        self.assertEqual(config.dispatch_threshold, 0.75)
 
     def test_ai_allocation_records_pdf_missing_without_assignment_attempt(self):
         self.resume.resume_file = ""

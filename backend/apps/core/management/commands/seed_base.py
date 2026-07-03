@@ -5,6 +5,7 @@ from django.core.management.base import BaseCommand
 from apps.accounts.models import User
 from apps.accounts.permissions import ensure_rbac_defaults
 from apps.core import models as m
+from apps.pipeline.ai_config import PUBLIC_AI_CONFIG_REGISTRY
 
 NORTH = [
     "北京", "天津", "河北", "山西", "内蒙古", "辽宁", "吉林", "黑龙江",
@@ -26,12 +27,10 @@ class Command(BaseCommand):
         for p in SOUTH:
             m.ProvinceRegion.objects.update_or_create(province=p, defaults={"region": "南"})
         defaults = {
-            "ai_dispatch_threshold": 0.75,
-            "ai_review_threshold": 0.5,
-            "ai_timeout_seconds": 60,
-            "ai_concurrency": 2,
-            "ai_retry_count": 1,
-            "ai_retry_backoff_seconds": 10,
+            **{
+                key: item["default"]
+                for key, item in PUBLIC_AI_CONFIG_REGISTRY.items()
+            },
             "welink_enabled": False,
             "w3_auth_enabled": False,
         }

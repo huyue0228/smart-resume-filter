@@ -25,6 +25,7 @@ from apps.accounts.permissions import (
 from apps.core import models as m
 from apps.ingestion import snapshot
 from apps.ingestion.sources import RESUME_SUBDIR, import_files
+from apps.pipeline.ai_config import PUBLIC_AI_CONFIG_REGISTRY
 from apps.pipeline import runner
 from apps.pipeline.services import allocate as allocate_service
 
@@ -32,42 +33,7 @@ from . import serializers
 
 
 CONFIG_REGISTRY = {
-    "ai_dispatch_threshold": {
-        "label": "AI 自动下发阈值",
-        "description": "置信度大于等于该值时，AI 建议可进入待下发。",
-        "value_type": "number",
-        "default": 0.75,
-    },
-    "ai_review_threshold": {
-        "label": "AI 人工复核阈值",
-        "description": "置信度大于等于该值且低于自动下发阈值时，进入 HR 复核。",
-        "value_type": "number",
-        "default": 0.5,
-    },
-    "ai_timeout_seconds": {
-        "label": "AI 超时时间",
-        "description": "单次 AI 调用超时时间，单位秒。",
-        "value_type": "integer",
-        "default": 60,
-    },
-    "ai_concurrency": {
-        "label": "AI 并发数",
-        "description": "后台 AI 任务最大并发数量。",
-        "value_type": "integer",
-        "default": 2,
-    },
-    "ai_retry_count": {
-        "label": "AI 重试次数",
-        "description": "AI 失败后允许自动重试的次数。",
-        "value_type": "integer",
-        "default": 1,
-    },
-    "ai_retry_backoff_seconds": {
-        "label": "AI 重试退避",
-        "description": "AI 重试间隔，单位秒。",
-        "value_type": "integer",
-        "default": 10,
-    },
+    **PUBLIC_AI_CONFIG_REGISTRY,
     "welink_enabled": {
         "label": "WeLink 下发开关",
         "description": "关闭时仅记录下发状态，不调用真实 WeLink。",

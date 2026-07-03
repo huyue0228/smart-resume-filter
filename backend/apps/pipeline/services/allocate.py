@@ -4,6 +4,7 @@ from django.db.models import Max
 from django.utils import timezone
 
 from apps.core import models as m
+from apps.pipeline import ai_config
 
 from ..strategies import get_strategy
 
@@ -286,17 +287,6 @@ def _ensure_resume_profile(resume):
     return profile
 
 
-def _config_float(key, default):
-    config = m.Config.objects.filter(key=key).first()
-    value = config.value if config else default
-    if isinstance(value, dict):
-        value = value.get("value", default)
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
 def _retry_allowed(decision):
     if decision.error_code:
         return True
@@ -304,19 +294,20 @@ def _retry_allowed(decision):
         return True
     if (
         decision.confidence_score is not None
-        and decision.confidence_score < _config_float("ai_dispatch_threshold", 0.75)
+        and decision.confidence_score
+        < ai_config.get_ai_runtime_config().dispatch_threshold
     ):
         return True
     return False
 
 
 def _create_agent_decision(workflow, resume, profile, job, contact, reason):
+    runtime_config = ai_config.get_ai_runtime_config()
+    model_config = ai_config.get_ai_model_config()
     confidence = 0.78 if job and contact else 0.35
-    dispatch_threshold = _config_float("ai_dispatch_threshold", 0.75)
-    review_threshold = _config_float("ai_review_threshold", 0.5)
-    if confidence >= dispatch_threshold:
+    if confidence >= runtime_config.dispatch_threshold:
         recommendation = m.AgentDispatchDecision.RECOMMEND_DISPATCH
-    elif confidence >= review_threshold:
+    elif confidence >= runtime_config.review_threshold:
         recommendation = m.AgentDispatchDecision.RECOMMEND_REVIEW
     else:
         recommendation = m.AgentDispatchDecision.RECOMMEND_ARCHIVE
@@ -351,9 +342,9 @@ def _create_agent_decision(workflow, resume, profile, job, contact, reason):
         ],
         risks=risks,
         risk_flags=risks,
-        model_name="demo-agent",
-        prompt_version="demo-v1",
-        decision_version="demo-v1",
+        model_name=model_config.model_name,
+        prompt_version=model_config.prompt_version,
+        decision_version=model_config.decision_version,
     )
 
 
@@ -365,6 +356,7 @@ def _create_agent_failure_decision(
     error_message,
     profile=None,
 ):
+    model_config = ai_config.get_ai_model_config()
     return m.AgentDispatchDecision.objects.create(
         workflow=workflow,
         resume=resume,
@@ -385,9 +377,9 @@ def _create_agent_failure_decision(
         risk_flags=[error_code],
         error_code=error_code,
         error_message=error_message,
-        model_name="demo-agent",
-        prompt_version="demo-v1",
-        decision_version="demo-v1",
+        model_name=model_config.model_name,
+        prompt_version=model_config.prompt_version,
+        decision_version=model_config.decision_version,
     )
 
 
