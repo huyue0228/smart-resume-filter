@@ -54,8 +54,12 @@ npm run build
 Full stack, optional:
 
 ```bash
+docker compose build
+docker compose --profile init run --rm init
 docker compose up
 ```
+
+Compose uses project Dockerfiles now: backend/worker share `smart-resume-filter-backend:${APP_VERSION:-latest}` based on Python 3.12.3, and frontend uses a built React bundle served by Nginx. See README for server deployment details.
 
 ## Verification
 
