@@ -8,6 +8,7 @@ build/
 .env
 *.log
 .DS_Store
+release/
 
 # 后端运行时产物
 *.sqlite3

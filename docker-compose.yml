@@ -24,7 +24,12 @@ x-backend-env: &backend-env
 
 services:
   db:
-    image: postgres:16
+    build:
+      context: ./docker/postgres
+      args:
+        POSTGRES_IMAGE: ${POSTGRES_IMAGE:-postgres:16}
+    image: smart-resume-filter-postgres:${POSTGRES_VERSION:-16}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
     environment:
       POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
       POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
@@ -40,7 +45,12 @@ services:
       retries: 20
 
   redis:
-    image: redis:7
+    build:
+      context: ./docker/redis
+      args:
+        REDIS_IMAGE: ${REDIS_IMAGE:-redis:7}
+    image: smart-resume-filter-redis:${REDIS_VERSION:-7}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
     ports:
       - "${REDIS_BIND:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
     healthcheck:
@@ -52,7 +62,10 @@ services:
   backend:
     build:
       context: ./backend
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.12.3-slim}
     image: smart-resume-filter-backend:${APP_VERSION:-latest}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
     environment:
       <<: *backend-env
       RUN_MIGRATIONS: ${RUN_MIGRATIONS:-1}
@@ -75,6 +88,7 @@ services:
 
   worker:
     image: smart-resume-filter-backend:${APP_VERSION:-latest}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
     environment:
       <<: *backend-env
       RUN_MIGRATIONS: "0"
@@ -91,6 +105,7 @@ services:
   init:
     profiles: ["init"]
     image: smart-resume-filter-backend:${APP_VERSION:-latest}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
     environment:
       <<: *backend-env
       RUN_MIGRATIONS: "1"
@@ -107,7 +122,11 @@ services:
   frontend:
     build:
       context: ./frontend
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:22-alpine}
+        NGINX_IMAGE: ${NGINX_IMAGE:-nginx:1.27-alpine}
     image: smart-resume-filter-frontend:${APP_VERSION:-latest}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
     ports:
       - "${FRONTEND_BIND:-0.0.0.0}:${FRONTEND_PORT:-5173}:80"
     volumes:

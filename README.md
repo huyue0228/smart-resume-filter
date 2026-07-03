@@ -113,6 +113,7 @@ cp .env.example .env
 - `POSTGRES_PASSWORD`：换成强密码。
 - `DJANGO_ALLOWED_HOSTS`：填服务器 IP 或域名，多个值用英文逗号分隔。
 - `APP_VERSION`：建议发布时改成明确版本号，如 `2026-07-03-1`，方便回滚和排查。
+- `DOCKER_PLATFORM`：内网服务器是常见 x86_64 Linux 时保持 `linux/amd64`；如果是 ARM 服务器，改成 `linux/arm64` 后重新构建镜像包。
 
 暂时不接真实大模型时，`OPENAI_API_KEY` 可以留空。后续接入真实模型时只需要改 `.env` 并重启 backend/worker。
 
@@ -126,7 +127,7 @@ docker compose --profile init run --rm init
 docker compose up -d
 ```
 
-首次执行 `docker compose build` 会下载基础镜像、安装依赖并生成项目镜像，时间会比较久。查看启动状态：
+首次执行 `docker compose build` 会下载基础镜像、安装依赖并生成后端、前端、PostgreSQL、Redis 四个项目镜像，时间会比较久。查看启动状态：
 
 ```bash
 docker compose ps
@@ -234,7 +235,7 @@ docker compose up -d
 docker compose ps
 ```
 
-当前 compose 会在服务器本机构建 `smart-resume-filter-backend:${APP_VERSION}` 和 `smart-resume-filter-frontend:${APP_VERSION}` 两个项目镜像。只改 `.env` 时不需要重新 build，只需 `docker compose up -d`。
+当前 compose 会在服务器本机构建 `smart-resume-filter-backend:${APP_VERSION}`、`smart-resume-filter-frontend:${APP_VERSION}`、`smart-resume-filter-postgres:${POSTGRES_VERSION}`、`smart-resume-filter-redis:${REDIS_VERSION}` 四个项目镜像。只改 `.env` 时不需要重新 build，只需 `docker compose up -d`。
 
 如果新版本明确要求重新初始化基础权限或新增种子字典，再手动执行：
 
@@ -358,7 +359,7 @@ docker compose up -d
 
 镜像构建慢：
 
-首次 `docker compose build` 会安装 Python 和 npm 依赖，慢是正常现象。后续只要依赖文件没有变化，Docker 会复用缓存；如果服务器无法访问 PyPI 或 npm registry，需要提前在可联网环境构建镜像并推送到镜像仓库，再在服务器 `docker compose pull`。
+首次 `docker compose build` 会安装 Python 和 npm 依赖，慢是正常现象。后续只要依赖文件没有变化，Docker 会复用缓存；如果服务器无法访问 Docker Hub、PyPI 或 npm registry，需要提前在可联网环境构建并导出完整离线镜像包，再在服务器 `docker load`。
 
 ## 本地账号
 
