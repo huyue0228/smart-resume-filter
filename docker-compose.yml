@@ -21,6 +21,7 @@ x-backend-env: &backend-env
   AI_DECISION_VERSION: ${AI_DECISION_VERSION:-demo-v1}
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
   OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+  FILE_UPLOAD_TEMP_DIR: ${FILE_UPLOAD_TEMP_DIR:-/app/media/tmp_uploads}
 
 services:
   db:
@@ -70,7 +71,7 @@ services:
       <<: *backend-env
       RUN_MIGRATIONS: ${RUN_MIGRATIONS:-1}
       RUN_SEED_BASE: ${RUN_SEED_BASE:-0}
-    command: gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers ${GUNICORN_WORKERS:-3} --timeout ${GUNICORN_TIMEOUT:-120}
+    command: gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers ${GUNICORN_WORKERS:-3} --timeout ${GUNICORN_TIMEOUT:-1800}
     ports:
       - "${BACKEND_BIND:-127.0.0.1}:${BACKEND_PORT:-8000}:8000"
     volumes:

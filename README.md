@@ -119,6 +119,8 @@ cp .env.example .env
 
 `RUN_SEED_BASE` 默认保持 `0`。不要在长期运行环境里把它改成 `1`，否则每次 backend 重启都可能把配置页中的参数重置为种子默认值。首次初始化请使用下一节的一次性 `init` 命令。
 
+上传大小不再设置固定 Nginx 上限：`client_max_body_size 0` 表示由服务器磁盘、Docker volume、CPU/内存和超时时间决定实际可处理上限。大文件上传临时目录默认是 `/app/media/tmp_uploads`，位于 `media_data` 持久化卷；`GUNICORN_TIMEOUT` 默认 `1800` 秒。
+
 ### 4. 首次启动完整栈
 
 ```bash

@@ -101,6 +101,10 @@ USE_TZ = True
 STATIC_URL = "static/"
 MEDIA_URL = "media/"
 MEDIA_ROOT = BASE_DIR / "media"
+FILE_UPLOAD_TEMP_DIR = os.environ.get(
+    "FILE_UPLOAD_TEMP_DIR", str(MEDIA_ROOT / "tmp_uploads")
+)
+DATA_UPLOAD_MAX_MEMORY_SIZE = None
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
