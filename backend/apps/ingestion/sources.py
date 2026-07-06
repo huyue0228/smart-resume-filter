@@ -1,4 +1,4 @@
-"""数据源适配器：Excel 解析 + 身份归并入库。
+"""数据源适配器：表格解析 + 身份归并入库。
 
 Excel 仅是一种数据源实现；下游业务只依赖 core 模型。
 """
@@ -19,6 +19,7 @@ from .identity import identity_hash, normalize_phone
 RESUME_SUBDIR = "resumes"
 XLS_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 XLSX_MAGIC = b"PK\x03\x04"
+CSV_ENCODINGS = ("utf-8-sig", "utf-8", "gb18030")
 
 
 def _val(row, key):
@@ -58,27 +59,72 @@ def _excel_name(file_obj):
     return os.path.basename(str(getattr(file_obj, "name", "") or "")).lower()
 
 
-def _excel_engine(file_obj):
+def _file_bytes(file_obj):
     file_obj.seek(0)
-    header = file_obj.read(8)
+    data = file_obj.read()
     file_obj.seek(0)
+    return data
+
+
+def _csv_encoding(data):
+    if not data:
+        return None
+    for encoding in CSV_ENCODINGS:
+        try:
+            text = data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+        if "\x00" in text:
+            return None
+        if any(sep in text for sep in (",", "\t", ";", "，")) or "\n" in text:
+            return encoding
+    return None
+
+
+def _table_format(file_obj):
+    data = _file_bytes(file_obj)
+    header = data[:8]
     name = _excel_name(file_obj)
-    if name.endswith((".xlsx", ".xlsm")) or header.startswith(XLSX_MAGIC):
-        return "openpyxl"
-    if name.endswith(".xls") or header.startswith(XLS_MAGIC):
-        raise ValueError("暂不支持 .xls，请在 Excel/WPS 中另存为 .xlsx 后上传")
-    raise ValueError("无法识别 Excel 文件格式，请上传 .xlsx 文件")
+    if header.startswith(XLSX_MAGIC):
+        return "excel", "openpyxl", None, data
+    if header.startswith(XLS_MAGIC):
+        return "excel", "xlrd", None, data
+    if name.endswith(".csv"):
+        encoding = _csv_encoding(data)
+        if encoding:
+            return "csv", None, encoding, data
+        raise ValueError("CSV 文件编码无法识别，请使用 UTF-8 或 GB18030 编码")
+    encoding = _csv_encoding(data)
+    if encoding:
+        return "csv", None, encoding, data
+    if name.endswith((".xlsx", ".xlsm")):
+        return "excel", "openpyxl", None, data
+    if name.endswith(".xls"):
+        return "excel", "xlrd", None, data
+    raise ValueError("无法识别表格文件格式，请上传 .xlsx、.xls 或 .csv 文件")
 
 
 def _read_excel(file_obj):
-    engine = _excel_engine(file_obj)
+    kind, engine, encoding, data = _table_format(file_obj)
     try:
-        return pd.read_excel(file_obj, dtype=object, engine=engine)
+        if kind == "csv":
+            return pd.read_csv(
+                io.BytesIO(data),
+                dtype=object,
+                encoding=encoding,
+                sep=None,
+                engine="python",
+            )
+        return pd.read_excel(io.BytesIO(data), dtype=object, engine=engine)
     except zipfile.BadZipFile as exc:
-        raise ValueError("Excel 文件不是有效的 .xlsx 文件，请另存为 .xlsx 后重新上传") from exc
+        raise ValueError("Excel 文件不是有效的 .xlsx 文件，请检查文件内容或另存后重新上传") from exc
+    except ImportError as exc:
+        if engine == "xlrd":
+            raise ValueError("服务端缺少 .xls 读取依赖 xlrd，请先安装后再导入") from exc
+        raise
     except ValueError as exc:
         if "Excel file format cannot be determined" in str(exc):
-            raise ValueError("无法识别 Excel 文件格式，请上传 .xlsx 文件") from exc
+            raise ValueError("无法识别表格文件格式，请上传 .xlsx、.xls 或 .csv 文件") from exc
         raise
 
 

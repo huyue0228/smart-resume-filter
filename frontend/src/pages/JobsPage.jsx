@@ -5,7 +5,7 @@ import { fetchJobs } from '../api/services'
 import ImportButton from '../components/ImportButton'
 
 const IMPORT_FIELDS = [
-  { key: 'jobs', label: '校招岗位分类及专业要求 (.xlsx)', accept: '.xlsx' },
+  { key: 'jobs', label: '校招岗位分类及专业要求 (.xlsx/.xls/.csv)', accept: '.xlsx,.xls,.csv' },
 ]
 
 export default function JobsPage() {
