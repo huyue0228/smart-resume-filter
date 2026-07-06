@@ -12,7 +12,7 @@ import { useProcessRunner } from '../components/useProcessRunner'
 import { useMode } from '../contexts/ModeContext'
 
 const RESUME_IMPORT_FIELDS = [
-  { key: 'resume_list', label: '① 简历信息列表 (.xlsx)', accept: '.xlsx,.xls' },
+  { key: 'resume_list', label: '① 简历信息列表 (.xlsx)', accept: '.xlsx' },
   { key: 'resume_package', label: '② 简历包 (.zip，文件名含应聘ID)', accept: '.zip' },
 ]
 

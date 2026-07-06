@@ -5,7 +5,7 @@ import { fetchSchools } from '../api/services'
 import ImportButton from '../components/ImportButton'
 
 const IMPORT_FIELDS = [
-  { key: 'schools', label: '院校分类 (.xlsx)', accept: '.xlsx,.xls' },
+  { key: 'schools', label: '院校分类 (.xlsx)', accept: '.xlsx' },
 ]
 
 const REGION_COLOR = { 南: 'geekblue', 北: 'volcano' }

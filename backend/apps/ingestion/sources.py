@@ -17,6 +17,8 @@ from .identity import identity_hash, normalize_phone
 
 # 简历文件落盘子目录（相对 MEDIA_ROOT），导出接口复用
 RESUME_SUBDIR = "resumes"
+XLS_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+XLSX_MAGIC = b"PK\x03\x04"
 
 
 def _val(row, key):
@@ -52,9 +54,32 @@ def _to_date(s):
         return None
 
 
-def _read_excel(file_obj):
+def _excel_name(file_obj):
+    return os.path.basename(str(getattr(file_obj, "name", "") or "")).lower()
+
+
+def _excel_engine(file_obj):
     file_obj.seek(0)
-    return pd.read_excel(file_obj, dtype=object)
+    header = file_obj.read(8)
+    file_obj.seek(0)
+    name = _excel_name(file_obj)
+    if name.endswith((".xlsx", ".xlsm")) or header.startswith(XLSX_MAGIC):
+        return "openpyxl"
+    if name.endswith(".xls") or header.startswith(XLS_MAGIC):
+        raise ValueError("暂不支持 .xls，请在 Excel/WPS 中另存为 .xlsx 后上传")
+    raise ValueError("无法识别 Excel 文件格式，请上传 .xlsx 文件")
+
+
+def _read_excel(file_obj):
+    engine = _excel_engine(file_obj)
+    try:
+        return pd.read_excel(file_obj, dtype=object, engine=engine)
+    except zipfile.BadZipFile as exc:
+        raise ValueError("Excel 文件不是有效的 .xlsx 文件，请另存为 .xlsx 后重新上传") from exc
+    except ValueError as exc:
+        if "Excel file format cannot be determined" in str(exc):
+            raise ValueError("无法识别 Excel 文件格式，请上传 .xlsx 文件") from exc
+        raise
 
 
 def _get_department(level1_name, level2_name, entity="", level3_name=""):

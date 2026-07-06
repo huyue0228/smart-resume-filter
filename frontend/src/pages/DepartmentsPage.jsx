@@ -5,7 +5,7 @@ import { fetchContacts } from '../api/services'
 import ImportButton from '../components/ImportButton'
 
 const IMPORT_FIELDS = [
-  { key: 'contacts', label: '部门接口人信息 (.xlsx)', accept: '.xlsx,.xls' },
+  { key: 'contacts', label: '部门接口人信息 (.xlsx)', accept: '.xlsx' },
 ]
 
 export default function DepartmentsPage() {
