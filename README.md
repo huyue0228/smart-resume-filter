@@ -6,6 +6,14 @@
 
 当前实现已包含：候选人聚合简历库、表头筛选、可拖拽列宽、候选人/分配尝试 PDF 预览、按当前筛选导出简历 zip、Token 登录、RBAC 权限控制、部门接口人导入自动创建账号。
 
+关键实现落点：
+
+- 后端分页：`backend/apps/api/pagination.py`，统一支持 `page_size`，最大 500。
+- 后端导出/预览/筛选：`backend/apps/api/views.py`，候选人、岗位、院校、接口人和分配尝试列表按查询参数过滤。
+- 后端测试：`backend/apps/api/tests.py` 覆盖分页、表头筛选、候选人导出、简历预览和接口人 replace 导入边界。
+- 前端共享表格能力：`frontend/src/components/DataTableControls.jsx`、`frontend/src/components/ResizableHeaderCell.jsx`、`frontend/src/index.css`。
+- 前端简历预览：`frontend/src/components/ResumePreview.jsx`，简历库详情和分配尝试详情复用。
+
 ## 技术栈
 
 - 后端：Django 4.2、Django REST Framework、Celery。
@@ -186,7 +194,7 @@ docker compose exec backend python manage.py load_sample
 
 - 简历库按候选人聚合展示，一名候选人一行；详情抽屉可查看全部投递、分配尝试、反馈和 PDF 预览。
 - 简历库、岗位、院校、接口人等主要表格支持表头筛选和列宽拖拽；筛选在后端执行，分页接口支持 `page_size`，单页最大 500。
-- 简历库可以按当前筛选条件导出候选人简历 zip；分配尝试页可以单条、勾选批量或按筛选导出。缺失文件会写入压缩包内的缺失清单。
+- 简历库可以按当前筛选条件导出候选人简历 zip；分配尝试页可以单条、勾选批量或按筛选导出。缺失文件会写入压缩包内的缺失清单，页面会提示导出成功数量和缺失数量。
 - 部门接口人导入会按工号自动创建或更新登录账号，新账号默认密码 `pass1234`；清空重导时，本次文件中不存在的旧接口人及绑定账号会同步停用。
 
 ### 8. 常用运维命令

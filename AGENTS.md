@@ -96,6 +96,7 @@ Use focused verification for the files changed:
 - Explicit endpoints include `auth/login/`, `auth/logout/`, `me/`, `permissions/`, `import/`, `import/undo/`, and `pipeline/run/`.
 - `AssignmentAttemptViewSet` has a `dispatch_welink` method with `url_path="dispatch"`. Do not rename it to `dispatch`, because that would override DRF ViewSet dispatch.
 - Resume export and preview helpers return Django `HttpResponse`, not DRF `Response`. Keep zip headers such as `X-Export-Count` / `X-Export-Missing` and preview header `X-Resume-Filename` stable for the frontend.
+- Candidate export, resume direct preview, assignment-attempt scoped preview, and visible-column list filters are covered in `backend/apps/api/tests.py`; keep those tests aligned when changing table columns or query params.
 - API defaults to authenticated access. Local formal development uses DRF Token login seeded by `seed_base`; W3 authentication is a future adapter around the same `User`/RBAC/`Contact` mapping.
 - Contact imports automatically create/update interface-user accounts with `username = Contact.employee_no`, default password `pass1234` for new users, and the matching second/third-level contact role. W3 login will also map by employee number.
 
@@ -109,6 +110,7 @@ Use focused verification for the files changed:
 - Import UI is decentralized through `frontend/src/components/ImportButton.jsx`; there is no standalone import page.
 - Shared table header filters and resizable column wiring live in `frontend/src/components/DataTableControls.jsx` and `frontend/src/components/ResizableHeaderCell.jsx`; reuse them for dense data tables instead of rebuilding per page.
 - PDF preview UI lives in `frontend/src/components/ResumePreview.jsx` and supports direct resume previews and assignment-attempt scoped previews.
+- `SchoolsPage.jsx` currently exposes the legacy `region` 南/北 filter because the demo model still has `School.region`; formal design docs keep `School.province` as the target database口径, so future model work should migrate the implementation rather than expanding the formal design around `region`.
 
 ## Migration Gotchas
 
