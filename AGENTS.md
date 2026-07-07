@@ -96,6 +96,7 @@ Use focused verification for the files changed:
 - `AssignmentAttemptViewSet` has a `dispatch_welink` method with `url_path="dispatch"`. Do not rename it to `dispatch`, because that would override DRF ViewSet dispatch.
 - `AssignmentAttemptViewSet.export_resumes` returns a zip `HttpResponse`, not a DRF `Response`.
 - API defaults to authenticated access. Local formal development uses DRF Token login seeded by `seed_base`; W3 authentication is a future adapter around the same `User`/RBAC/`Contact` mapping.
+- Contact imports automatically create/update interface-user accounts with `username = Contact.employee_no`, default password `pass1234` for new users, and the matching second/third-level contact role. W3 login will also map by employee number.
 
 ## Frontend Notes
 

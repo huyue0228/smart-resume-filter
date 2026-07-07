@@ -78,7 +78,6 @@ export default function UsersPage() {
 
   const userColumns = [
     { title: '用户名', dataIndex: 'username', width: 150, fixed: 'left' },
-    { title: '姓名', dataIndex: 'first_name', width: 130, search: false },
     {
       title: '角色类型',
       dataIndex: 'role',
@@ -301,7 +300,6 @@ export default function UsersPage() {
         }}
       >
         <ProFormText name="username" label="用户名" rules={[{ required: true }]} />
-        <ProFormText name="first_name" label="姓名" />
         <ProFormText name="email" label="邮箱" />
         <ProFormText.Password
           name="password"

@@ -2,8 +2,11 @@ from io import BytesIO
 from unittest.mock import patch
 
 import pandas as pd
+from django.contrib.auth.models import Group
 from django.test import TestCase
 
+from apps.accounts.models import User
+from apps.accounts.permissions import ensure_rbac_defaults
 from apps.core import models as m
 from apps.ingestion.sources import _read_excel, import_files
 
@@ -89,3 +92,148 @@ class ResumeImportDesignContractTests(TestCase):
         candidate = m.Candidate.objects.get()
         self.assertEqual(candidate.name, "张三")
         self.assertEqual(candidate.gender, "M")
+
+    def test_replace_contacts_does_not_clear_existing_resume_pool(self):
+        candidate = m.Candidate.objects.create(
+            identity_hash="candidate-keep",
+            name="张三",
+            phone="13800000000",
+        )
+        m.Resume.objects.create(
+            candidate=candidate,
+            apply_id="A1001",
+            position_name="后端工程师",
+        )
+        old_department = m.Department.objects.create(name="旧部门", level=2)
+        old_contact = m.Contact.objects.create(
+            name="旧接口人",
+            employee_no="OLD001",
+            department=old_department,
+        )
+        old_user = User.objects.create_user(
+            username="OLD001",
+            password="old-pass",
+            role=User.ROLE_SECONDARY_CONTACT,
+            contact=old_contact,
+        )
+        contacts = _excel_file(
+            [
+                {
+                    "工号": "NEW001",
+                    "姓名": "新接口人",
+                    "一层部门": "技术中心",
+                    "二层部门": "后端组",
+                    "接口人层级": "二级接口人",
+                }
+            ]
+        )
+
+        counts = import_files({"contacts": contacts}, mode="replace")
+
+        self.assertEqual(counts["contacts"], 1)
+        self.assertEqual(m.Candidate.objects.count(), 1)
+        self.assertEqual(m.Resume.objects.count(), 1)
+        old_contact = m.Contact.objects.get(employee_no="OLD001")
+        self.assertFalse(old_contact.is_active)
+        old_user.refresh_from_db()
+        self.assertFalse(old_user.is_active)
+        self.assertTrue(m.Contact.objects.get(employee_no="NEW001").is_active)
+
+    def test_contact_import_creates_contact_user_with_employee_no_login(self):
+        contacts = _excel_file(
+            [
+                {
+                    "工号": "L9001",
+                    "姓名": "二级接口人",
+                    "一层部门": "技术中心",
+                    "二层部门": "平台组",
+                    "接口人层级": "二级接口人",
+                },
+                {
+                    "工号": "T9001",
+                    "姓名": "三级接口人",
+                    "一层部门": "技术中心",
+                    "二层部门": "平台组",
+                    "三级部门": "服务端组",
+                    "接口人层级": "三级接口人",
+                },
+            ]
+        )
+
+        counts = import_files({"contacts": contacts}, mode="incremental")
+
+        self.assertEqual(counts["contacts"], 2)
+        secondary_contact = m.Contact.objects.get(employee_no="L9001")
+        tertiary_contact = m.Contact.objects.get(employee_no="T9001")
+        secondary_user = User.objects.get(username="L9001")
+        tertiary_user = User.objects.get(username="T9001")
+        self.assertEqual(secondary_user.contact, secondary_contact)
+        self.assertEqual(secondary_user.role, User.ROLE_SECONDARY_CONTACT)
+        self.assertTrue(secondary_user.check_password("pass1234"))
+        self.assertIn(
+            "二级接口人",
+            list(secondary_user.groups.values_list("name", flat=True)),
+        )
+        self.assertEqual(tertiary_user.contact, tertiary_contact)
+        self.assertEqual(tertiary_user.role, User.ROLE_TERTIARY_CONTACT)
+        self.assertTrue(tertiary_user.check_password("pass1234"))
+        self.assertIn(
+            "三级接口人",
+            list(tertiary_user.groups.values_list("name", flat=True)),
+        )
+        self.assertTrue(Group.objects.filter(name="二级接口人").exists())
+        self.assertTrue(Group.objects.filter(name="三级接口人").exists())
+
+    def test_contact_import_keeps_existing_user_password(self):
+        existing_user = User.objects.create_user(
+            username="L9002",
+            password="custom-pass",
+            role=User.ROLE_HR,
+        )
+        contacts = _excel_file(
+            [
+                {
+                    "工号": "L9002",
+                    "姓名": "已有用户接口人",
+                    "一层部门": "技术中心",
+                    "二层部门": "平台组",
+                    "接口人层级": "二级接口人",
+                }
+            ]
+        )
+
+        import_files({"contacts": contacts}, mode="incremental")
+
+        existing_user.refresh_from_db()
+        self.assertTrue(existing_user.check_password("custom-pass"))
+        self.assertEqual(existing_user.contact.employee_no, "L9002")
+        self.assertEqual(existing_user.role, User.ROLE_SECONDARY_CONTACT)
+
+    def test_contact_import_preserves_existing_non_contact_roles(self):
+        ensure_rbac_defaults()
+        extra_group = Group.objects.create(name="临时业务角色")
+        existing_user = User.objects.create_user(
+            username="T9003",
+            password="custom-pass",
+            role=User.ROLE_HR,
+        )
+        existing_user.groups.add(extra_group, Group.objects.get(name="二级接口人"))
+        contacts = _excel_file(
+            [
+                {
+                    "工号": "T9003",
+                    "姓名": "改为三级接口人",
+                    "一层部门": "技术中心",
+                    "二层部门": "平台组",
+                    "三级部门": "服务端组",
+                    "接口人层级": "三级接口人",
+                }
+            ]
+        )
+
+        import_files({"contacts": contacts}, mode="incremental")
+
+        group_names = set(existing_user.groups.values_list("name", flat=True))
+        self.assertIn("临时业务角色", group_names)
+        self.assertIn("三级接口人", group_names)
+        self.assertNotIn("二级接口人", group_names)

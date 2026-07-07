@@ -8,9 +8,12 @@ import re
 import zipfile
 
 import pandas as pd
+from django.contrib.auth.models import Group
 from django.conf import settings
 from django.db import transaction
 
+from apps.accounts.models import User
+from apps.accounts.permissions import ensure_rbac_defaults
 from apps.core import models as m
 
 from .identity import identity_hash, normalize_phone
@@ -169,6 +172,31 @@ def _contact_level(row, dept):
     )
 
 
+def _contact_user_role(contact):
+    if contact.contact_level == m.Contact.LEVEL_TERTIARY:
+        return User.ROLE_TERTIARY_CONTACT, "三级接口人"
+    return User.ROLE_SECONDARY_CONTACT, "二级接口人"
+
+
+def _sync_contact_user(contact):
+    role, group_name = _contact_user_role(contact)
+    user, created = User.objects.update_or_create(
+        username=contact.employee_no,
+        defaults={
+            "role": role,
+            "contact": contact,
+            "is_active": contact.is_active,
+        },
+    )
+    if created or not user.has_usable_password():
+        user.set_password("pass1234")
+        user.save(update_fields=["password"])
+    contact_groups = Group.objects.filter(name__in=["二级接口人", "三级接口人"])
+    user.groups.remove(*contact_groups.exclude(name=group_name))
+    user.groups.add(Group.objects.get(name=group_name))
+    return user
+
+
 def _split_majors(text):
     if not text:
         return []
@@ -199,7 +227,7 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
         "candidates_skipped": 0,
     }
 
-    if mode == "replace":
+    if mode == "replace" and (files.get("resume_list") or files.get("resume_package")):
         m.AssignmentHandoff.objects.all().delete()
         m.AssignmentAttempt.objects.all().delete()
         m.AgentDispatchDecision.objects.all().delete()
@@ -207,13 +235,15 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
         m.CandidateWorkflow.objects.all().delete()
         m.Resume.objects.all().delete()
         m.Candidate.objects.all().delete()
+    if mode == "replace":
         if files.get("jobs"):
             m.JobMajor.objects.all().delete()
             m.Job.objects.all().delete()
         if files.get("schools"):
             m.School.objects.all().delete()
         if files.get("contacts"):
-            m.Contact.objects.all().delete()
+            m.Contact.objects.update(is_active=False)
+            User.objects.filter(contact__isnull=False).update(is_active=False)
 
     # 院校清单
     if files.get("schools"):
@@ -229,6 +259,7 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
 
     # 部门接口人
     if files.get("contacts"):
+        ensure_rbac_defaults()
         df = _read_excel(files["contacts"])
         for _, row in df.iterrows():
             no = _val(row, "工号")
@@ -241,7 +272,7 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
                 _val(row, "主体"),
                 _val(row, "三级部门"),
             )
-            m.Contact.objects.update_or_create(
+            contact, _ = m.Contact.objects.update_or_create(
                 employee_no=no,
                 defaults={
                     "name": name,
@@ -255,6 +286,7 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
                     ),
                 },
             )
+            _sync_contact_user(contact)
             counts["contacts"] += 1
 
     # 岗位需求

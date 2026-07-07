@@ -76,11 +76,11 @@ class Command(BaseCommand):
         users = [
             ("admin", "管理员", User.ROLE_ADMIN, None),
             ("hr", "HR", User.ROLE_HR, None),
-            ("sec_tech", "二级接口人", User.ROLE_SECONDARY_CONTACT, contact_objects["L2001"]),
-            ("sec_product", "二级接口人", User.ROLE_SECONDARY_CONTACT, contact_objects["L2002"]),
-            ("ter_tech", "三级接口人", User.ROLE_TERTIARY_CONTACT, contact_objects["T3001"]),
-            ("ter_algo", "三级接口人", User.ROLE_TERTIARY_CONTACT, contact_objects["T3002"]),
-            ("ter_product", "三级接口人", User.ROLE_TERTIARY_CONTACT, contact_objects["T3003"]),
+            ("L2001", "二级接口人", User.ROLE_SECONDARY_CONTACT, contact_objects["L2001"]),
+            ("L2002", "二级接口人", User.ROLE_SECONDARY_CONTACT, contact_objects["L2002"]),
+            ("T3001", "三级接口人", User.ROLE_TERTIARY_CONTACT, contact_objects["T3001"]),
+            ("T3002", "三级接口人", User.ROLE_TERTIARY_CONTACT, contact_objects["T3002"]),
+            ("T3003", "三级接口人", User.ROLE_TERTIARY_CONTACT, contact_objects["T3003"]),
         ]
         for username, group_name, role, contact in users:
             user, created = User.objects.update_or_create(
