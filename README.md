@@ -4,6 +4,8 @@
 
 设计文档以 [`docs/需求描述.md`](docs/需求描述.md)、[`docs/后端设计.md`](docs/后端设计.md)、[`docs/数据库设计.md`](docs/数据库设计.md)、[`docs/前端设计.md`](docs/前端设计.md) 为准。
 
+当前实现已包含：候选人聚合简历库、表头筛选、可拖拽列宽、候选人/分配尝试 PDF 预览、按当前筛选导出简历 zip、Token 登录、RBAC 权限控制、部门接口人导入自动创建账号。
+
 ## 技术栈
 
 - 后端：Django 4.2、Django REST Framework、Celery。
@@ -180,7 +182,14 @@ docker compose exec backend python manage.py load_sample
 
 如果服务器承载真实数据，不要执行样例数据命令。
 
-### 7. 常用运维命令
+### 7. 页面使用要点
+
+- 简历库按候选人聚合展示，一名候选人一行；详情抽屉可查看全部投递、分配尝试、反馈和 PDF 预览。
+- 简历库、岗位、院校、接口人等主要表格支持表头筛选和列宽拖拽；筛选在后端执行，分页接口支持 `page_size`，单页最大 500。
+- 简历库可以按当前筛选条件导出候选人简历 zip；分配尝试页可以单条、勾选批量或按筛选导出。缺失文件会写入压缩包内的缺失清单。
+- 部门接口人导入会按工号自动创建或更新登录账号，新账号默认密码 `pass1234`；清空重导时，本次文件中不存在的旧接口人及绑定账号会同步停用。
+
+### 8. 常用运维命令
 
 查看所有服务状态：
 
@@ -224,7 +233,7 @@ docker compose exec backend python manage.py migrate
 docker compose exec backend python manage.py seed_base
 ```
 
-### 8. 更新版本
+### 9. 更新版本
 
 每次发布新代码后，在服务器项目目录执行：
 
@@ -447,7 +456,9 @@ export AI_DECISION_VERSION="dispatch-schema-v1"
 | POST | `/api/import/` | 上传简历列表、岗位、院校、接口人和简历包 |
 | GET/POST | `/api/import/undo/` | 查看并撤销最近一次简历上传 |
 | GET | `/api/resumes/` | 投递清单 |
+| GET | `/api/resumes/{id}/preview/` | 预览单条投递 PDF |
 | GET | `/api/candidates/` | 候选人聚合列表 |
+| GET | `/api/candidates/export/` | 按候选人 ID 或当前筛选条件导出简历 zip |
 | GET/POST/PATCH | `/api/jobs/` `/api/schools/` `/api/departments/` `/api/contacts/` | 主数据维护 |
 | POST | `/api/pipeline/run/` | 触发处理流程，支持 `rule` / `ai` |
 | GET | `/api/pipeline/runs/` | 处理运行记录 |
@@ -457,7 +468,11 @@ export AI_DECISION_VERSION="dispatch-schema-v1"
 | POST | `/api/workflow-attempts/{id}/assign-sub-contact/` | 二级接口人转派三级接口人 |
 | POST | `/api/workflow-attempts/{id}/feedback/` | 三级接口人提交反馈 |
 | GET | `/api/workflow-attempts/export/` | 导出简历 zip |
-| GET/POST | `/api/agent-decisions/` | AI 决策查看与重试 |
+| GET | `/api/workflow-attempts/{id}/resume-preview/` | 按分配尝试数据范围预览 PDF |
+| GET | `/api/agent-decisions/` | AI 决策查看 |
+| POST | `/api/agent-decisions/{id}/retry/` | AI 决策重试 |
+
+列表接口默认分页，支持 `page` / `page_size` 查询参数；`page_size` 最大 500。
 
 ## 验证命令
 

@@ -91,10 +91,11 @@ Use focused verification for the files changed:
 ## API Notes
 
 - Main API code is under `backend/apps/api/`.
+- Standard pagination lives in `backend/apps/api/pagination.py`; list APIs support `page_size` with a max of 500.
 - Routes use DRF `DefaultRouter` for resumes, candidates, jobs, schools, departments, contacts, workflow attempts, agent decisions, and runs.
 - Explicit endpoints include `auth/login/`, `auth/logout/`, `me/`, `permissions/`, `import/`, `import/undo/`, and `pipeline/run/`.
 - `AssignmentAttemptViewSet` has a `dispatch_welink` method with `url_path="dispatch"`. Do not rename it to `dispatch`, because that would override DRF ViewSet dispatch.
-- `AssignmentAttemptViewSet.export_resumes` returns a zip `HttpResponse`, not a DRF `Response`.
+- Resume export and preview helpers return Django `HttpResponse`, not DRF `Response`. Keep zip headers such as `X-Export-Count` / `X-Export-Missing` and preview header `X-Resume-Filename` stable for the frontend.
 - API defaults to authenticated access. Local formal development uses DRF Token login seeded by `seed_base`; W3 authentication is a future adapter around the same `User`/RBAC/`Contact` mapping.
 - Contact imports automatically create/update interface-user accounts with `username = Contact.employee_no`, default password `pass1234` for new users, and the matching second/third-level contact role. W3 login will also map by employee number.
 
@@ -106,6 +107,8 @@ Use focused verification for the files changed:
 - `RoleContext.jsx` holds the current token-backed user, `/api/me/` permissions, roles, contact binding, and data-scope helpers. Do not reintroduce demo role switching.
 - `ModeContext.jsx` stores `rule` / `ai` in localStorage. The allocation page owns the mode switch; switching mode reruns the Step2 allocation flow.
 - Import UI is decentralized through `frontend/src/components/ImportButton.jsx`; there is no standalone import page.
+- Shared table header filters and resizable column wiring live in `frontend/src/components/DataTableControls.jsx` and `frontend/src/components/ResizableHeaderCell.jsx`; reuse them for dense data tables instead of rebuilding per page.
+- PDF preview UI lives in `frontend/src/components/ResumePreview.jsx` and supports direct resume previews and assignment-attempt scoped previews.
 
 ## Migration Gotchas
 
