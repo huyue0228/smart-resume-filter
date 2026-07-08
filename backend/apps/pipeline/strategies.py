@@ -2,20 +2,49 @@
 
 
 class RuleStrategy:
-    """规则模式：按职位名称与岗位表精确 / 包含匹配。"""
+    """规则模式：按职位名称与岗位表精确 / 包含匹配，再校验需求专业。"""
 
     mode = "rule"
+
+    def _normalized(self, value):
+        return "".join((value or "").lower().split())
+
+    def _major_match_reason(self, resume, job):
+        required_majors = [major.major for major in job.majors.all() if major.major]
+        if not required_majors:
+            return True, "岗位未配置需求专业，放行"
+        candidate_major = self._normalized(resume.candidate.highest_major)
+        if not candidate_major:
+            return False, "候选人最高学历专业缺失，未命中岗位需求专业"
+        for required_major in required_majors:
+            normalized_required = self._normalized(required_major)
+            if normalized_required and (
+                normalized_required in candidate_major
+                or candidate_major in normalized_required
+            ):
+                return True, f"专业匹配：{resume.candidate.highest_major} 命中 {required_major}"
+        return False, "候选人最高学历专业未命中岗位需求专业"
+
+    def _classify_if_major_matched(self, resume, job):
+        matched, reason = self._major_match_reason(resume, job)
+        if not matched:
+            return None
+        return job, job.category or "未分类", reason
 
     def classify(self, resume, jobs):
         pos = (resume.position_name or "").strip()
         if pos:
             for job in jobs:
                 if pos in (job.public_name, job.position_name):
-                    return job, job.category or "未分类", ""
+                    result = self._classify_if_major_matched(resume, job)
+                    if result:
+                        return result
             for job in jobs:
                 name = job.public_name or job.position_name
                 if name and (name in pos or pos in name):
-                    return job, job.category or "未分类", ""
+                    result = self._classify_if_major_matched(resume, job)
+                    if result:
+                        return result
         return None, "未匹配", ""
 
 

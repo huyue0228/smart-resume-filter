@@ -50,6 +50,42 @@ class AllocationDesignContractTests(TestCase):
         self.assertIsNone(attempt.matched_rule)
         self.assertEqual(self.candidate.workflow.status, m.CandidateWorkflow.STATUS_IN_PROGRESS)
 
+    def test_rule_allocation_skips_resume_when_required_major_not_matched(self):
+        self.candidate.highest_major = "计算机科学与技术"
+        self.candidate.save(update_fields=["highest_major"])
+        m.JobMajor.objects.create(job=self.job, major="电气工程")
+        next_resume = m.Resume.objects.create(
+            candidate=self.candidate,
+            apply_id="A1002",
+            position_name="产品经理",
+            volunteer_rank=2,
+            resume_file="张三（A1002）.pdf",
+        )
+        next_job = m.Job.objects.create(
+            department=self.department,
+            public_name="产品经理",
+            position_name="产品经理",
+            category="产品类",
+            headcount=1,
+        )
+        m.JobMajor.objects.create(job=next_job, major="计算机")
+
+        allocate.run(mode="rule")
+
+        attempt = m.AssignmentAttempt.objects.get()
+        self.assertEqual(attempt.resume, next_resume)
+        self.assertEqual(attempt.resume.job, next_job)
+
+    def test_rule_allocation_allows_job_without_required_majors(self):
+        self.candidate.highest_major = "材料科学与工程"
+        self.candidate.save(update_fields=["highest_major"])
+
+        allocate.run(mode="rule")
+
+        attempt = m.AssignmentAttempt.objects.get()
+        self.assertEqual(attempt.resume, self.resume)
+        self.assertEqual(attempt.resume.job, self.job)
+
     def test_rule_allocation_matches_school_tag_rule_links(self):
         first_tag = m.SchoolTag.objects.create(code="A", name="平台A")
         highest_tag = m.SchoolTag.objects.create(code="A_PLUS", name="平台A+")

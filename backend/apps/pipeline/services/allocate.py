@@ -504,7 +504,11 @@ def _create_next_auto_attempt(workflow, rules, mode="rule", processing_run=None)
         return None
 
     strategy = get_strategy(mode)
-    jobs = list(m.Job.objects.select_related("department").filter(is_active=True))
+    jobs = list(
+        m.Job.objects.select_related("department")
+        .prefetch_related("majors")
+        .filter(is_active=True)
+    )
     had_resume = False
     saw_job_gap = False
     saw_department_gap = False
@@ -842,7 +846,11 @@ def retry_agent_decision(decision):
         return new_decision, None
 
     strategy = get_strategy("ai")
-    jobs = list(m.Job.objects.select_related("department").filter(is_active=True))
+    jobs = list(
+        m.Job.objects.select_related("department")
+        .prefetch_related("majors")
+        .filter(is_active=True)
+    )
     job, _category, classify_reason = _classify_resume(resume, strategy, jobs, "ai")
     if not job:
         new_decision = _create_agent_failure_decision(
