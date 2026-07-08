@@ -37,6 +37,30 @@ export function fetchConfigs() {
 export function updateConfig(key, value) {
   return client.patch(`/configs/${key}/`, { value })
 }
+export function fetchSchoolTagRules(params) {
+  return client.get('/school-tag-rules/', { params })
+}
+export function createSchoolTagRule(body) {
+  return client.post('/school-tag-rules/', body)
+}
+export function updateSchoolTagRule(id, body) {
+  return client.patch(`/school-tag-rules/${id}/`, body)
+}
+export function deleteSchoolTagRule(id) {
+  return client.delete(`/school-tag-rules/${id}/`)
+}
+export function fetchSchoolTags(params) {
+  return client.get('/school-tags/', { params })
+}
+export function createSchoolTag(body) {
+  return client.post('/school-tags/', body)
+}
+export function updateSchoolTag(id, body) {
+  return client.patch(`/school-tags/${id}/`, body)
+}
+export function deleteSchoolTag(id) {
+  return client.delete(`/school-tags/${id}/`)
+}
 
 // ---- Data import ----
 // POST /api/import/  (multipart)
@@ -93,6 +117,9 @@ export function fetchDepartments(params) {
 }
 export function fetchContacts(params) {
   return client.get('/contacts/', { params })
+}
+export function deleteContact(id) {
+  return client.delete(`/contacts/${id}/`)
 }
 
 // ---- Pipeline ----

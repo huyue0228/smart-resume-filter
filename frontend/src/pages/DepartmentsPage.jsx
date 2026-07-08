@@ -1,7 +1,7 @@
 import { useRef } from 'react'
 import { PageContainer, ProTable } from '@ant-design/pro-components'
-import { Tag } from 'antd'
-import { fetchContacts } from '../api/services'
+import { message, Popconfirm, Space, Tag } from 'antd'
+import { deleteContact, fetchContacts } from '../api/services'
 import ImportButton from '../components/ImportButton'
 import {
   normalizeTableFilters,
@@ -16,6 +16,16 @@ const IMPORT_FIELDS = [
 
 export default function DepartmentsPage() {
   const actionRef = useRef()
+
+  const handleDelete = async (record) => {
+    try {
+      await deleteContact(record.id)
+      message.success('已删除')
+      actionRef.current?.reload()
+    } catch (error) {
+      message.error(error?.response?.data?.detail || '删除失败')
+    }
+  }
 
   const baseColumns = [
     { title: '姓名', dataIndex: 'name', fixed: 'left', width: 120, ...textColumnFilter('筛选姓名') },
@@ -78,6 +88,26 @@ export default function DepartmentsPage() {
       width: 140,
       ...textColumnFilter('筛选主体'),
       render: (_, r) => (r.entity ? <Tag color="blue">{r.entity}</Tag> : '-'),
+    },
+    {
+      title: '操作',
+      valueType: 'option',
+      fixed: 'right',
+      width: 90,
+      render: (_, record) => (
+        <Space>
+          <Popconfirm
+            title="删除接口人"
+            description="将停用该接口人及绑定账号，历史分配记录会保留。"
+            okText="删除"
+            cancelText="取消"
+            okButtonProps={{ danger: true }}
+            onConfirm={() => handleDelete(record)}
+          >
+            <a style={{ color: '#cf1322' }}>删除</a>
+          </Popconfirm>
+        </Space>
+      ),
     },
   ]
   const { columns, components, scrollX } = useResizableColumns(baseColumns)

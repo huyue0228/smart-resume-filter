@@ -49,6 +49,53 @@ class AllocationDesignContractTests(TestCase):
         self.assertIsNone(attempt.matched_rule)
         self.assertEqual(self.candidate.workflow.status, m.CandidateWorkflow.STATUS_IN_PROGRESS)
 
+    def test_rule_allocation_matches_school_tag_rule_links(self):
+        first_tag = m.SchoolTag.objects.create(code="A", name="平台A")
+        highest_tag = m.SchoolTag.objects.create(code="A_PLUS", name="平台A+")
+        self.candidate.first_degree_tag = first_tag
+        self.candidate.highest_degree_tag = highest_tag
+        self.candidate.save(update_fields=["first_degree_tag", "highest_degree_tag"])
+        rule = m.SchoolTagRule.objects.create(name="目标院校", priority=1, is_active=True)
+        m.SchoolTagRuleTag.objects.create(
+            rule=rule,
+            school_tag=first_tag,
+            degree_type=m.SchoolTagRuleTag.DEGREE_FIRST,
+        )
+        m.SchoolTagRuleTag.objects.create(
+            rule=rule,
+            school_tag=highest_tag,
+            degree_type=m.SchoolTagRuleTag.DEGREE_HIGHEST,
+        )
+
+        allocate.run(mode="rule")
+
+        attempt = m.AssignmentAttempt.objects.get()
+        self.assertEqual(attempt.matched_rule, rule)
+
+    def test_school_gate_does_not_fall_back_to_legacy_platform_text(self):
+        first_tag = m.SchoolTag.objects.create(code="A", name="平台A")
+        highest_tag = m.SchoolTag.objects.create(code="A_PLUS", name="平台A+")
+        rule = m.SchoolTagRule.objects.create(name="目标院校", priority=1, is_active=True)
+        m.SchoolTagRuleTag.objects.create(
+            rule=rule,
+            school_tag=first_tag,
+            degree_type=m.SchoolTagRuleTag.DEGREE_FIRST,
+        )
+        m.SchoolTagRuleTag.objects.create(
+            rule=rule,
+            school_tag=highest_tag,
+            degree_type=m.SchoolTagRuleTag.DEGREE_HIGHEST,
+        )
+
+        allocate.run(mode="rule")
+
+        self.assertFalse(m.AssignmentAttempt.objects.exists())
+        self.candidate.workflow.refresh_from_db()
+        self.assertEqual(
+            self.candidate.workflow.archive_reason,
+            m.CandidateWorkflow.ARCHIVE_SCHOOL_RULE_NOT_MATCHED,
+        )
+
     def test_ai_allocation_uses_configured_review_threshold(self):
         m.Config.objects.create(key="ai_dispatch_threshold", value=0.8)
         m.Config.objects.create(key="ai_review_threshold", value=0.5)

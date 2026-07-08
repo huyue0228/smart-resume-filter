@@ -197,6 +197,28 @@ def _sync_contact_user(contact):
     return user
 
 
+def _contact_has_history(contact):
+    return (
+        contact.assignment_attempts.exists()
+        or contact.sub_assignment_attempts.exists()
+        or contact.handoffs_from.exists()
+        or contact.handoffs_to.exists()
+        or contact.agent_decisions.exists()
+    )
+
+
+def _disable_contact_users(contact):
+    User.objects.filter(contact=contact).update(is_active=False)
+
+
+def _deactivate_contact(contact):
+    _disable_contact_users(contact)
+    if contact.is_active:
+        contact.is_active = False
+        contact.save(update_fields=["is_active"])
+    return contact
+
+
 def _split_majors(text):
     if not text:
         return []
@@ -241,9 +263,6 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
             m.Job.objects.all().delete()
         if files.get("schools"):
             m.School.objects.all().delete()
-        if files.get("contacts"):
-            m.Contact.objects.update(is_active=False)
-            User.objects.filter(contact__isnull=False).update(is_active=False)
 
     # 院校清单
     if files.get("schools"):
@@ -252,8 +271,20 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
             name = _val(row, "学校")
             if not name:
                 continue
+            tag_text = _val(row, "院校标签") or _val(row, "平台")
+            school_tag = None
+            if tag_text:
+                school_tag, _ = m.SchoolTag.objects.update_or_create(
+                    code=tag_text,
+                    defaults={"name": tag_text, "is_active": True},
+                )
             m.School.objects.update_or_create(
-                name=name, defaults={"platform": _val(row, "平台")}
+                name=name,
+                defaults={
+                    "platform": tag_text,
+                    "province": _val(row, "所在省份") or _val(row, "省份"),
+                    "school_tag": school_tag,
+                },
             )
             counts["schools"] += 1
 
@@ -261,6 +292,14 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
     if files.get("contacts"):
         ensure_rbac_defaults()
         df = _read_excel(files["contacts"])
+        imported_employee_nos = {
+            _val(row, "工号") for _, row in df.iterrows() if _val(row, "工号")
+        }
+        if mode == "replace":
+            for contact in m.Contact.objects.exclude(
+                employee_no__in=imported_employee_nos
+            ):
+                _deactivate_contact(contact)
         for _, row in df.iterrows():
             no = _val(row, "工号")
             name = _val(row, "姓名")

@@ -5,6 +5,7 @@ from . import models
 for model in (
     models.Department,
     models.Contact,
+    models.SchoolTag,
     models.School,
     models.Job,
     models.JobMajor,
@@ -12,6 +13,7 @@ for model in (
     models.Resume,
     models.ResumeProfile,
     models.SchoolTagRule,
+    models.SchoolTagRuleTag,
     models.CandidateWorkflow,
     models.AssignmentAttempt,
     models.AssignmentHandoff,

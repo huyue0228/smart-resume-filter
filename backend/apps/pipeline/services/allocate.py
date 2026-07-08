@@ -7,6 +7,7 @@ from apps.core import models as m
 from apps.pipeline import ai_config
 
 from ..strategies import get_strategy
+from . import school_admission
 
 
 UNFEEDBACKED_STATUSES = [
@@ -15,26 +16,6 @@ UNFEEDBACKED_STATUSES = [
     m.AssignmentAttempt.STATUS_DISPATCHED_L2,
     m.AssignmentAttempt.STATUS_ASSIGNED_L3,
 ]
-
-
-def _active_rules():
-    return list(m.SchoolTagRule.objects.filter(is_active=True).order_by("priority", "id"))
-
-
-def _matches_rule(candidate, rule):
-    return (
-        candidate.first_degree_platform in (rule.first_degree_tags or [])
-        and candidate.highest_degree_platform in (rule.highest_degree_tags or [])
-    )
-
-
-def _matched_rule(candidate, rules):
-    if not rules:
-        return None
-    for rule in rules:
-        if _matches_rule(candidate, rule):
-            return rule
-    return None
 
 
 def _archive(workflow, reason, detail):
@@ -448,8 +429,8 @@ def _process_ai_recommendation(
 def _create_next_auto_attempt(workflow, rules, mode="rule", processing_run=None):
     workflow._processing_run = processing_run
     candidate = workflow.candidate
-    matched_rule = _matched_rule(candidate, rules)
-    if rules and not matched_rule:
+    admission = school_admission.evaluate(candidate, rules)
+    if not admission.passed:
         _archive(
             workflow,
             m.CandidateWorkflow.ARCHIVE_SCHOOL_RULE_NOT_MATCHED,
@@ -483,7 +464,7 @@ def _create_next_auto_attempt(workflow, rules, mode="rule", processing_run=None)
             return _process_ai_recommendation(
                 workflow,
                 resume,
-                matched_rule=matched_rule,
+                matched_rule=admission.matched_rule,
                 job=job,
                 contact=contact,
                 classify_reason=classify_reason,
@@ -495,10 +476,10 @@ def _create_next_auto_attempt(workflow, rules, mode="rule", processing_run=None)
             contact=contact,
             source=m.AssignmentAttempt.SOURCE_RULE,
             mode=mode,
-            matched_rule=matched_rule,
+            matched_rule=admission.matched_rule,
             match_reason=(
-                f"命中院校规则：{matched_rule.name}"
-                if matched_rule
+                f"命中院校规则：{admission.matched_rule.name}"
+                if admission.matched_rule
                 else "未启用院校准入规则，按设计视为通过"
             ),
         )
@@ -526,7 +507,7 @@ def _create_next_auto_attempt(workflow, rules, mode="rule", processing_run=None)
 
 @transaction.atomic
 def run(scope=None, mode="rule", processing_run=None):
-    rules = _active_rules()
+    rules = school_admission.active_rules()
 
     cancelled = 0
     created = 0
@@ -736,7 +717,7 @@ def submit_feedback(attempt, result, note=""):
             "updated_at",
         ]
     )
-    rules = _active_rules()
+    rules = school_admission.active_rules()
     created = _create_next_auto_attempt(
         workflow, rules, mode=workflow.dispatch_strategy or attempt.match_mode or "rule"
     )
@@ -770,9 +751,9 @@ def retry_agent_decision(decision):
         m.AssignmentAttempt.CANCEL_RERUN,
         source=m.AssignmentAttempt.SOURCE_AI,
     )
-    rules = _active_rules()
-    matched_rule = _matched_rule(resume.candidate, rules)
-    if rules and not matched_rule:
+    rules = school_admission.active_rules()
+    admission = school_admission.evaluate(resume.candidate, rules)
+    if not admission.passed:
         new_decision = _create_agent_failure_decision(
             workflow,
             resume,
@@ -814,7 +795,7 @@ def retry_agent_decision(decision):
     attempt = _process_ai_recommendation(
         workflow,
         resume,
-        matched_rule=matched_rule,
+        matched_rule=admission.matched_rule,
         job=job,
         contact=contact,
         classify_reason=classify_reason,

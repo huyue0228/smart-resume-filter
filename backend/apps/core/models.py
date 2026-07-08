@@ -45,12 +45,39 @@ class Contact(models.Model):
         return f"{self.name}({self.employee_no})"
 
 
+class SchoolTag(models.Model):
+    """院校标签字典。"""
+
+    code = models.CharField(max_length=64, unique=True)
+    name = models.CharField(max_length=64)
+    is_default = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["code", "id"]
+        indexes = [
+            models.Index(fields=["code", "is_active"]),
+            models.Index(fields=["is_default"]),
+        ]
+
+    def __str__(self):
+        return self.name
+
+
 class School(models.Model):
     """院校清单。"""
 
     name = models.CharField(max_length=128, unique=True, help_text="学校")
     platform = models.CharField(max_length=64, blank=True, help_text="平台标签")
     region = models.CharField(max_length=16, blank=True, help_text="南/北（户籍缺失兜底）")
+    province = models.CharField(max_length=32, blank=True)
+    school_tag = models.ForeignKey(
+        SchoolTag,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="schools",
+    )
 
     def __str__(self):
         return self.name
@@ -100,6 +127,20 @@ class Candidate(models.Model):
     # Step3 院校分类结果
     first_degree_platform = models.CharField(max_length=64, blank=True)
     highest_degree_platform = models.CharField(max_length=64, blank=True)
+    first_degree_tag = models.ForeignKey(
+        SchoolTag,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="first_degree_candidates",
+    )
+    highest_degree_tag = models.ForeignKey(
+        SchoolTag,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="highest_degree_candidates",
+    )
 
     imported_at = models.DateTimeField(auto_now_add=True, help_text="导入时间（时间标签）")
     updated_at = models.DateTimeField(auto_now=True)
@@ -158,8 +199,6 @@ class SchoolTagRule(models.Model):
     """院校标签准入规则。"""
 
     name = models.CharField(max_length=128)
-    first_degree_tags = models.JSONField(default=list, blank=True)
-    highest_degree_tags = models.JSONField(default=list, blank=True)
     is_active = models.BooleanField(default=True)
     priority = models.IntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -173,6 +212,35 @@ class SchoolTagRule(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class SchoolTagRuleTag(models.Model):
+    """院校准入规则标签明细。"""
+
+    DEGREE_FIRST = "first"
+    DEGREE_HIGHEST = "highest"
+    DEGREE_CHOICES = [
+        (DEGREE_FIRST, "第一学历"),
+        (DEGREE_HIGHEST, "最高学历"),
+    ]
+
+    rule = models.ForeignKey(
+        SchoolTagRule, on_delete=models.CASCADE, related_name="tag_links"
+    )
+    school_tag = models.ForeignKey(
+        SchoolTag, on_delete=models.PROTECT, related_name="rule_links"
+    )
+    degree_type = models.CharField(max_length=16, choices=DEGREE_CHOICES)
+
+    class Meta:
+        unique_together = ("rule", "school_tag", "degree_type")
+        indexes = [
+            models.Index(fields=["rule", "degree_type"]),
+            models.Index(fields=["school_tag", "degree_type"]),
+        ]
+
+    def __str__(self):
+        return f"{self.rule}-{self.school_tag}-{self.degree_type}"
 
 
 class CandidateWorkflow(models.Model):

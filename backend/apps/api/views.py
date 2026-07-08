@@ -26,7 +26,11 @@ from apps.accounts.permissions import (
 )
 from apps.core import models as m
 from apps.ingestion import snapshot
-from apps.ingestion.sources import RESUME_SUBDIR, import_files
+from apps.ingestion.sources import (
+    RESUME_SUBDIR,
+    _deactivate_contact,
+    import_files,
+)
 from apps.pipeline.ai_config import PUBLIC_AI_CONFIG_REGISTRY
 from apps.pipeline import runner
 from apps.pipeline.services import allocate as allocate_service
@@ -95,7 +99,7 @@ def resume_preview_response(resume):
     content_type = mimetypes.guess_type(fname)[0] or "application/octet-stream"
     with open(path, "rb") as file_obj:
         response = HttpResponse(file_obj.read(), content_type=content_type)
-    response["Content-Disposition"] = "inline"
+    response["Content-Disposition"] = f"inline; filename*=UTF-8''{quote(fname)}"
     response["X-Resume-Filename"] = quote(fname)
     return response
 
@@ -329,7 +333,11 @@ class CandidateViewSet(PermissionedModelViewSet):
             )
         if p.get("school_tag"):
             qs = qs.filter(
-                Q(highest_degree_platform__icontains=p["school_tag"])
+                Q(highest_degree_tag__name__icontains=p["school_tag"])
+                | Q(highest_degree_tag__code__icontains=p["school_tag"])
+                | Q(first_degree_tag__name__icontains=p["school_tag"])
+                | Q(first_degree_tag__code__icontains=p["school_tag"])
+                | Q(highest_degree_platform__icontains=p["school_tag"])
                 | Q(first_degree_platform__icontains=p["school_tag"])
             )
         status_filter = p.get("status")
@@ -412,14 +420,37 @@ class SchoolViewSet(PermissionedModelViewSet):
     }
 
     def get_queryset(self):
-        qs = m.School.objects.all().order_by("name")
+        qs = m.School.objects.select_related("school_tag").order_by("name")
         p = self.request.query_params
         if p.get("name"):
             qs = qs.filter(name__icontains=p["name"])
         if p.get("platform"):
-            qs = qs.filter(platform__icontains=p["platform"])
+            qs = qs.filter(
+                Q(platform__icontains=p["platform"])
+                | Q(school_tag__name__icontains=p["platform"])
+                | Q(school_tag__code__icontains=p["platform"])
+            )
         if p.get("region"):
             qs = qs.filter(region=p["region"])
+        if p.get("province"):
+            qs = qs.filter(province__icontains=p["province"])
+        return qs
+
+
+class SchoolTagViewSet(PermissionedModelViewSet):
+    serializer_class = serializers.SchoolTagSerializer
+    permission_code = "settings.manage_config"
+
+    def get_queryset(self):
+        qs = m.SchoolTag.objects.all().order_by("code", "id")
+        p = self.request.query_params
+        if p.get("code"):
+            qs = qs.filter(code__icontains=p["code"])
+        if p.get("name"):
+            qs = qs.filter(name__icontains=p["name"])
+        is_active = bool_query_value(p.get("is_active"))
+        if is_active is not None:
+            qs = qs.filter(is_active=is_active)
         return qs
 
 
@@ -456,6 +487,11 @@ class ContactViewSet(PermissionedModelViewSet):
     def get_queryset(self):
         qs = m.Contact.objects.select_related("department").order_by("id")
         p = self.request.query_params
+        is_active = bool_query_value(p.get("is_active"))
+        if is_active is None:
+            qs = qs.filter(is_active=True)
+        else:
+            qs = qs.filter(is_active=is_active)
         if p.get("name"):
             qs = qs.filter(name__icontains=p["name"])
         if p.get("employee_no"):
@@ -473,12 +509,14 @@ class ContactViewSet(PermissionedModelViewSet):
         can_delegate = bool_query_value(p.get("can_delegate"))
         if can_delegate is not None:
             qs = qs.filter(can_delegate=can_delegate)
-        is_active = bool_query_value(p.get("is_active"))
-        if is_active is not None:
-            qs = qs.filter(is_active=is_active)
         if p.get("entity"):
             qs = qs.filter(department__entity__icontains=p["entity"])
         return qs
+
+    def destroy(self, request, *args, **kwargs):
+        contact = self.get_object()
+        _deactivate_contact(contact)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class SchoolTagRuleViewSet(PermissionedModelViewSet):
@@ -486,7 +524,9 @@ class SchoolTagRuleViewSet(PermissionedModelViewSet):
     permission_code = "settings.manage_config"
 
     def get_queryset(self):
-        qs = m.SchoolTagRule.objects.all().order_by("priority", "id")
+        qs = m.SchoolTagRule.objects.prefetch_related(
+            "tag_links__school_tag"
+        ).order_by("priority", "id")
         p = self.request.query_params
         if p.get("is_active") in ["true", "false"]:
             qs = qs.filter(is_active=p["is_active"] == "true")

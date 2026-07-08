@@ -333,6 +333,85 @@ class RbacApiTests(TestCase):
         self.assertIn("settings.manage_permissions", codes)
 
 
+class SchoolRuleConfigApiTests(TestCase):
+    def setUp(self):
+        ensure_rbac_defaults()
+        self.client = APIClient()
+        self.admin = User.objects.create_user(
+            username="admin-school-rule", password="pass", role=User.ROLE_ADMIN
+        )
+        self.admin.groups.add(Group.objects.get(name="管理员"))
+        self.client.force_authenticate(self.admin)
+
+    def test_school_tag_crud_endpoint_creates_tag_dictionary_item(self):
+        response = self.client.post(
+            "/api/school-tags/",
+            {
+                "code": "A",
+                "name": "平台A",
+                "is_default": False,
+                "is_active": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["code"], "A")
+        self.assertEqual(response.data["name"], "平台A")
+        self.assertTrue(m.SchoolTag.objects.filter(code="A", name="平台A").exists())
+
+    def test_school_tag_rule_accepts_first_and_highest_tag_ids(self):
+        first_tag = m.SchoolTag.objects.create(code="A", name="平台A")
+        highest_tag = m.SchoolTag.objects.create(code="B", name="平台B")
+
+        response = self.client.post(
+            "/api/school-tag-rules/",
+            {
+                "name": "重点院校组合",
+                "priority": 10,
+                "is_active": True,
+                "first_degree_tag_ids": [first_tag.id],
+                "highest_degree_tag_ids": [highest_tag.id],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["first_degree_tags"][0]["id"], first_tag.id)
+        self.assertEqual(response.data["highest_degree_tags"][0]["id"], highest_tag.id)
+        self.assertTrue(
+            m.SchoolTagRuleTag.objects.filter(
+                rule_id=response.data["id"],
+                school_tag=first_tag,
+                degree_type=m.SchoolTagRuleTag.DEGREE_FIRST,
+            ).exists()
+        )
+
+    def test_active_school_tag_rule_requires_first_and_highest_tags(self):
+        first_tag = m.SchoolTag.objects.create(code="A", name="平台A")
+
+        response = self.client.post(
+            "/api/school-tag-rules/",
+            {
+                "name": "缺少最高学历标签",
+                "priority": 10,
+                "is_active": True,
+                "first_degree_tag_ids": [first_tag.id],
+                "highest_degree_tag_ids": [],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("highest_degree_tag_ids", response.data)
+
+    def test_school_tag_rule_model_no_longer_keeps_legacy_json_fields(self):
+        field_names = {field.name for field in m.SchoolTagRule._meta.get_fields()}
+
+        self.assertNotIn("first_degree_tags", field_names)
+        self.assertNotIn("highest_degree_tags", field_names)
+
+
 class ListFilteringPaginationApiTests(TestCase):
     def setUp(self):
         ensure_rbac_defaults()
@@ -584,6 +663,35 @@ class ResumePreviewApiTests(TestCase):
         self.assertIn("inline", response["Content-Disposition"])
         self.assertEqual(response["X-Resume-Filename"], quote("张三（A1001）.txt"))
 
+    def test_resume_preview_returns_pdf_type_and_inline_filename(self):
+        with TemporaryDirectory() as media_root:
+            resume_dir = Path(media_root) / "resumes"
+            resume_dir.mkdir()
+            (resume_dir / "张三（A1001）.pdf").write_bytes(b"%PDF-1.4\n%test\n")
+            candidate = m.Candidate.objects.create(
+                identity_hash="candidate-preview-pdf",
+                name="张三",
+                phone="13800000000",
+            )
+            resume = m.Resume.objects.create(
+                candidate=candidate,
+                apply_id="A1001",
+                position_name="后端工程师",
+                resume_file="张三（A1001）.pdf",
+            )
+
+            with self.settings(MEDIA_ROOT=media_root):
+                response = self.client.get(f"/api/resumes/{resume.id}/preview/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/pdf")
+        self.assertIn("inline", response["Content-Disposition"])
+        self.assertIn(
+            f"filename*=UTF-8''{quote('张三（A1001）.pdf')}",
+            response["Content-Disposition"],
+        )
+        self.assertTrue(response.content.startswith(b"%PDF"))
+
     def test_resume_preview_returns_404_when_file_is_missing(self):
         candidate = m.Candidate.objects.create(
             identity_hash="candidate-preview-missing",
@@ -790,3 +898,180 @@ class ImportApiTests(TestCase):
         self.assertEqual(m.AssignmentAttempt.objects.count(), 1)
         self.assertFalse(m.Contact.objects.get(employee_no="OLD001").is_active)
         self.assertTrue(m.Contact.objects.get(employee_no="NEW001").is_active)
+
+    def test_replace_contacts_import_deactivates_old_contacts_and_users(self):
+        old_department = m.Department.objects.create(name="旧部门", level=2)
+        old_contact = m.Contact.objects.create(
+            name="旧接口人",
+            employee_no="OLD002",
+            department=old_department,
+            contact_level=m.Contact.LEVEL_SECONDARY,
+        )
+        old_user = User.objects.create_user(
+            username="OLD002",
+            password="pass",
+            role=User.ROLE_SECONDARY_CONTACT,
+            contact=old_contact,
+        )
+        old_user.groups.add(Group.objects.get(name="二级接口人"))
+        buf = BytesIO()
+        pd.DataFrame(
+            [
+                {
+                    "工号": "NEW002",
+                    "姓名": "新接口人",
+                    "一层部门": "技术中心",
+                    "二层部门": "后端组",
+                    "接口人层级": "二级接口人",
+                }
+            ]
+        ).to_excel(buf, index=False)
+        buf.seek(0)
+
+        response = self.client.post(
+            "/api/import/",
+            {
+                "mode": "replace",
+                "contacts": SimpleUploadedFile(
+                    "部门接口人信息.xlsx",
+                    buf.getvalue(),
+                    content_type=(
+                        "application/vnd.openxmlformats-officedocument."
+                        "spreadsheetml.sheet"
+                    ),
+                ),
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        old_contact.refresh_from_db()
+        self.assertFalse(old_contact.is_active)
+        old_user.refresh_from_db()
+        self.assertFalse(old_user.is_active)
+        self.assertEqual(old_user.contact_id, old_contact.id)
+
+
+class ContactDeleteApiTests(TestCase):
+    def setUp(self):
+        ensure_rbac_defaults()
+        self.client = APIClient()
+        self.admin = User.objects.create_user(
+            username="admin-contact-delete", password="pass", role=User.ROLE_ADMIN
+        )
+        self.admin.groups.add(Group.objects.get(name="管理员"))
+        self.client.force_authenticate(self.admin)
+
+    def test_delete_contact_deactivates_contact_and_bound_user(self):
+        department = m.Department.objects.create(name="技术二部", level=2)
+        contact = m.Contact.objects.create(
+            name="待删除接口人",
+            employee_no="DEL001",
+            department=department,
+            contact_level=m.Contact.LEVEL_SECONDARY,
+        )
+        user = User.objects.create_user(
+            username="DEL001",
+            password="pass",
+            role=User.ROLE_SECONDARY_CONTACT,
+            contact=contact,
+        )
+        user.groups.add(Group.objects.get(name="二级接口人"))
+
+        response = self.client.delete(f"/api/contacts/{contact.id}/")
+
+        self.assertEqual(response.status_code, 204)
+        contact.refresh_from_db()
+        self.assertFalse(contact.is_active)
+        user.refresh_from_db()
+        self.assertFalse(user.is_active)
+        self.assertEqual(user.contact_id, contact.id)
+
+    def test_delete_contact_with_assignment_history_keeps_history_and_deactivates(self):
+        department = m.Department.objects.create(name="技术二部", level=2)
+        contact = m.Contact.objects.create(
+            name="有历史接口人",
+            employee_no="DEL002",
+            department=department,
+            contact_level=m.Contact.LEVEL_SECONDARY,
+        )
+        candidate = m.Candidate.objects.create(
+            identity_hash="contact-delete-history",
+            name="张三",
+            phone="13800000000",
+        )
+        resume = m.Resume.objects.create(
+            candidate=candidate,
+            apply_id="A1001",
+            position_name="后端工程师",
+        )
+        workflow = m.CandidateWorkflow.objects.create(
+            candidate=candidate,
+            status=m.CandidateWorkflow.STATUS_IN_PROGRESS,
+            current_resume=resume,
+            current_rank=1,
+        )
+        m.AssignmentAttempt.objects.create(
+            workflow=workflow,
+            resume=resume,
+            attempt_no=1,
+            source=m.AssignmentAttempt.SOURCE_RULE,
+            status=m.AssignmentAttempt.STATUS_DISPATCHED_L2,
+            department=department,
+            contact=contact,
+        )
+
+        response = self.client.delete(f"/api/contacts/{contact.id}/")
+
+        self.assertEqual(response.status_code, 204)
+        contact.refresh_from_db()
+        self.assertFalse(contact.is_active)
+        self.assertTrue(
+            m.AssignmentAttempt.objects.filter(contact=contact).exists()
+        )
+
+    def test_contacts_list_defaults_to_active_contacts(self):
+        department = m.Department.objects.create(name="技术二部", level=2)
+        active = m.Contact.objects.create(
+            name="启用接口人",
+            employee_no="LIST001",
+            department=department,
+            contact_level=m.Contact.LEVEL_SECONDARY,
+            is_active=True,
+        )
+        m.Contact.objects.create(
+            name="停用接口人",
+            employee_no="LIST002",
+            department=department,
+            contact_level=m.Contact.LEVEL_SECONDARY,
+            is_active=False,
+        )
+
+        response = self.client.get("/api/contacts/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item["id"] for item in response.data["results"]], [active.id])
+
+    def test_contacts_list_can_filter_inactive_contacts(self):
+        department = m.Department.objects.create(name="技术二部", level=2)
+        m.Contact.objects.create(
+            name="启用接口人",
+            employee_no="LIST003",
+            department=department,
+            contact_level=m.Contact.LEVEL_SECONDARY,
+            is_active=True,
+        )
+        inactive = m.Contact.objects.create(
+            name="停用接口人",
+            employee_no="LIST004",
+            department=department,
+            contact_level=m.Contact.LEVEL_SECONDARY,
+            is_active=False,
+        )
+
+        response = self.client.get("/api/contacts/", {"is_active": "false"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [item["id"] for item in response.data["results"]], [inactive.id]
+        )

@@ -194,7 +194,13 @@ class ResumeListSerializer(serializers.ModelSerializer):
 
     def get_school_tag(self, obj):
         c = obj.candidate
-        return c.highest_degree_platform or c.first_degree_platform or ""
+        return (
+            getattr(c.highest_degree_tag, "name", "")
+            or getattr(c.first_degree_tag, "name", "")
+            or c.highest_degree_platform
+            or c.first_degree_platform
+            or ""
+        )
 
 
 class ResumeBriefSerializer(serializers.ModelSerializer):
@@ -240,6 +246,8 @@ class CandidateSerializer(serializers.ModelSerializer):
             "first_degree_school",
             "highest_degree_school",
             "highest_major",
+            "first_degree_tag",
+            "highest_degree_tag",
             "first_degree_platform",
             "highest_degree_platform",
             "school_tag",
@@ -278,7 +286,13 @@ class CandidateSerializer(serializers.ModelSerializer):
         )[0]
 
     def get_school_tag(self, obj):
-        return obj.highest_degree_platform or obj.first_degree_platform or ""
+        return (
+            getattr(obj.highest_degree_tag, "name", "")
+            or getattr(obj.first_degree_tag, "name", "")
+            or obj.highest_degree_platform
+            or obj.first_degree_platform
+            or ""
+        )
 
     def get_workflow_id(self, obj):
         workflow = self._workflow(obj)
@@ -374,9 +388,21 @@ class JobSerializer(serializers.ModelSerializer):
 
 
 class SchoolSerializer(serializers.ModelSerializer):
+    school_tag_name = serializers.CharField(
+        source="school_tag.name", read_only=True, default=""
+    )
+
     class Meta:
         model = m.School
-        fields = "__all__"
+        fields = [
+            "id",
+            "name",
+            "platform",
+            "region",
+            "province",
+            "school_tag",
+            "school_tag_name",
+        ]
 
 
 class DepartmentSerializer(serializers.ModelSerializer):
@@ -410,10 +436,150 @@ class ContactSerializer(serializers.ModelSerializer):
         ]
 
 
+class SchoolTagSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = m.SchoolTag
+        fields = ["id", "code", "name", "is_default", "is_active"]
+
+
 class SchoolTagRuleSerializer(serializers.ModelSerializer):
+    first_degree_tags = serializers.SerializerMethodField()
+    highest_degree_tags = serializers.SerializerMethodField()
+    first_degree_tag_ids = serializers.ListField(
+        child=serializers.IntegerField(), write_only=True, required=False
+    )
+    highest_degree_tag_ids = serializers.ListField(
+        child=serializers.IntegerField(), write_only=True, required=False
+    )
+
     class Meta:
         model = m.SchoolTagRule
-        fields = "__all__"
+        fields = [
+            "id",
+            "name",
+            "first_degree_tags",
+            "highest_degree_tags",
+            "first_degree_tag_ids",
+            "highest_degree_tag_ids",
+            "is_active",
+            "priority",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["created_at", "updated_at"]
+
+    def _tag_payload(self, obj, degree_type):
+        links = sorted(
+            [
+                link
+                for link in obj.tag_links.all()
+                if link.degree_type == degree_type
+            ],
+            key=lambda link: (link.school_tag.code, link.school_tag_id),
+        )
+        return [
+            {
+                "id": link.school_tag_id,
+                "code": link.school_tag.code,
+                "name": link.school_tag.name,
+            }
+            for link in links
+        ]
+
+    def get_first_degree_tags(self, obj):
+        return self._tag_payload(obj, m.SchoolTagRuleTag.DEGREE_FIRST)
+
+    def get_highest_degree_tags(self, obj):
+        return self._tag_payload(obj, m.SchoolTagRuleTag.DEGREE_HIGHEST)
+
+    def _tags_for_ids(self, tag_ids, field_name):
+        unique_ids = list(dict.fromkeys(tag_ids or []))
+        tags_by_id = {
+            tag.id: tag for tag in m.SchoolTag.objects.filter(id__in=unique_ids)
+        }
+        tags = [tags_by_id[tag_id] for tag_id in unique_ids if tag_id in tags_by_id]
+        found_ids = {tag.id for tag in tags}
+        missing = set(unique_ids) - found_ids
+        if missing:
+            raise serializers.ValidationError({field_name: "存在无效院校标签"})
+        return tags
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        is_active = attrs.get(
+            "is_active",
+            self.instance.is_active if self.instance else True,
+        )
+        if not is_active:
+            return attrs
+
+        first_ids = attrs.get("first_degree_tag_ids")
+        highest_ids = attrs.get("highest_degree_tag_ids")
+        if self.instance:
+            if first_ids is None:
+                first_ids = list(
+                    self.instance.tag_links.filter(
+                        degree_type=m.SchoolTagRuleTag.DEGREE_FIRST
+                    ).values_list("school_tag_id", flat=True)
+                )
+            if highest_ids is None:
+                highest_ids = list(
+                    self.instance.tag_links.filter(
+                        degree_type=m.SchoolTagRuleTag.DEGREE_HIGHEST
+                    ).values_list("school_tag_id", flat=True)
+                )
+
+        errors = {}
+        if not first_ids:
+            errors["first_degree_tag_ids"] = "启用规则至少需要一个第一学历标签"
+        if not highest_ids:
+            errors["highest_degree_tag_ids"] = "启用规则至少需要一个最高学历标签"
+        if errors:
+            raise serializers.ValidationError(errors)
+        return attrs
+
+    def _sync_tag_links(self, rule, degree_type, tags):
+        if tags is None:
+            return
+        rule.tag_links.filter(degree_type=degree_type).delete()
+        m.SchoolTagRuleTag.objects.bulk_create(
+            [
+                m.SchoolTagRuleTag(
+                    rule=rule,
+                    school_tag=tag,
+                    degree_type=degree_type,
+                )
+                for tag in tags
+            ]
+        )
+
+    def create(self, validated_data):
+        first_ids = validated_data.pop("first_degree_tag_ids", [])
+        highest_ids = validated_data.pop("highest_degree_tag_ids", [])
+        first_tags = self._tags_for_ids(first_ids, "first_degree_tag_ids")
+        highest_tags = self._tags_for_ids(highest_ids, "highest_degree_tag_ids")
+        rule = super().create(validated_data)
+        self._sync_tag_links(rule, m.SchoolTagRuleTag.DEGREE_FIRST, first_tags)
+        self._sync_tag_links(rule, m.SchoolTagRuleTag.DEGREE_HIGHEST, highest_tags)
+        return rule
+
+    def update(self, instance, validated_data):
+        first_ids = validated_data.pop("first_degree_tag_ids", None)
+        highest_ids = validated_data.pop("highest_degree_tag_ids", None)
+        first_tags = (
+            self._tags_for_ids(first_ids, "first_degree_tag_ids")
+            if first_ids is not None
+            else None
+        )
+        highest_tags = (
+            self._tags_for_ids(highest_ids, "highest_degree_tag_ids")
+            if highest_ids is not None
+            else None
+        )
+        rule = super().update(instance, validated_data)
+        self._sync_tag_links(rule, m.SchoolTagRuleTag.DEGREE_FIRST, first_tags)
+        self._sync_tag_links(rule, m.SchoolTagRuleTag.DEGREE_HIGHEST, highest_tags)
+        return rule
 
 
 class CandidateWorkflowSerializer(serializers.ModelSerializer):
