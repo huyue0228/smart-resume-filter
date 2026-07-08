@@ -1,5 +1,13 @@
+from io import BytesIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import zipfile
+from urllib.parse import quote
+
 from django.contrib.auth.models import Group
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
+import pandas as pd
 from rest_framework.test import APIClient
 
 from apps.accounts.models import User
@@ -323,3 +331,462 @@ class RbacApiTests(TestCase):
             for permission in module["children"]
         ]
         self.assertIn("settings.manage_permissions", codes)
+
+
+class ListFilteringPaginationApiTests(TestCase):
+    def setUp(self):
+        ensure_rbac_defaults()
+        self.client = APIClient()
+        self.admin = User.objects.create_user(
+            username="admin-list", password="pass", role=User.ROLE_ADMIN
+        )
+        self.admin.groups.add(Group.objects.get(name="管理员"))
+        self.client.force_authenticate(self.admin)
+
+    def test_page_size_query_param_controls_candidate_page_length(self):
+        for index in range(5):
+            m.Candidate.objects.create(
+                identity_hash=f"candidate-page-{index}",
+                name=f"候选人{index}",
+                phone=f"1380000000{index}",
+            )
+
+        response = self.client.get("/api/candidates/", {"page_size": 2})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["count"], 5)
+        self.assertEqual(len(response.data["results"]), 2)
+
+    def test_candidate_header_filters_match_current_resume_and_school_tag(self):
+        keep = m.Candidate.objects.create(
+            identity_hash="candidate-keep",
+            name="张三",
+            phone="13800000001",
+            first_degree_school="南京大学",
+            highest_degree_school="南京大学",
+            highest_major="计算机",
+            highest_degree_platform="平台A",
+        )
+        drop = m.Candidate.objects.create(
+            identity_hash="candidate-drop",
+            name="李四",
+            phone="13900000002",
+            first_degree_school="普通大学",
+            highest_degree_school="普通大学",
+            highest_major="市场营销",
+            highest_degree_platform="平台B",
+        )
+        keep_resume = m.Resume.objects.create(
+            candidate=keep,
+            apply_id="A1001",
+            entity="GW",
+            position_name="后端工程师",
+            volunteer_rank=1,
+            job_category="技术类",
+        )
+        drop_resume = m.Resume.objects.create(
+            candidate=drop,
+            apply_id="B1001",
+            entity="YLS",
+            position_name="产品经理",
+            volunteer_rank=2,
+            job_category="产品类",
+        )
+        m.CandidateWorkflow.objects.create(
+            candidate=keep,
+            status=m.CandidateWorkflow.STATUS_IN_PROGRESS,
+            current_resume=keep_resume,
+            current_rank=1,
+        )
+        m.CandidateWorkflow.objects.create(
+            candidate=drop,
+            status=m.CandidateWorkflow.STATUS_PENDING,
+            current_resume=drop_resume,
+            current_rank=2,
+        )
+
+        response = self.client.get(
+            "/api/candidates/",
+            {
+                "name": "张",
+                "phone": "138",
+                "current_rank": 1,
+                "current_entity": "GW",
+                "current_position_name": "后端",
+                "current_job_category": "技术",
+                "school_tag": "平台A",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item["id"] for item in response.data["results"]], [keep.id])
+
+    def test_job_header_filters_cover_visible_columns(self):
+        department = m.Department.objects.create(name="研发中心", level=2)
+        m.Job.objects.create(
+            entity="GW",
+            department=department,
+            public_name="后端开发",
+            position_name="后端工程师",
+            category="技术类",
+            job_family="研发",
+            location="深圳",
+            education="本科",
+            headcount=3,
+            is_public=True,
+        )
+        m.Job.objects.create(
+            entity="YLS",
+            public_name="产品运营",
+            position_name="产品经理",
+            category="产品类",
+            job_family="产品",
+            location="上海",
+            education="硕士",
+            headcount=1,
+            is_public=False,
+        )
+
+        response = self.client.get(
+            "/api/jobs/",
+            {
+                "entity": "GW",
+                "department_name": "研发",
+                "position_name": "工程师",
+                "job_family": "研发",
+                "location": "深圳",
+                "education": "本科",
+                "headcount": 3,
+                "is_public": "true",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["public_name"], "后端开发")
+
+    def test_school_header_filters_cover_visible_columns(self):
+        m.School.objects.create(name="南京大学", platform="平台A", region="南")
+        m.School.objects.create(name="北京大学", platform="平台B", region="北")
+
+        response = self.client.get("/api/schools/", {"region": "南"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["name"], "南京大学")
+
+    def test_contact_header_filters_cover_visible_columns(self):
+        department = m.Department.objects.create(name="研发二部", level=2, entity="GW")
+        m.Contact.objects.create(
+            name="王五",
+            employee_no="E1001",
+            department=department,
+            contact_level=m.Contact.LEVEL_SECONDARY,
+            can_delegate=True,
+            is_active=True,
+        )
+        m.Contact.objects.create(
+            name="赵六",
+            employee_no="E2001",
+            department=m.Department.objects.create(name="产品二部", level=2, entity="YLS"),
+            contact_level=m.Contact.LEVEL_TERTIARY,
+            can_delegate=False,
+            is_active=False,
+        )
+
+        response = self.client.get(
+            "/api/contacts/",
+            {
+                "department_level": 2,
+                "can_delegate": "true",
+                "entity": "GW",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["name"], "王五")
+
+
+class CandidateExportApiTests(TestCase):
+    def setUp(self):
+        ensure_rbac_defaults()
+        self.client = APIClient()
+        self.hr = User.objects.create_user(
+            username="hr-export", password="pass", role=User.ROLE_HR
+        )
+        self.hr.groups.add(Group.objects.get(name="HR"))
+        self.client.force_authenticate(self.hr)
+
+    def test_candidate_export_returns_zip_for_selected_candidates(self):
+        with TemporaryDirectory() as media_root:
+            resume_dir = Path(media_root) / "resumes"
+            resume_dir.mkdir()
+            (resume_dir / "张三（A1001）.txt").write_text("resume body", encoding="utf-8")
+            candidate = m.Candidate.objects.create(
+                identity_hash="candidate-export",
+                name="张三",
+                phone="13800000000",
+            )
+            m.Resume.objects.create(
+                candidate=candidate,
+                apply_id="A1001",
+                position_name="后端工程师",
+                resume_file="张三（A1001）.txt",
+            )
+
+            with self.settings(MEDIA_ROOT=media_root):
+                response = self.client.get(
+                    "/api/candidates/export/", {"ids": str(candidate.id)}
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/zip")
+        self.assertEqual(response["X-Export-Count"], "1")
+        self.assertEqual(response["X-Export-Missing"], "0")
+        with zipfile.ZipFile(BytesIO(response.content)) as zf:
+            self.assertEqual(zf.namelist(), ["张三（A1001）.txt"])
+            self.assertEqual(zf.read("张三（A1001）.txt").decode("utf-8"), "resume body")
+
+
+class ResumePreviewApiTests(TestCase):
+    def setUp(self):
+        ensure_rbac_defaults()
+        self.client = APIClient()
+        self.hr = User.objects.create_user(
+            username="hr-preview", password="pass", role=User.ROLE_HR
+        )
+        self.hr.groups.add(Group.objects.get(name="HR"))
+        self.client.force_authenticate(self.hr)
+
+    def test_resume_preview_returns_inline_file_content(self):
+        with TemporaryDirectory() as media_root:
+            resume_dir = Path(media_root) / "resumes"
+            resume_dir.mkdir()
+            (resume_dir / "张三（A1001）.txt").write_text("resume body", encoding="utf-8")
+            candidate = m.Candidate.objects.create(
+                identity_hash="candidate-preview",
+                name="张三",
+                phone="13800000000",
+            )
+            resume = m.Resume.objects.create(
+                candidate=candidate,
+                apply_id="A1001",
+                position_name="后端工程师",
+                resume_file="张三（A1001）.txt",
+            )
+
+            with self.settings(MEDIA_ROOT=media_root):
+                response = self.client.get(f"/api/resumes/{resume.id}/preview/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content.decode("utf-8"), "resume body")
+        self.assertIn("inline", response["Content-Disposition"])
+        self.assertEqual(response["X-Resume-Filename"], quote("张三（A1001）.txt"))
+
+    def test_resume_preview_returns_404_when_file_is_missing(self):
+        candidate = m.Candidate.objects.create(
+            identity_hash="candidate-preview-missing",
+            name="李四",
+            phone="13900000000",
+        )
+        resume = m.Resume.objects.create(
+            candidate=candidate,
+            apply_id="A1002",
+            position_name="产品经理",
+        )
+
+        response = self.client.get(f"/api/resumes/{resume.id}/preview/")
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_attempt_resume_preview_uses_attempt_scope(self):
+        department = m.Department.objects.create(name="技术二部", level=2)
+        contact = m.Contact.objects.create(
+            name="技术二级接口人",
+            employee_no="S-A",
+            department=department,
+            contact_level=m.Contact.LEVEL_SECONDARY,
+        )
+        user = User.objects.create_user(
+            username="secondary-preview",
+            password="pass",
+            role=User.ROLE_SECONDARY_CONTACT,
+            contact=contact,
+        )
+        user.groups.add(Group.objects.get(name="二级接口人"))
+
+        with TemporaryDirectory() as media_root:
+            resume_dir = Path(media_root) / "resumes"
+            resume_dir.mkdir()
+            (resume_dir / "王五（A1003）.txt").write_text("attempt body", encoding="utf-8")
+            candidate = m.Candidate.objects.create(
+                identity_hash="candidate-attempt-preview",
+                name="王五",
+                phone="13700000000",
+            )
+            resume = m.Resume.objects.create(
+                candidate=candidate,
+                apply_id="A1003",
+                position_name="测试工程师",
+                resume_file="王五（A1003）.txt",
+            )
+            workflow = m.CandidateWorkflow.objects.create(
+                candidate=candidate,
+                status=m.CandidateWorkflow.STATUS_IN_PROGRESS,
+                current_resume=resume,
+                current_rank=1,
+            )
+            attempt = m.AssignmentAttempt.objects.create(
+                workflow=workflow,
+                resume=resume,
+                attempt_no=1,
+                source=m.AssignmentAttempt.SOURCE_RULE,
+                status=m.AssignmentAttempt.STATUS_DISPATCHED_L2,
+                department=department,
+                contact=contact,
+            )
+
+            self.client.force_authenticate(user)
+            with self.settings(MEDIA_ROOT=media_root):
+                response = self.client.get(
+                    f"/api/workflow-attempts/{attempt.id}/resume-preview/"
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content.decode("utf-8"), "attempt body")
+        self.assertIn("inline", response["Content-Disposition"])
+
+    def test_attempt_resume_preview_hides_unscoped_attempt(self):
+        own_department = m.Department.objects.create(name="技术二部", level=2)
+        other_department = m.Department.objects.create(name="产品二部", level=2)
+        own_contact = m.Contact.objects.create(
+            name="技术二级接口人",
+            employee_no="S-A",
+            department=own_department,
+            contact_level=m.Contact.LEVEL_SECONDARY,
+        )
+        other_contact = m.Contact.objects.create(
+            name="产品二级接口人",
+            employee_no="S-B",
+            department=other_department,
+            contact_level=m.Contact.LEVEL_SECONDARY,
+        )
+        user = User.objects.create_user(
+            username="secondary-unscoped-preview",
+            password="pass",
+            role=User.ROLE_SECONDARY_CONTACT,
+            contact=own_contact,
+        )
+        user.groups.add(Group.objects.get(name="二级接口人"))
+        candidate = m.Candidate.objects.create(
+            identity_hash="candidate-attempt-unscoped",
+            name="赵六",
+            phone="13600000000",
+        )
+        resume = m.Resume.objects.create(
+            candidate=candidate,
+            apply_id="A1004",
+            position_name="产品经理",
+            resume_file="赵六（A1004）.txt",
+        )
+        workflow = m.CandidateWorkflow.objects.create(
+            candidate=candidate,
+            status=m.CandidateWorkflow.STATUS_IN_PROGRESS,
+            current_resume=resume,
+            current_rank=1,
+        )
+        attempt = m.AssignmentAttempt.objects.create(
+            workflow=workflow,
+            resume=resume,
+            attempt_no=1,
+            source=m.AssignmentAttempt.SOURCE_RULE,
+            status=m.AssignmentAttempt.STATUS_DISPATCHED_L2,
+            department=other_department,
+            contact=other_contact,
+        )
+
+        self.client.force_authenticate(user)
+        response = self.client.get(
+            f"/api/workflow-attempts/{attempt.id}/resume-preview/"
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+
+class ImportApiTests(TestCase):
+    def setUp(self):
+        ensure_rbac_defaults()
+        self.client = APIClient()
+        self.hr = User.objects.create_user(
+            username="hr-import", password="pass", role=User.ROLE_HR
+        )
+        self.hr.groups.add(Group.objects.get(name="HR"))
+        self.client.force_authenticate(self.hr)
+
+    def test_replace_contacts_import_keeps_existing_resume_pool(self):
+        candidate = m.Candidate.objects.create(
+            identity_hash="candidate-import",
+            name="张三",
+            phone="13800000000",
+        )
+        m.Resume.objects.create(
+            candidate=candidate,
+            apply_id="A1001",
+            position_name="后端工程师",
+        )
+        old_department = m.Department.objects.create(name="旧部门", level=2)
+        old_contact = m.Contact.objects.create(
+            name="旧接口人",
+            employee_no="OLD001",
+            department=old_department,
+        )
+        workflow = m.CandidateWorkflow.objects.create(
+            candidate=candidate,
+            status=m.CandidateWorkflow.STATUS_IN_PROGRESS,
+        )
+        m.AssignmentAttempt.objects.create(
+            workflow=workflow,
+            resume=m.Resume.objects.get(apply_id="A1001"),
+            attempt_no=1,
+            source=m.AssignmentAttempt.SOURCE_RULE,
+            status=m.AssignmentAttempt.STATUS_PENDING_DISPATCH,
+            department=old_department,
+            contact=old_contact,
+        )
+        buf = BytesIO()
+        pd.DataFrame(
+            [
+                {
+                    "工号": "NEW001",
+                    "姓名": "新接口人",
+                    "一层部门": "技术中心",
+                    "二层部门": "后端组",
+                    "接口人层级": "二级接口人",
+                }
+            ]
+        ).to_excel(buf, index=False)
+        buf.seek(0)
+
+        response = self.client.post(
+            "/api/import/",
+            {
+                "mode": "replace",
+                "contacts": SimpleUploadedFile(
+                    "部门接口人信息.xlsx",
+                    buf.getvalue(),
+                    content_type=(
+                        "application/vnd.openxmlformats-officedocument."
+                        "spreadsheetml.sheet"
+                    ),
+                ),
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(m.Candidate.objects.count(), 1)
+        self.assertEqual(m.Resume.objects.count(), 1)
+        self.assertEqual(m.AssignmentAttempt.objects.count(), 1)
+        self.assertFalse(m.Contact.objects.get(employee_no="OLD001").is_active)
+        self.assertTrue(m.Contact.objects.get(employee_no="NEW001").is_active)

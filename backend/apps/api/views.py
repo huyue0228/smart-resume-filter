@@ -1,6 +1,8 @@
 import io
+import mimetypes
 import os
 import zipfile
+from urllib.parse import quote
 
 from django.conf import settings
 from django.contrib.auth import authenticate
@@ -47,6 +49,55 @@ CONFIG_REGISTRY = {
         "default": False,
     },
 }
+
+
+def bool_query_value(value):
+    if value in ["true", "false"]:
+        return value == "true"
+    return None
+
+
+def resume_zip_response(resumes):
+    resume_dir = os.path.join(settings.MEDIA_ROOT, RESUME_SUBDIR)
+    buf = io.BytesIO()
+    added, missing = 0, []
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for resume in resumes:
+            fname = resume.resume_file
+            path = os.path.join(resume_dir, fname) if fname else ""
+            if path and os.path.exists(path):
+                zf.write(path, arcname=fname)
+                added += 1
+            else:
+                missing.append(f"{resume.candidate.name}（{resume.apply_id}）")
+        if missing:
+            zf.writestr(
+                "缺失简历文件清单.txt",
+                "以下候选人暂无简历文件（未上传简历包或未匹配）：\n"
+                + "\n".join(missing),
+            )
+
+    buf.seek(0)
+    resp = HttpResponse(buf.getvalue(), content_type="application/zip")
+    resp["Content-Disposition"] = 'attachment; filename="resumes_export.zip"'
+    resp["X-Export-Count"] = str(added)
+    resp["X-Export-Missing"] = str(len(missing))
+    return resp
+
+
+def resume_preview_response(resume):
+    if not resume.resume_file:
+        return Response({"detail": "该投递暂无简历文件"}, status=status.HTTP_404_NOT_FOUND)
+    fname = os.path.basename(resume.resume_file)
+    path = os.path.join(settings.MEDIA_ROOT, RESUME_SUBDIR, fname)
+    if not os.path.exists(path):
+        return Response({"detail": "简历文件不存在"}, status=status.HTTP_404_NOT_FOUND)
+    content_type = mimetypes.guess_type(fname)[0] or "application/octet-stream"
+    with open(path, "rb") as file_obj:
+        response = HttpResponse(file_obj.read(), content_type=content_type)
+    response["Content-Disposition"] = "inline"
+    response["X-Resume-Filename"] = quote(fname)
+    return response
 
 
 class PermissionedModelViewSet(viewsets.ModelViewSet):
@@ -166,6 +217,11 @@ class ResumeViewSet(PermissionedReadOnlyModelViewSet):
             qs = qs.filter(imported_at__date__lte=p["imported_before"])
         return qs.distinct()
 
+    @action(detail=True, methods=["get"], url_path="preview")
+    def preview(self, request, pk=None):
+        resume = self.get_object()
+        return resume_preview_response(resume)
+
     @action(detail=True, methods=["post"], url_path="manual-assign")
     def manual_assign(self, request, pk=None):
         if not has_permission_code(request.user, "resume.manual_assign"):
@@ -202,6 +258,7 @@ class CandidateViewSet(PermissionedModelViewSet):
         "update": "resume.import",
         "partial_update": "resume.import",
         "destroy": "resume.import",
+        "export_resumes": "resume.view",
     }
 
     def get_queryset(self):
@@ -226,6 +283,55 @@ class CandidateViewSet(PermissionedModelViewSet):
                 | Q(resumes__apply_id__icontains=search)
                 | Q(resumes__position_name__icontains=search)
             )
+        if p.get("name"):
+            qs = qs.filter(name__icontains=p["name"])
+        if p.get("phone"):
+            qs = qs.filter(phone__icontains=p["phone"])
+        if p.get("first_degree_school"):
+            qs = qs.filter(first_degree_school__icontains=p["first_degree_school"])
+        if p.get("highest_degree_school"):
+            qs = qs.filter(highest_degree_school__icontains=p["highest_degree_school"])
+        if p.get("highest_major"):
+            qs = qs.filter(highest_major__icontains=p["highest_major"])
+        if p.get("current_rank"):
+            qs = qs.filter(
+                Q(workflow__current_rank=p["current_rank"])
+                | Q(workflow__isnull=True, resumes__volunteer_rank=p["current_rank"])
+            )
+        if p.get("current_entity"):
+            qs = qs.filter(
+                Q(workflow__current_resume__entity__icontains=p["current_entity"])
+                | Q(workflow__isnull=True, resumes__entity__icontains=p["current_entity"])
+            )
+        if p.get("current_position_name"):
+            qs = qs.filter(
+                Q(
+                    workflow__current_resume__position_name__icontains=p[
+                        "current_position_name"
+                    ]
+                )
+                | Q(
+                    workflow__isnull=True,
+                    resumes__position_name__icontains=p["current_position_name"],
+                )
+            )
+        if p.get("current_job_category"):
+            qs = qs.filter(
+                Q(
+                    workflow__current_resume__job_category__icontains=p[
+                        "current_job_category"
+                    ]
+                )
+                | Q(
+                    workflow__isnull=True,
+                    resumes__job_category__icontains=p["current_job_category"],
+                )
+            )
+        if p.get("school_tag"):
+            qs = qs.filter(
+                Q(highest_degree_platform__icontains=p["school_tag"])
+                | Q(first_degree_platform__icontains=p["school_tag"])
+            )
         status_filter = p.get("status")
         if status_filter:
             if status_filter == m.CandidateWorkflow.STATUS_PENDING:
@@ -240,6 +346,20 @@ class CandidateViewSet(PermissionedModelViewSet):
         if p.get("imported_before"):
             qs = qs.filter(imported_at__date__lte=p["imported_before"])
         return qs.distinct()
+
+    @action(detail=False, methods=["get"], url_path="export")
+    def export_resumes(self, request):
+        ids = request.query_params.get("ids")
+        qs = self.get_queryset()
+        if ids:
+            id_list = [int(x) for x in ids.split(",") if x.strip().isdigit()]
+            qs = qs.filter(id__in=id_list)
+        resumes = (
+            m.Resume.objects.select_related("candidate")
+            .filter(candidate__in=qs)
+            .order_by("candidate_id", "volunteer_rank", "id")
+        )
+        return resume_zip_response(resumes)
 
 
 class JobViewSet(PermissionedModelViewSet):
@@ -256,10 +376,27 @@ class JobViewSet(PermissionedModelViewSet):
     def get_queryset(self):
         qs = m.Job.objects.select_related("department").all().order_by("id")
         p = self.request.query_params
+        if p.get("entity"):
+            qs = qs.filter(entity__icontains=p["entity"])
         if p.get("public_name"):
             qs = qs.filter(public_name__icontains=p["public_name"])
+        if p.get("position_name"):
+            qs = qs.filter(position_name__icontains=p["position_name"])
         if p.get("category"):
             qs = qs.filter(category__icontains=p["category"])
+        if p.get("job_family"):
+            qs = qs.filter(job_family__icontains=p["job_family"])
+        if p.get("department_name"):
+            qs = qs.filter(department__name__icontains=p["department_name"])
+        if p.get("location"):
+            qs = qs.filter(location__icontains=p["location"])
+        if p.get("education"):
+            qs = qs.filter(education__icontains=p["education"])
+        if p.get("headcount"):
+            qs = qs.filter(headcount=p["headcount"])
+        is_public = bool_query_value(p.get("is_public"))
+        if is_public is not None:
+            qs = qs.filter(is_public=is_public)
         return qs
 
 
@@ -281,6 +418,8 @@ class SchoolViewSet(PermissionedModelViewSet):
             qs = qs.filter(name__icontains=p["name"])
         if p.get("platform"):
             qs = qs.filter(platform__icontains=p["platform"])
+        if p.get("region"):
+            qs = qs.filter(region=p["region"])
         return qs
 
 
@@ -323,14 +462,22 @@ class ContactViewSet(PermissionedModelViewSet):
             qs = qs.filter(employee_no__icontains=p["employee_no"])
         if p.get("department_name"):
             qs = qs.filter(department__name__icontains=p["department_name"])
+        if p.get("department_level"):
+            qs = qs.filter(department__level=p["department_level"])
         if p.get("contact_level"):
             qs = qs.filter(contact_level=p["contact_level"])
         if p.get("department"):
             qs = qs.filter(department_id=p["department"])
         if p.get("parent_department"):
             qs = qs.filter(department__parent_id=p["parent_department"])
-        if p.get("is_active") in ["true", "false"]:
-            qs = qs.filter(is_active=p["is_active"] == "true")
+        can_delegate = bool_query_value(p.get("can_delegate"))
+        if can_delegate is not None:
+            qs = qs.filter(can_delegate=can_delegate)
+        is_active = bool_query_value(p.get("is_active"))
+        if is_active is not None:
+            qs = qs.filter(is_active=is_active)
+        if p.get("entity"):
+            qs = qs.filter(department__entity__icontains=p["entity"])
         return qs
 
 
@@ -375,6 +522,7 @@ class AssignmentAttemptViewSet(PermissionedReadOnlyModelViewSet):
         "confirm_review": "attempt.dispatch",
         "feedback": "attempt.feedback",
         "export_resumes": "attempt.export",
+        "resume_preview": "attempt.export",
     }
 
     def get_queryset(self):
@@ -520,32 +668,15 @@ class AssignmentAttemptViewSet(PermissionedReadOnlyModelViewSet):
             id_list = [int(x) for x in ids.split(",") if x.strip().isdigit()]
             qs = qs.filter(id__in=id_list)
 
-        resume_dir = os.path.join(settings.MEDIA_ROOT, RESUME_SUBDIR)
-        buf = io.BytesIO()
-        added, missing = 0, []
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for attempt in qs.select_related("resume__candidate"):
-                resume = attempt.resume
-                fname = resume.resume_file
-                path = os.path.join(resume_dir, fname) if fname else ""
-                if path and os.path.exists(path):
-                    zf.write(path, arcname=fname)
-                    added += 1
-                else:
-                    missing.append(f"{resume.candidate.name}（{resume.apply_id}）")
-            if missing:
-                zf.writestr(
-                    "缺失简历文件清单.txt",
-                    "以下候选人暂无简历文件（未上传简历包或未匹配）：\n"
-                    + "\n".join(missing),
-                )
+        resumes = [
+            attempt.resume for attempt in qs.select_related("resume__candidate")
+        ]
+        return resume_zip_response(resumes)
 
-        buf.seek(0)
-        resp = HttpResponse(buf.getvalue(), content_type="application/zip")
-        resp["Content-Disposition"] = 'attachment; filename="resumes_export.zip"'
-        resp["X-Export-Count"] = str(added)
-        resp["X-Export-Missing"] = str(len(missing))
-        return resp
+    @action(detail=True, methods=["get"], url_path="resume-preview")
+    def resume_preview(self, request, pk=None):
+        attempt = self.get_object()
+        return resume_preview_response(attempt.resume)
 
 
 class AgentDispatchDecisionViewSet(PermissionedReadOnlyModelViewSet):

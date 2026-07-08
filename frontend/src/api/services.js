@@ -62,10 +62,25 @@ export function undoLastImport() {
 export function fetchResumes(params) {
   return client.get('/resumes/', { params })
 }
+export function previewResume(id) {
+  return client.get(`/resumes/${id}/preview/`, { responseType: 'blob' })
+}
+export function previewAllocationResume(id) {
+  return client.get(`/workflow-attempts/${id}/resume-preview/`, { responseType: 'blob' })
+}
 
 // ---- Generic list endpoints (placeholder pages / dropdowns) ----
 export function fetchCandidates(params) {
   return client.get('/candidates/', { params })
+}
+export function deleteCandidate(id) {
+  return client.delete(`/candidates/${id}/`)
+}
+export function exportCandidates(ids, params) {
+  return client.get('/candidates/export/', {
+    params: { ...(ids && ids.length ? { ids: ids.join(',') } : {}), ...params },
+    responseType: 'blob',
+  })
 }
 export function fetchJobs(params) {
   return client.get('/jobs/', { params })

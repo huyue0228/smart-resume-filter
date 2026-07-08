@@ -11,3 +11,18 @@ body {
     'Helvetica Neue', Arial, 'PingFang SC', 'Hiragino Sans GB',
     'Microsoft YaHei', sans-serif;
 }
+
+.srf-column-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  z-index: 2;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  user-select: none;
+}
+
+.srf-column-resize-handle:hover {
+  background: rgba(22, 119, 255, 0.18);
+}

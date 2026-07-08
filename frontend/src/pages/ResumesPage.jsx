@@ -1,15 +1,24 @@
 import { useRef, useEffect, useState } from 'react'
 import { PageContainer, ProTable } from '@ant-design/pro-components'
-import { Button, Tag, Space, Modal, message, Drawer, Descriptions, Table } from 'antd'
-import { UndoOutlined } from '@ant-design/icons'
+import { Button, Tag, Space, Modal, message, Drawer, Descriptions, Table, Typography } from 'antd'
+import { DownloadOutlined, UndoOutlined } from '@ant-design/icons'
 import {
+  deleteCandidate,
+  exportCandidates,
   fetchCandidates,
   fetchUndoStatus,
   undoLastImport,
 } from '../api/services'
 import ImportButton from '../components/ImportButton'
+import ResumePreview from '../components/ResumePreview'
 import { useProcessRunner } from '../components/useProcessRunner'
 import { useMode } from '../contexts/ModeContext'
+import {
+  normalizeTableFilters,
+  selectColumnFilter,
+  textColumnFilter,
+  useResizableColumns,
+} from '../components/DataTableControls'
 
 const RESUME_IMPORT_FIELDS = [
   { key: 'resume_list', label: '① 简历信息列表 (.xlsx/.xls/.csv)', accept: '.xlsx,.xls,.csv' },
@@ -46,12 +55,26 @@ const SOURCE_TEXT = {
   manual: '手动',
 }
 
+function triggerDownload(data, filename) {
+  const url = URL.createObjectURL(new Blob([data]))
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
 export default function ResumesPage() {
   const actionRef = useRef()
   const { mode } = useMode()
   const { run, modal } = useProcessRunner()
   const [undo, setUndo] = useState({ available: false })
   const [detailRecord, setDetailRecord] = useState(null)
+  const [previewRecord, setPreviewRecord] = useState(null)
+  const [exporting, setExporting] = useState(false)
+  const [lastQuery, setLastQuery] = useState({})
 
   const refreshUndo = async () => {
     try {
@@ -65,6 +88,14 @@ export default function ResumesPage() {
   useEffect(() => {
     refreshUndo()
   }, [])
+
+  useEffect(() => {
+    if (!detailRecord) {
+      setPreviewRecord(null)
+      return
+    }
+    setPreviewRecord(detailRecord.current_resume || detailRecord.resumes?.[0] || null)
+  }, [detailRecord])
 
   // 导入成功 → 自动按当前模式跑五步 → 刷新
   const handleImported = async () => {
@@ -97,42 +128,88 @@ export default function ResumesPage() {
     })
   }
 
-  const columns = [
-    { title: '姓名', dataIndex: 'name', fixed: 'left', width: 100 },
-    { title: '手机', dataIndex: 'phone', width: 130, search: false },
+  const handleDelete = (record) => {
+    Modal.confirm({
+      title: '删除候选人',
+      content: `将删除 ${record.name} 及其全部投递记录。若已产生分配历史，系统会阻止删除。确定继续？`,
+      okText: '删除',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        try {
+          await deleteCandidate(record.id)
+          message.success('已删除')
+          actionRef.current?.reload()
+        } catch (error) {
+          message.error(error?.response?.data?.detail || '删除失败')
+        }
+      },
+    })
+  }
+
+  const handleExport = async () => {
+    setExporting(true)
+    try {
+      const resp = await exportCandidates(null, lastQuery)
+      const count = Number(resp.headers?.['x-export-count'] ?? 0)
+      const missing = Number(resp.headers?.['x-export-missing'] ?? 0)
+      if (count === 0) {
+        message.warning('当前筛选结果暂无可导出的简历文件')
+      } else {
+        triggerDownload(resp.data, 'resumes_export.zip')
+        message.success(
+          `已导出 ${count} 份简历${missing ? `，${missing} 份缺文件（见压缩包内清单）` : ''}`,
+        )
+      }
+    } catch {
+      message.error('导出失败')
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  const baseColumns = [
+    {
+      title: '姓名',
+      dataIndex: 'name',
+      fixed: 'left',
+      width: 100,
+      ...textColumnFilter('筛选姓名'),
+    },
+    { title: '手机', dataIndex: 'phone', width: 130, ...textColumnFilter('筛选手机') },
     {
       title: '当前志愿',
       dataIndex: 'current_rank',
       width: 90,
-      search: false,
+      ...textColumnFilter('筛选志愿'),
       render: (_, record) => record.current_rank || '-',
     },
     {
       title: '当前主体',
-      dataIndex: ['current_resume', 'entity'],
+      dataIndex: 'current_entity',
       width: 120,
-      search: false,
+      ...textColumnFilter('筛选主体'),
       render: (_, record) => record.current_resume?.entity || '-',
     },
     {
       title: '当前投递岗位',
-      dataIndex: ['current_resume', 'position_name'],
+      dataIndex: 'current_position_name',
+      width: 180,
       ellipsis: true,
-      search: false,
+      ...textColumnFilter('筛选投递岗位'),
       render: (_, record) => record.current_resume?.position_name || '-',
     },
     {
       title: '岗位类别',
-      dataIndex: ['current_resume', 'job_category'],
+      dataIndex: 'current_job_category',
       width: 110,
-      search: false,
+      ...textColumnFilter('筛选岗位类别'),
       render: (_, record) => record.current_resume?.job_category || '-',
     },
     {
       title: '院校标签',
       dataIndex: 'school_tag',
       width: 110,
-      search: false,
+      ...textColumnFilter('筛选院校标签'),
       render: (_, record) =>
         record.school_tag ? <Tag color="blue">{record.school_tag}</Tag> : '-',
     },
@@ -142,24 +219,12 @@ export default function ResumesPage() {
       width: 110,
       valueType: 'select',
       valueEnum: STATUS_OPTIONS,
-    },
-    {
-      title: '关键词',
-      dataIndex: 'search',
-      hideInTable: true,
-      fieldProps: { placeholder: '姓名 / 手机' },
-    },
-    {
-      title: '导入时间',
-      dataIndex: 'imported_at',
-      valueType: 'dateRange',
-      hideInTable: true,
-      search: {
-        transform: (value) => ({
-          imported_after: value?.[0],
-          imported_before: value?.[1],
-        }),
-      },
+      ...selectColumnFilter(
+        Object.entries(STATUS_OPTIONS).map(([value, item]) => ({
+          text: item.text,
+          value,
+        })),
+      ),
     },
     {
       title: '操作',
@@ -169,10 +234,9 @@ export default function ResumesPage() {
       render: (_, record) => (
         <Space>
           <a onClick={() => setDetailRecord(record)}>详情</a>
-          <a onClick={() => message.info(`编辑 ${record.name}`)}>编辑</a>
           <a
             style={{ color: '#cf1322' }}
-            onClick={() => message.info(`删除 ${record.name}`)}
+            onClick={() => handleDelete(record)}
           >
             删除
           </a>
@@ -180,6 +244,7 @@ export default function ResumesPage() {
       ),
     },
   ]
+  const { columns, components, scrollX } = useResizableColumns(baseColumns)
 
   return (
     <PageContainer
@@ -190,9 +255,10 @@ export default function ResumesPage() {
         actionRef={actionRef}
         rowKey="id"
         columns={columns}
-        scroll={{ x: 1200 }}
+        components={components}
+        scroll={{ x: scrollX }}
         pagination={{ defaultPageSize: 10, showSizeChanger: true }}
-        search={{ labelWidth: 'auto' }}
+        search={false}
         toolBarRender={() => [
           <ImportButton
             key="import"
@@ -209,27 +275,46 @@ export default function ResumesPage() {
           >
             撤销上次上传
           </Button>,
-          <Button key="export" onClick={() => message.info('导出')}>
+          <Button
+            key="export"
+            icon={<DownloadOutlined />}
+            loading={exporting}
+            onClick={handleExport}
+          >
             导出
           </Button>,
         ]}
-        request={async (params) => {
+        request={async (params, _sort, filters) => {
           const {
             current,
             pageSize,
-            workflow_status,
-            search,
-            imported_after,
-            imported_before,
           } = params
+          const tableFilters = normalizeTableFilters(filters, [
+            'name',
+            'phone',
+            'current_rank',
+            'current_entity',
+            'current_position_name',
+            'current_job_category',
+            'school_tag',
+            'workflow_status',
+          ])
+          const query = {
+            status: tableFilters.workflow_status,
+            name: tableFilters.name,
+            phone: tableFilters.phone,
+            current_rank: tableFilters.current_rank,
+            current_entity: tableFilters.current_entity,
+            current_position_name: tableFilters.current_position_name,
+            current_job_category: tableFilters.current_job_category,
+            school_tag: tableFilters.school_tag,
+          }
+          setLastQuery(query)
           try {
             const { data } = await fetchCandidates({
               page: current,
               page_size: pageSize,
-              status: workflow_status,
-              search,
-              imported_after,
-              imported_before,
+              ...query,
             })
             return {
               data: data?.results || [],
@@ -243,7 +328,7 @@ export default function ResumesPage() {
       />
       <Drawer
         title={detailRecord ? `${detailRecord.name} 的简历详情` : '简历详情'}
-        width={900}
+        width={1100}
         open={!!detailRecord}
         onClose={() => setDetailRecord(null)}
       >
@@ -291,8 +376,23 @@ export default function ResumesPage() {
                 { title: '投递岗位', dataIndex: 'position_name', ellipsis: true },
                 { title: '岗位类别', dataIndex: 'job_category', width: 110 },
                 { title: '应聘状态', dataIndex: 'status', width: 100 },
+                {
+                  title: '预览',
+                  valueType: 'option',
+                  width: 70,
+                  render: (_, resume) => (
+                    <a onClick={() => setPreviewRecord(resume)}>预览</a>
+                  ),
+                },
               ]}
             />
+
+            <div style={{ marginTop: 16 }}>
+              <Typography.Title level={5} style={{ marginTop: 0 }}>
+                简历预览
+              </Typography.Title>
+              <ResumePreview resume={previewRecord} />
+            </div>
 
             <Table
               style={{ marginTop: 16 }}

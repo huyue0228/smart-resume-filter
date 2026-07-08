@@ -11,6 +11,9 @@ import {
   Select,
   Radio,
   Input,
+  Drawer,
+  Descriptions,
+  Typography,
 } from 'antd'
 import { DownloadOutlined } from '@ant-design/icons'
 import {
@@ -26,6 +29,7 @@ import {
 import { useRole } from '../contexts/RoleContext'
 import { useMode } from '../contexts/ModeContext'
 import { useProcessRunner } from '../components/useProcessRunner'
+import ResumePreview from '../components/ResumePreview'
 
 const REPROCESS_STEPS = [
   { step: 'step2', label: '简历分类、分配与下发' },
@@ -68,6 +72,7 @@ export default function AllocationsPage() {
   const [selectedRowKeys, setSelectedRowKeys] = useState([])
   const [exporting, setExporting] = useState(false)
   const [lastQuery, setLastQuery] = useState({})
+  const [detailRecord, setDetailRecord] = useState(null)
   const [assignModal, setAssignModal] = useState({
     open: false,
     record: null,
@@ -280,7 +285,7 @@ export default function AllocationsPage() {
     {
       title: '操作',
       valueType: 'option',
-      width: isContact ? 150 : 170,
+      width: isContact ? 190 : 210,
       fixed: 'right',
       render: (_, record) => {
         const canDispatch =
@@ -296,6 +301,7 @@ export default function AllocationsPage() {
           isTertiaryContact && record.status === 'assigned_l3' && !record.feedback_at
         return (
           <Space>
+            <a onClick={() => setDetailRecord(record)}>详情</a>
             {canExport && <a onClick={() => handleExport([record.id])}>导出</a>}
             {canDispatch && (
               <Popconfirm
@@ -471,6 +477,88 @@ export default function AllocationsPage() {
           }
         }}
       />
+      <Drawer
+        title={
+          detailRecord ? `${detailRecord.candidate_name || '-'} 的分配详情` : '分配详情'
+        }
+        width={1000}
+        open={!!detailRecord}
+        onClose={() => setDetailRecord(null)}
+      >
+        {detailRecord && (
+          <Space direction="vertical" size={16} style={{ width: '100%' }}>
+            <Descriptions column={2} size="small" bordered>
+              <Descriptions.Item label="候选人">
+                {detailRecord.candidate_name || '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="应聘ID">
+                {detailRecord.apply_id || detailRecord.resume_apply_id_snapshot || '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="投递岗位">
+                {detailRecord.position_name || detailRecord.position_name_snapshot || '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="来源">
+                {SOURCE_TEXT[detailRecord.source] || detailRecord.source || '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="状态">
+                {STATUS_ENUM[detailRecord.status]?.text || detailRecord.status || '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="分配部门">
+                {detailRecord.department_name ||
+                  detailRecord.department_name_snapshot ||
+                  '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="二级接口人">
+                {detailRecord.contact_name || detailRecord.contact_name_snapshot || '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="三级接口人">
+                {detailRecord.sub_contact_name ||
+                  detailRecord.sub_contact_name_snapshot ||
+                  '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="分配理由" span={2}>
+                {detailRecord.match_reason || '-'}
+              </Descriptions.Item>
+              {detailRecord.agent_decision_summary?.summary && (
+                <Descriptions.Item label="AI 摘要" span={2}>
+                  {detailRecord.agent_decision_summary.summary}
+                </Descriptions.Item>
+              )}
+              {detailRecord.feedback_result && (
+                <Descriptions.Item label="反馈结果">
+                  {detailRecord.feedback_result === 'passed' ? '通过' : '未通过'}
+                </Descriptions.Item>
+              )}
+              {detailRecord.feedback_at && (
+                <Descriptions.Item label="反馈时间">
+                  {detailRecord.feedback_at}
+                </Descriptions.Item>
+              )}
+              {detailRecord.feedback_note && (
+                <Descriptions.Item label="反馈备注" span={2}>
+                  {detailRecord.feedback_note}
+                </Descriptions.Item>
+              )}
+            </Descriptions>
+
+            <div>
+              <Typography.Title level={5} style={{ marginTop: 0 }}>
+                简历预览
+              </Typography.Title>
+              <ResumePreview
+                attemptId={detailRecord.id}
+                resume={{
+                  id: detailRecord.resume,
+                  apply_id:
+                    detailRecord.apply_id || detailRecord.resume_apply_id_snapshot,
+                  position_name:
+                    detailRecord.position_name || detailRecord.position_name_snapshot,
+                }}
+              />
+            </div>
+          </Space>
+        )}
+      </Drawer>
       <Modal
         title="转派三级接口人"
         open={assignModal.open}
