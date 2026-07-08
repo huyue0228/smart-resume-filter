@@ -300,6 +300,32 @@ def _classify_resume(resume, strategy, jobs, mode):
     return job, category, reason
 
 
+def _rule_match_reason(admission, resume, job, contact, classify_reason):
+    admission_reason = (
+        f"院校准入：命中{admission.matched_rule.name}"
+        if admission.matched_rule
+        else "院校准入：未启用规则，放行"
+    )
+    rank_reason = f"第{resume.volunteer_rank}志愿"
+    department_name = contact.department.name if contact and contact.department else ""
+    contact_name = contact.name if contact else ""
+    dispatch_reason = (
+        f"分配至{department_name}/{contact_name}"
+        if department_name or contact_name
+        else "分配目标待确认"
+    )
+    return "；".join(
+        part
+        for part in [
+            admission_reason,
+            rank_reason,
+            classify_reason,
+            dispatch_reason,
+        ]
+        if part
+    )
+
+
 def _ensure_resume_profile(resume):
     profile, _ = m.ResumeProfile.objects.get_or_create(resume=resume)
     profile.parsed_text = "\n".join(
@@ -546,10 +572,8 @@ def _create_next_auto_attempt(workflow, rules, mode="rule", processing_run=None)
             source=m.AssignmentAttempt.SOURCE_RULE,
             mode=mode,
             matched_rule=admission.matched_rule,
-            match_reason=(
-                f"命中院校规则：{admission.matched_rule.name}"
-                if admission.matched_rule
-                else "未启用院校准入规则，按设计视为通过"
+            match_reason=_rule_match_reason(
+                admission, resume, job, contact, classify_reason
             ),
         )
 

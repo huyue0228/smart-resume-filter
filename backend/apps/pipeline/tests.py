@@ -86,6 +86,65 @@ class AllocationDesignContractTests(TestCase):
         self.assertEqual(attempt.resume, self.resume)
         self.assertEqual(attempt.resume.job, self.job)
 
+    def test_rule_allocation_prefers_same_entity_job(self):
+        self.resume.entity = "GW"
+        self.resume.save(update_fields=["entity"])
+        self.job.entity = "YLS"
+        self.job.save(update_fields=["entity"])
+        same_entity_job = m.Job.objects.create(
+            entity="GW",
+            department=self.department,
+            public_name="后端工程师",
+            position_name="后端工程师",
+            category="技术类",
+            headcount=1,
+        )
+
+        allocate.run(mode="rule")
+
+        attempt = m.AssignmentAttempt.objects.get()
+        self.assertEqual(attempt.resume.job, same_entity_job)
+
+    def test_rule_allocation_uses_stable_job_match_priority(self):
+        self.job.public_name = "后端"
+        self.job.position_name = "后端"
+        self.job.save(update_fields=["public_name", "position_name"])
+        exact_position_job = m.Job.objects.create(
+            department=self.department,
+            public_name="服务端研发",
+            position_name="后端工程师",
+            category="技术类",
+            headcount=1,
+        )
+        exact_public_job = m.Job.objects.create(
+            department=self.department,
+            public_name="后端工程师",
+            position_name="后端研发",
+            category="技术类",
+            headcount=1,
+        )
+
+        allocate.run(mode="rule")
+
+        attempt = m.AssignmentAttempt.objects.get()
+        self.assertEqual(attempt.resume.job, exact_public_job)
+        self.assertNotEqual(attempt.resume.job, exact_position_job)
+        self.assertIn("岗位名精确命中对外发布名称", attempt.match_reason)
+
+    def test_rule_allocation_records_explainable_match_reason(self):
+        self.candidate.highest_major = "计算机科学与技术"
+        self.candidate.save(update_fields=["highest_major"])
+        m.JobMajor.objects.create(job=self.job, major="计算机")
+
+        allocate.run(mode="rule")
+
+        attempt = m.AssignmentAttempt.objects.get()
+        self.assertIn("院校准入", attempt.match_reason)
+        self.assertIn("第1志愿", attempt.match_reason)
+        self.assertIn("岗位名精确命中", attempt.match_reason)
+        self.assertIn("专业匹配", attempt.match_reason)
+        self.assertIn("分配至技术部/二级接口人", attempt.match_reason)
+
     def test_rule_allocation_matches_school_tag_rule_links(self):
         first_tag = m.SchoolTag.objects.create(code="A", name="平台A")
         highest_tag = m.SchoolTag.objects.create(code="A_PLUS", name="平台A+")
