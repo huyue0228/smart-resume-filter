@@ -280,6 +280,11 @@ def _create_attempt(
 
 
 def _candidate_resumes(candidate, after_rank=None):
+    """按志愿顺序取候选人接下来可尝试的投递。
+
+    workflow.current_rank 记录已经进入处理链路的志愿。三级反馈未通过后，
+    这里只取更高 rank 的投递，确保系统按志愿顺序推进，不提前暴露后续志愿。
+    """
     qs = candidate.resumes.filter(volunteer_rank__isnull=False).select_related(
         "job__department"
     ).order_by("volunteer_rank", "apply_date", "id")
@@ -289,6 +294,12 @@ def _candidate_resumes(candidate, after_rank=None):
 
 
 def _classify_resume(resume, strategy, jobs, mode):
+    """执行岗位分类并把分类结果写回 Resume。
+
+    分类结果既用于本次分配，也用于简历库展示和筛选。即使未命中岗位，也会
+    写入 `未匹配`/category_reason，方便 HR 判断是岗位名、主体还是专业造成
+    自动分配中断。
+    """
     job, category, reason = strategy.classify(resume, jobs)
     resume.job = job
     resume.job_category = category
@@ -301,6 +312,12 @@ def _classify_resume(resume, strategy, jobs, mode):
 
 
 def _rule_match_reason(admission, resume, job, contact, classify_reason):
+    """生成 Rule 分配尝试的人可读匹配理由。
+
+    AssignmentAttempt.match_reason 是 HR 查看自动分配结果时最直接的审计线索，
+    因此这里把硬规则和匹配链路串起来：院校准入、志愿序号、岗位/专业命中、
+    最终分配到的二级部门和接口人。
+    """
     admission_reason = (
         f"院校准入：命中{admission.matched_rule.name}"
         if admission.matched_rule
@@ -518,6 +535,15 @@ def _process_ai_recommendation(
 
 
 def _create_next_auto_attempt(workflow, rules, mode="rule", processing_run=None):
+    """为候选人创建下一条自动分配尝试。
+
+    这是 Rule/AI 共用的自动分配入口。共同硬规则先于策略执行：
+    1. 院校准入不通过则直接归档，不进入岗位/专业匹配。
+    2. 按当前 workflow.current_rank 后续志愿顺序逐条尝试。
+    3. 当前志愿必须能匹配岗位、二级部门和启用的二级接口人，才生成尝试。
+
+    AI 目前仍复用同一条硬规则链路；本轮只加固 Rule 策略，不扩展 AI 能力。
+    """
     workflow._processing_run = processing_run
     candidate = workflow.candidate
     admission = school_admission.evaluate(candidate, rules)
@@ -536,12 +562,15 @@ def _create_next_auto_attempt(workflow, rules, mode="rule", processing_run=None)
         .filter(is_active=True)
     )
     had_resume = False
+    # 下面三个 gap 标记用于在所有后续志愿都失败时给出更接近真实原因的归档说明。
     saw_job_gap = False
     saw_department_gap = False
     saw_contact_gap = False
     after_rank = workflow.current_rank if workflow.current_rank else None
     for resume in _candidate_resumes(candidate, after_rank=after_rank):
         had_resume = True
+        # strategy.classify 内部负责 Rule/AI 的岗位选择口径；Rule 会校验主体、
+        # 岗位名优先级和需求专业，AI 当前仍是 demo 占位策略。
         job, _category, classify_reason = _classify_resume(resume, strategy, jobs, mode)
         if not job:
             saw_job_gap = True
@@ -555,6 +584,7 @@ def _create_next_auto_attempt(workflow, rules, mode="rule", processing_run=None)
             saw_contact_gap = True
             continue
 
+        # AI 分支保留既有接口和状态机，避免 Rule 加固时改变 AI 的失败边界。
         if mode == "ai":
             return _process_ai_recommendation(
                 workflow,

@@ -2,14 +2,29 @@
 
 
 class RuleStrategy:
-    """规则模式：按职位名称与岗位表精确 / 包含匹配，再校验需求专业。"""
+    """规则模式：按岗位名称命中岗位需求，并执行轻量专业校验。
+
+    这里保持 Rule 策略的可审计性：不做 AI 语义扩展，也不引入专业大类
+    映射；只使用投递主体、岗位名称和最高学历专业这些结构化字段做确定性
+    判断。返回的 reason 会进入 Resume.category_reason，并被分配尝试的
+    match_reason 复用，方便 HR 追溯为什么命中某个岗位。
+    """
 
     mode = "rule"
 
     def _normalized(self, value):
+        """统一文本比较口径：忽略大小写和空白，但保留原始语义。"""
         return "".join((value or "").lower().split())
 
     def _major_match_reason(self, resume, job):
+        """校验候选人最高学历专业是否满足岗位需求专业。
+
+        当前规则只做轻量包含匹配：
+        - 岗位没有维护需求专业时放行，避免历史岗位需求数据被误拦截。
+        - 岗位维护了需求专业时，候选人最高学历专业必须与任一需求专业
+          双向包含命中，例如“计算机科学与技术”可命中“计算机”。
+        - 不在这里做“专业大类/相近专业”扩展，后续如要增强应另建映射表。
+        """
         required_majors = [major.major for major in job.majors.all() if major.major]
         if not required_majors:
             return True, "岗位未配置需求专业，放行"
@@ -26,11 +41,17 @@ class RuleStrategy:
         return False, "候选人最高学历专业未命中岗位需求专业"
 
     def _entity_matched(self, resume, job):
+        """招聘主体硬约束。
+
+        只有投递主体和岗位主体双方都有值时才强制一致；任一侧为空时放行，
+        兼容历史样例数据和未维护主体的岗位需求。
+        """
         resume_entity = self._normalized(resume.entity)
         job_entity = self._normalized(job.entity)
         return not resume_entity or not job_entity or resume_entity == job_entity
 
     def _entity_rank(self, resume, job):
+        """多岗位命中时，同主体岗位优先于主体缺失岗位。"""
         resume_entity = self._normalized(resume.entity)
         job_entity = self._normalized(job.entity)
         if resume_entity and job_entity and resume_entity == job_entity:
@@ -38,6 +59,15 @@ class RuleStrategy:
         return 1
 
     def _job_name_matches(self, pos, job):
+        """返回岗位名命中的优先级和可展示原因。
+
+        优先级从强到弱：
+        1. 投递岗位精确命中岗位需求的对外发布名称。
+        2. 投递岗位精确命中岗位需求的职位名称。
+        3. 与对外发布名称存在包含关系。
+        4. 与职位名称存在包含关系。
+        这样可以避免多个岗位同时命中时依赖数据库自然顺序。
+        """
         normalized_pos = self._normalized(pos)
         public_name = self._normalized(job.public_name)
         position_name = self._normalized(job.position_name)
@@ -56,6 +86,11 @@ class RuleStrategy:
         return None
 
     def _candidate_jobs(self, resume, jobs, pos):
+        """收集并排序当前投递可尝试的岗位需求。
+
+        排序键为 `(主体优先级, 岗位名命中优先级, job.id)`，最后用 job.id
+        兜底，确保同一批数据重复运行时结果稳定。
+        """
         candidates = []
         for job in jobs:
             if not self._entity_matched(resume, job):
@@ -74,12 +109,18 @@ class RuleStrategy:
         return sorted(candidates, key=lambda item: item[0])
 
     def _classify_if_major_matched(self, resume, job, name_reason):
+        """岗位名命中后再校验专业，不通过则继续尝试下一个岗位。"""
         matched, reason = self._major_match_reason(resume, job)
         if not matched:
             return None
         return job, job.category or "未分类", f"{name_reason}；{reason}"
 
     def classify(self, resume, jobs):
+        """为单条投递选择一个岗位需求。
+
+        只返回第一条“主体/岗位名/专业”全部通过的岗位；如果某个岗位名命中
+        但专业不匹配，会继续尝试下一条候选岗位，而不是立即判定投递失败。
+        """
         pos = (resume.position_name or "").strip()
         if pos:
             for _rank, job, name_reason in self._candidate_jobs(resume, jobs, pos):
