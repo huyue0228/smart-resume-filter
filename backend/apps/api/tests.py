@@ -652,6 +652,77 @@ class ListFilteringPaginationApiTests(TestCase):
             response.data["results"][0]["system_status_label"], "已分配"
         )
 
+    def test_workflow_list_filters_by_status_search_and_current_position(self):
+        keep_candidate = m.Candidate.objects.create(
+            identity_hash="candidate-workflow-keep",
+            name="归档候选人",
+            phone="13820000000",
+        )
+        keep_resume = m.Resume.objects.create(
+            candidate=keep_candidate,
+            apply_id="WF001",
+            position_name="后端工程师",
+            volunteer_rank=1,
+        )
+        keep = m.CandidateWorkflow.objects.create(
+            candidate=keep_candidate,
+            status=m.CandidateWorkflow.STATUS_ARCHIVED,
+            current_resume=keep_resume,
+            current_rank=1,
+            archive_reason=m.CandidateWorkflow.ARCHIVE_JOB_NOT_MATCHED,
+            archive_detail="未匹配岗位",
+        )
+        drop_candidate = m.Candidate.objects.create(
+            identity_hash="candidate-workflow-drop",
+            name="进行中候选人",
+            phone="13920000000",
+        )
+        drop_resume = m.Resume.objects.create(
+            candidate=drop_candidate,
+            apply_id="WF002",
+            position_name="产品经理",
+            volunteer_rank=1,
+        )
+        m.CandidateWorkflow.objects.create(
+            candidate=drop_candidate,
+            status=m.CandidateWorkflow.STATUS_IN_PROGRESS,
+            current_resume=drop_resume,
+            current_rank=1,
+        )
+        archived_drop_candidate = m.Candidate.objects.create(
+            identity_hash="candidate-workflow-archived-drop",
+            name="归档候选人二",
+            phone="13720000000",
+        )
+        archived_drop_resume = m.Resume.objects.create(
+            candidate=archived_drop_candidate,
+            apply_id="WF003",
+            position_name="产品经理",
+            volunteer_rank=1,
+        )
+        m.CandidateWorkflow.objects.create(
+            candidate=archived_drop_candidate,
+            status=m.CandidateWorkflow.STATUS_ARCHIVED,
+            current_resume=archived_drop_resume,
+            current_rank=1,
+            archive_reason=m.CandidateWorkflow.ARCHIVE_JOB_NOT_MATCHED,
+            archive_detail="未匹配岗位",
+        )
+
+        response = self.client.get(
+            "/api/workflows/",
+            {
+                "status": m.CandidateWorkflow.STATUS_ARCHIVED,
+                "search": "归档",
+                "current_position_name": "后端",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["id"], keep.id)
+        self.assertEqual(response.data["results"][0]["current_position_name"], "后端工程师")
+
     def test_candidate_search_matches_name_full_pinyin_and_initials(self):
         keep = m.Candidate.objects.create(
             identity_hash="candidate-pinyin-keep",

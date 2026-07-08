@@ -21,7 +21,11 @@ const assignGroup = {
   path: '/assign',
   name: '简历分配',
   icon: <DeploymentUnitOutlined />,
-  routes: [{ path: '/allocations', name: '分配结果', icon: <DeploymentUnitOutlined /> }],
+  routes: [
+    { path: '/workflows', name: '候选人工作流', icon: <ProfileOutlined /> },
+    { path: '/allocations', name: '分配尝试', icon: <DeploymentUnitOutlined /> },
+    { path: '/archives', name: '归档候选人', icon: <DatabaseOutlined /> },
+  ],
 }
 
 const allRoute = {
@@ -57,7 +61,9 @@ function filterRoutesByPermission(routes, hasPermission) {
     '/jobs': 'job.view',
     '/schools': 'school.view',
     '/departments': 'department.view',
+    '/workflows': 'attempt.view_all',
     '/allocations': ['attempt.view_all', 'attempt.view_received', 'attempt.view_assigned'],
+    '/archives': 'attempt.view_all',
     '/config': 'settings.manage_config',
     '/users': 'settings.manage_permissions',
   }

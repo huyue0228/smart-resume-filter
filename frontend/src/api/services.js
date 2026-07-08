@@ -145,6 +145,11 @@ export function fetchPipelineRuns(params) {
   return client.get('/pipeline/runs/', { params })
 }
 
+// ---- Candidate workflows ----
+export function fetchWorkflows(params) {
+  return client.get('/workflows/', { params })
+}
+
 // ---- Workflow attempts ----
 export function fetchAllocations(params) {
   return client.get('/workflow-attempts/', { params })

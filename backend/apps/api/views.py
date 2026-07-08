@@ -567,8 +567,16 @@ class CandidateWorkflowViewSet(PermissionedReadOnlyModelViewSet):
         if p.get("status"):
             qs = qs.filter(status=p["status"])
         if p.get("search"):
-            qs = qs.filter(candidate__name__icontains=p["search"]) | qs.filter(
-                candidate__phone__icontains=p["search"]
+            qs = qs.filter(
+                Q(candidate__name__icontains=p["search"])
+                | Q(candidate__phone__icontains=p["search"])
+            )
+        if p.get("current_position_name"):
+            qs = qs.filter(current_resume__position_name__icontains=p["current_position_name"])
+        if p.get("archive_reason"):
+            qs = qs.filter(
+                Q(archive_reason__icontains=p["archive_reason"])
+                | Q(archive_detail__icontains=p["archive_reason"])
             )
         return qs.distinct()
 
