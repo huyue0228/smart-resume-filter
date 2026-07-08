@@ -6,7 +6,7 @@ from ..strategies import get_strategy
 
 def run(scope=None, mode="rule"):
     strategy = get_strategy(mode)
-    jobs = list(m.Job.objects.all())
+    jobs = list(m.Job.objects.filter(is_active=True))
     count = 0
     for resume in m.Resume.objects.select_related("candidate").all():
         job, category, reason = strategy.classify(resume, jobs)

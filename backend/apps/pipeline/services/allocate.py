@@ -4,6 +4,7 @@ from django.db.models import Max
 from django.utils import timezone
 
 from apps.core import models as m
+from apps.core import system_status
 from apps.pipeline import ai_config
 
 from ..strategies import get_strategy
@@ -34,16 +35,57 @@ def _archive(workflow, reason, detail):
     )
 
 
-def _cancel_unfeedbacked_attempts(workflow, reason, source=None):
+def _cancel_unfeedbacked_attempts(workflow, reason, source=None, sources=None):
     qs = workflow.attempts.filter(status__in=UNFEEDBACKED_STATUSES)
     if source:
         qs = qs.filter(source=source)
+    if sources:
+        qs = qs.filter(source__in=sources)
     now = timezone.now()
     return qs.update(
         status=m.AssignmentAttempt.STATUS_CANCELLED,
         cancelled_at=now,
         cancel_reason=reason,
         updated_at=now,
+    )
+
+
+def _candidate_queryset(scope):
+    scope = scope or {}
+    candidate_filters = scope.get("candidate_filters") or {}
+    qs = m.Candidate.objects.prefetch_related("resumes")
+    candidate_ids = scope.get("candidate_ids") or []
+    if candidate_ids:
+        qs = qs.filter(id__in=candidate_ids)
+    if candidate_filters:
+        qs = system_status.apply_candidate_filters(qs, candidate_filters)
+    statuses = scope.get("system_statuses") or []
+    if statuses:
+        qs = system_status.filter_queryset_by_system_status(qs, statuses)
+    return qs.prefetch_related("resumes")
+
+
+def _is_scoped_reprocess(scope):
+    return bool(system_status.normalize_statuses((scope or {}).get("system_statuses")))
+
+
+def _reopen_workflow(workflow, mode):
+    workflow.status = m.CandidateWorkflow.STATUS_IN_PROGRESS
+    workflow.passed_attempt = None
+    workflow.archive_reason = ""
+    workflow.archive_detail = ""
+    workflow.completed_at = None
+    workflow.dispatch_strategy = mode
+    workflow.save(
+        update_fields=[
+            "status",
+            "passed_attempt",
+            "archive_reason",
+            "archive_detail",
+            "completed_at",
+            "dispatch_strategy",
+            "updated_at",
+        ]
     )
 
 
@@ -100,6 +142,9 @@ def _set_snapshots(attempt):
     )
     attempt.resume_apply_id_snapshot = attempt.resume.apply_id
     attempt.position_name_snapshot = attempt.resume.position_name
+    attempt.created_by_username_snapshot = (
+        attempt.created_by.username if attempt.created_by else ""
+    )
 
 
 def _create_handoff(
@@ -112,14 +157,30 @@ def _create_handoff(
     note="",
     created_by=None,
 ):
+    actual_to_department = to_department or (to_contact.department if to_contact else None)
+    actual_created_by = (
+        created_by if getattr(created_by, "is_authenticated", False) else None
+    )
     return m.AssignmentHandoff.objects.create(
         attempt=attempt,
         action=action,
         from_contact=from_contact,
-        to_department=to_department or to_contact.department,
+        to_department=actual_to_department,
         to_contact=to_contact,
+        from_contact_name_snapshot=from_contact.name if from_contact else "",
+        from_contact_employee_no_snapshot=(
+            from_contact.employee_no if from_contact else ""
+        ),
+        to_department_name_snapshot=(
+            actual_to_department.name if actual_to_department else ""
+        ),
+        to_contact_name_snapshot=to_contact.name if to_contact else "",
+        to_contact_employee_no_snapshot=to_contact.employee_no if to_contact else "",
         note=note,
-        created_by=created_by if getattr(created_by, "is_authenticated", False) else None,
+        created_by=actual_created_by,
+        created_by_username_snapshot=actual_created_by.username
+        if actual_created_by
+        else "",
     )
 
 
@@ -304,6 +365,10 @@ def _create_agent_decision(workflow, resume, profile, job, contact, reason):
         matched_job_category=job.category if job else "",
         recommended_department=contact.department if contact else None,
         recommended_contact=contact,
+        recommended_contact_name_snapshot=contact.name if contact else "",
+        recommended_contact_employee_no_snapshot=(
+            contact.employee_no if contact else ""
+        ),
         confidence_score=confidence,
         score_breakdown={
             "major_match": 0.75 if resume.candidate.highest_major else 0.45,
@@ -439,7 +504,7 @@ def _create_next_auto_attempt(workflow, rules, mode="rule", processing_run=None)
         return None
 
     strategy = get_strategy(mode)
-    jobs = list(m.Job.objects.select_related("department").all())
+    jobs = list(m.Job.objects.select_related("department").filter(is_active=True))
     had_resume = False
     saw_job_gap = False
     saw_department_gap = False
@@ -507,25 +572,37 @@ def _create_next_auto_attempt(workflow, rules, mode="rule", processing_run=None)
 
 @transaction.atomic
 def run(scope=None, mode="rule", processing_run=None):
+    scope = scope or {}
     rules = school_admission.active_rules()
 
     cancelled = 0
     created = 0
+    scoped_reprocess = _is_scoped_reprocess(scope)
     archived_before = m.CandidateWorkflow.objects.filter(
         status=m.CandidateWorkflow.STATUS_ARCHIVED
     ).count()
 
-    for candidate in m.Candidate.objects.prefetch_related("resumes"):
+    for candidate in _candidate_queryset(scope):
         workflow, _ = m.CandidateWorkflow.objects.get_or_create(candidate=candidate)
-        if workflow.status in [
+        if not scoped_reprocess and workflow.status in [
             m.CandidateWorkflow.STATUS_PASSED,
             m.CandidateWorkflow.STATUS_ARCHIVED,
         ]:
             continue
+        if scoped_reprocess:
+            _reopen_workflow(workflow, mode)
         cancelled += _cancel_unfeedbacked_attempts(
             workflow,
             m.AssignmentAttempt.CANCEL_RERUN,
-            source=(
+            sources=[
+                m.AssignmentAttempt.SOURCE_AI,
+                m.AssignmentAttempt.SOURCE_RULE,
+            ]
+            if scoped_reprocess
+            else None,
+            source=None
+            if scoped_reprocess
+            else (
                 m.AssignmentAttempt.SOURCE_AI
                 if mode == "ai"
                 else m.AssignmentAttempt.SOURCE_RULE
@@ -605,6 +682,7 @@ def dispatch_attempt(attempt, user=None):
             "department_name_snapshot",
             "contact_name_snapshot",
             "contact_employee_no_snapshot",
+            "created_by_username_snapshot",
             "updated_at",
         ]
     )
@@ -648,6 +726,7 @@ def assign_sub_contact(attempt, sub_contact, operator_contact=None, user=None, n
             "sub_department_name_snapshot",
             "sub_contact_name_snapshot",
             "sub_contact_employee_no_snapshot",
+            "created_by_username_snapshot",
             "updated_at",
         ]
     )
@@ -763,7 +842,7 @@ def retry_agent_decision(decision):
         return new_decision, None
 
     strategy = get_strategy("ai")
-    jobs = list(m.Job.objects.select_related("department").all())
+    jobs = list(m.Job.objects.select_related("department").filter(is_active=True))
     job, _category, classify_reason = _classify_resume(resume, strategy, jobs, "ai")
     if not job:
         new_decision = _create_agent_failure_decision(

@@ -19,6 +19,9 @@ export function createUser(body) {
 export function updateUser(id, body) {
   return client.patch(`/users/${id}/`, body)
 }
+export function deleteUser(id) {
+  return client.delete(`/users/${id}/`)
+}
 export function fetchRoles(params) {
   return client.get('/roles/', { params })
 }
@@ -108,6 +111,15 @@ export function exportCandidates(ids, params) {
 }
 export function fetchJobs(params) {
   return client.get('/jobs/', { params })
+}
+export function createJob(body) {
+  return client.post('/jobs/', body)
+}
+export function updateJob(id, body) {
+  return client.patch(`/jobs/${id}/`, body)
+}
+export function deleteJob(id) {
+  return client.delete(`/jobs/${id}/`)
 }
 export function fetchSchools(params) {
   return client.get('/schools/', { params })

@@ -1,7 +1,7 @@
 import { useRef, useEffect, useState } from 'react'
 import { PageContainer, ProTable } from '@ant-design/pro-components'
 import { Button, Tag, Space, Modal, message, Drawer, Descriptions, Table, Typography } from 'antd'
-import { DownloadOutlined, UndoOutlined } from '@ant-design/icons'
+import { DownloadOutlined, PlayCircleOutlined, UndoOutlined } from '@ant-design/icons'
 import {
   deleteCandidate,
   exportCandidates,
@@ -19,6 +19,7 @@ import {
   textColumnFilter,
   useResizableColumns,
 } from '../components/DataTableControls'
+import { downloadBlobFromResponse } from '../utils/download'
 
 const RESUME_IMPORT_FIELDS = [
   { key: 'resume_list', label: '① 简历信息列表 (.xlsx/.xls/.csv)', accept: '.xlsx,.xls,.csv' },
@@ -33,11 +34,13 @@ const PROCESS_STEPS = [
   { step: 'step2', label: '简历分类、分配与下发' },
 ]
 
-const STATUS_OPTIONS = {
-  pending: { text: '待分配', status: 'Default' },
-  in_progress: { text: '进行中', status: 'Processing' },
-  passed: { text: '已通过', status: 'Success' },
-  archived: { text: '已归档', status: 'Error' },
+const SYSTEM_STATUS_OPTIONS = {
+  raw: { text: '待处理', color: 'default', status: 'Default' },
+  classified: { text: '已分类', color: 'blue', status: 'Processing' },
+  allocated: { text: '已分配', color: 'gold', status: 'Warning' },
+  pending_screening: { text: '待筛选', color: 'processing', status: 'Processing' },
+  screening_passed: { text: '筛选通过', color: 'success', status: 'Success' },
+  screening_rejected: { text: '筛选不通过', color: 'error', status: 'Error' },
 }
 
 const ATTEMPT_STATUS = {
@@ -55,17 +58,6 @@ const SOURCE_TEXT = {
   manual: '手动',
 }
 
-function triggerDownload(data, filename) {
-  const url = URL.createObjectURL(new Blob([data]))
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  URL.revokeObjectURL(url)
-}
-
 export default function ResumesPage() {
   const actionRef = useRef()
   const { mode } = useMode()
@@ -74,6 +66,7 @@ export default function ResumesPage() {
   const [detailRecord, setDetailRecord] = useState(null)
   const [previewRecord, setPreviewRecord] = useState(null)
   const [exporting, setExporting] = useState(false)
+  const [processing, setProcessing] = useState(false)
   const [lastQuery, setLastQuery] = useState({})
 
   const refreshUndo = async () => {
@@ -152,10 +145,10 @@ export default function ResumesPage() {
       const resp = await exportCandidates(null, lastQuery)
       const count = Number(resp.headers?.['x-export-count'] ?? 0)
       const missing = Number(resp.headers?.['x-export-missing'] ?? 0)
-      if (count === 0) {
+      if (count === 0 && missing === 0) {
         message.warning('当前筛选结果暂无可导出的简历文件')
       } else {
-        triggerDownload(resp.data, 'resumes_export.zip')
+        downloadBlobFromResponse(resp, 'resumes_export.zip')
         message.success(
           `已导出 ${count} 份简历${missing ? `，${missing} 份缺文件（见压缩包内清单）` : ''}`,
         )
@@ -167,15 +160,67 @@ export default function ResumesPage() {
     }
   }
 
+  const selectedSystemStatuses = () => {
+    const value = lastQuery.system_status
+    if (!value) return []
+    return Array.isArray(value) ? value : String(value).split(',').filter(Boolean)
+  }
+
+  const handleProcessSelectedStatuses = () => {
+    const statuses = selectedSystemStatuses()
+    if (!statuses.length) {
+      message.warning('请先在“系统简历状态”列勾选需要重新分配的状态')
+      return
+    }
+    const statusText = statuses
+      .map((status) => SYSTEM_STATUS_OPTIONS[status]?.text || status)
+      .join('、')
+    Modal.confirm({
+      title: '处理简历',
+      content: `将按当前${mode === 'ai' ? 'AI' : '规则'}模式，对当前筛选条件下状态为“${statusText}”的候选人重新执行分配；历史分配与反馈记录会保留，未反馈的自动分配会取消。确定继续？`,
+      okText: '开始处理',
+      onOk: async () => {
+        setProcessing(true)
+        try {
+          const r = await run(
+            [{ step: 'step2', label: '简历分类、分配与下发' }],
+            mode,
+            `正在重新处理简历（${mode === 'ai' ? 'AI' : '规则'}模式）`,
+            {
+              scope: {
+                system_statuses: statuses,
+                candidate_filters: lastQuery,
+              },
+            },
+          )
+          if (r.success) {
+            message.success('简历重新处理完成')
+            actionRef.current?.reload()
+          }
+        } finally {
+          setProcessing(false)
+        }
+      },
+    })
+  }
+
   const baseColumns = [
     {
       title: '姓名',
       dataIndex: 'name',
       fixed: 'left',
       width: 100,
-      ...textColumnFilter('筛选姓名'),
+      ...textColumnFilter('筛选姓名/拼音'),
     },
     { title: '手机', dataIndex: 'phone', width: 130, ...textColumnFilter('筛选手机') },
+    {
+      title: '最高学历专业',
+      dataIndex: 'highest_major',
+      width: 130,
+      ellipsis: true,
+      ...textColumnFilter('筛选最高学历专业'),
+      render: (_, record) => record.highest_major || '-',
+    },
     {
       title: '当前志愿',
       dataIndex: 'current_rank',
@@ -214,17 +259,28 @@ export default function ResumesPage() {
         record.school_tag ? <Tag color="blue">{record.school_tag}</Tag> : '-',
     },
     {
-      title: '流程状态',
-      dataIndex: 'workflow_status',
+      title: '系统简历状态',
+      dataIndex: 'system_status',
       width: 110,
       valueType: 'select',
-      valueEnum: STATUS_OPTIONS,
+      valueEnum: Object.fromEntries(
+        Object.entries(SYSTEM_STATUS_OPTIONS).map(([value, item]) => [
+          value,
+          { text: item.text, status: item.status },
+        ]),
+      ),
       ...selectColumnFilter(
-        Object.entries(STATUS_OPTIONS).map(([value, item]) => ({
+        Object.entries(SYSTEM_STATUS_OPTIONS).map(([value, item]) => ({
           text: item.text,
           value,
         })),
+        true,
       ),
+      render: (_, record) => {
+        const status = record.system_status
+        const item = SYSTEM_STATUS_OPTIONS[status]
+        return item ? <Tag color={item.color}>{item.text}</Tag> : '-'
+      },
     },
     {
       title: '操作',
@@ -268,6 +324,15 @@ export default function ResumesPage() {
             onDone={handleImported}
           />,
           <Button
+            key="process"
+            type="primary"
+            icon={<PlayCircleOutlined />}
+            loading={processing}
+            onClick={handleProcessSelectedStatuses}
+          >
+            处理简历
+          </Button>,
+          <Button
             key="undo"
             icon={<UndoOutlined />}
             disabled={!undo.available}
@@ -292,17 +357,21 @@ export default function ResumesPage() {
           const tableFilters = normalizeTableFilters(filters, [
             'name',
             'phone',
+            'highest_major',
             'current_rank',
             'current_entity',
             'current_position_name',
             'current_job_category',
             'school_tag',
-            'workflow_status',
+            'system_status',
           ])
           const query = {
-            status: tableFilters.workflow_status,
+            system_status: Array.isArray(tableFilters.system_status)
+              ? tableFilters.system_status.join(',')
+              : tableFilters.system_status,
             name: tableFilters.name,
             phone: tableFilters.phone,
+            highest_major: tableFilters.highest_major,
             current_rank: tableFilters.current_rank,
             current_entity: tableFilters.current_entity,
             current_position_name: tableFilters.current_position_name,
@@ -337,6 +406,9 @@ export default function ResumesPage() {
             <Descriptions column={2} size="small" bordered>
               <Descriptions.Item label="姓名">{detailRecord.name}</Descriptions.Item>
               <Descriptions.Item label="手机">{detailRecord.phone || '-'}</Descriptions.Item>
+              <Descriptions.Item label="最高学历专业">
+                {detailRecord.highest_major || '-'}
+              </Descriptions.Item>
               <Descriptions.Item label="第一学历院校">
                 {detailRecord.first_degree_school || '-'}
               </Descriptions.Item>
@@ -352,8 +424,8 @@ export default function ResumesPage() {
               <Descriptions.Item label="当前志愿">
                 {detailRecord.current_rank || '-'}
               </Descriptions.Item>
-              <Descriptions.Item label="流程状态">
-                {STATUS_OPTIONS[detailRecord.workflow_status]?.text || '-'}
+              <Descriptions.Item label="系统简历状态">
+                {detailRecord.system_status_label || '-'}
               </Descriptions.Item>
               {detailRecord.archive_reason && (
                 <Descriptions.Item label="归档原因" span={2}>

@@ -17,12 +17,17 @@ export function useProcessRunner() {
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
-  const run = async (steps, mode, title) => {
+  const run = async (steps, mode, title, options = {}) => {
     setS({ open: true, percent: 0, idx: 0, total: steps.length, label: steps[0]?.label || '', error: '', title })
     for (let i = 0; i < steps.length; i++) {
       setS((p) => ({ ...p, idx: i, label: steps[i].label }))
       try {
-        const { data } = await runPipeline({ step: steps[i].step, mode })
+        const scope = steps[i].scope || options.scope
+        const { data } = await runPipeline({
+          step: steps[i].step,
+          mode,
+          ...(scope ? { scope } : {}),
+        })
         if (data?.status === 'failed') throw new Error(data?.message || '处理失败')
       } catch (error) {
         const detail = error?.message ? `：${error.message}` : ''

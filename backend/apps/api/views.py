@@ -7,6 +7,7 @@ from urllib.parse import quote
 from django.conf import settings
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import Group
+from django.db import transaction
 from django.http import HttpResponse
 from django.db.models import Q
 from rest_framework.authtoken.models import Token
@@ -25,10 +26,10 @@ from apps.accounts.permissions import (
     user_permission_codes,
 )
 from apps.core import models as m
+from apps.core import system_status
 from apps.ingestion import snapshot
 from apps.ingestion.sources import (
     RESUME_SUBDIR,
-    _deactivate_contact,
     import_files,
 )
 from apps.pipeline.ai_config import PUBLIC_AI_CONFIG_REGISTRY
@@ -61,19 +62,100 @@ def bool_query_value(value):
     return None
 
 
-def resume_zip_response(resumes):
-    resume_dir = os.path.join(settings.MEDIA_ROOT, RESUME_SUBDIR)
+def _clear_user_references(users):
+    user_ids = [user.id for user in users if user and user.id]
+    if not user_ids:
+        return
+    m.AssignmentAttempt.objects.filter(created_by_id__in=user_ids).update(
+        created_by=None
+    )
+    m.AssignmentHandoff.objects.filter(created_by_id__in=user_ids).update(
+        created_by=None
+    )
+
+
+def _delete_users(users):
+    users = [user for user in users if user and user.id]
+    if not users:
+        return
+    _clear_user_references(users)
+    user_ids = [user.id for user in users]
+    Token.objects.filter(user_id__in=user_ids).delete()
+    for user in users:
+        user.groups.clear()
+        user.user_permissions.clear()
+        user.delete()
+
+
+def _clear_contact_references(contact):
+    if not contact or not contact.id:
+        return
+    m.AssignmentAttempt.objects.filter(contact=contact).update(contact=None)
+    m.AssignmentAttempt.objects.filter(sub_contact=contact).update(sub_contact=None)
+    m.AssignmentHandoff.objects.filter(from_contact=contact).update(from_contact=None)
+    m.AssignmentHandoff.objects.filter(to_contact=contact).update(to_contact=None)
+    m.AgentDispatchDecision.objects.filter(recommended_contact=contact).update(
+        recommended_contact=None
+    )
+
+
+def delete_contact_and_bound_users(contact):
+    with transaction.atomic():
+        locked_contact = m.Contact.objects.select_for_update().get(pk=contact.pk)
+        users = list(User.objects.select_for_update().filter(contact=locked_contact))
+        _clear_contact_references(locked_contact)
+        User.objects.filter(contact=locked_contact).update(contact=None)
+        _delete_users(users)
+        locked_contact.delete()
+
+
+def delete_user_and_bound_contact(user):
+    with transaction.atomic():
+        locked_user = User.objects.select_for_update().get(pk=user.pk)
+        contact = locked_user.contact
+        if contact:
+            delete_contact_and_bound_users(contact)
+            return
+        _delete_users([locked_user])
+
+
+def _resume_file_info(resume):
+    fname = os.path.basename(resume.resume_file or "")
+    path = os.path.join(settings.MEDIA_ROOT, RESUME_SUBDIR, fname) if fname else ""
+    if path and os.path.exists(path):
+        return fname, path
+    return "", ""
+
+
+def _attachment_response(path, filename):
+    content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    with open(path, "rb") as file_obj:
+        response = HttpResponse(file_obj.read(), content_type=content_type)
+    response["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(filename)}"
+    response["X-Resume-Filename"] = quote(filename)
+    return response
+
+
+def resume_export_response(resumes):
+    available, missing = [], []
+    for resume in resumes:
+        fname, path = _resume_file_info(resume)
+        if path:
+            available.append((resume, fname, path))
+        else:
+            missing.append(f"{resume.candidate.name}（{resume.apply_id}）")
+
+    if len(available) == 1 and not missing:
+        _, fname, path = available[0]
+        response = _attachment_response(path, fname)
+        response["X-Export-Count"] = "1"
+        response["X-Export-Missing"] = "0"
+        return response
+
     buf = io.BytesIO()
-    added, missing = 0, []
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for resume in resumes:
-            fname = resume.resume_file
-            path = os.path.join(resume_dir, fname) if fname else ""
-            if path and os.path.exists(path):
-                zf.write(path, arcname=fname)
-                added += 1
-            else:
-                missing.append(f"{resume.candidate.name}（{resume.apply_id}）")
+        for _, fname, path in available:
+            zf.write(path, arcname=fname)
         if missing:
             zf.writestr(
                 "缺失简历文件清单.txt",
@@ -84,9 +166,13 @@ def resume_zip_response(resumes):
     buf.seek(0)
     resp = HttpResponse(buf.getvalue(), content_type="application/zip")
     resp["Content-Disposition"] = 'attachment; filename="resumes_export.zip"'
-    resp["X-Export-Count"] = str(added)
+    resp["X-Export-Count"] = str(len(available))
     resp["X-Export-Missing"] = str(len(missing))
     return resp
+
+
+def resume_zip_response(resumes):
+    return resume_export_response(resumes)
 
 
 def resume_preview_response(resume):
@@ -278,82 +364,7 @@ class CandidateViewSet(PermissionedModelViewSet):
             .select_related("workflow__current_resume")
             .order_by("-updated_at")
         )
-        p = self.request.query_params
-        search = p.get("search")
-        if search:
-            qs = qs.filter(
-                Q(name__icontains=search)
-                | Q(phone__icontains=search)
-                | Q(resumes__apply_id__icontains=search)
-                | Q(resumes__position_name__icontains=search)
-            )
-        if p.get("name"):
-            qs = qs.filter(name__icontains=p["name"])
-        if p.get("phone"):
-            qs = qs.filter(phone__icontains=p["phone"])
-        if p.get("first_degree_school"):
-            qs = qs.filter(first_degree_school__icontains=p["first_degree_school"])
-        if p.get("highest_degree_school"):
-            qs = qs.filter(highest_degree_school__icontains=p["highest_degree_school"])
-        if p.get("highest_major"):
-            qs = qs.filter(highest_major__icontains=p["highest_major"])
-        if p.get("current_rank"):
-            qs = qs.filter(
-                Q(workflow__current_rank=p["current_rank"])
-                | Q(workflow__isnull=True, resumes__volunteer_rank=p["current_rank"])
-            )
-        if p.get("current_entity"):
-            qs = qs.filter(
-                Q(workflow__current_resume__entity__icontains=p["current_entity"])
-                | Q(workflow__isnull=True, resumes__entity__icontains=p["current_entity"])
-            )
-        if p.get("current_position_name"):
-            qs = qs.filter(
-                Q(
-                    workflow__current_resume__position_name__icontains=p[
-                        "current_position_name"
-                    ]
-                )
-                | Q(
-                    workflow__isnull=True,
-                    resumes__position_name__icontains=p["current_position_name"],
-                )
-            )
-        if p.get("current_job_category"):
-            qs = qs.filter(
-                Q(
-                    workflow__current_resume__job_category__icontains=p[
-                        "current_job_category"
-                    ]
-                )
-                | Q(
-                    workflow__isnull=True,
-                    resumes__job_category__icontains=p["current_job_category"],
-                )
-            )
-        if p.get("school_tag"):
-            qs = qs.filter(
-                Q(highest_degree_tag__name__icontains=p["school_tag"])
-                | Q(highest_degree_tag__code__icontains=p["school_tag"])
-                | Q(first_degree_tag__name__icontains=p["school_tag"])
-                | Q(first_degree_tag__code__icontains=p["school_tag"])
-                | Q(highest_degree_platform__icontains=p["school_tag"])
-                | Q(first_degree_platform__icontains=p["school_tag"])
-            )
-        status_filter = p.get("status")
-        if status_filter:
-            if status_filter == m.CandidateWorkflow.STATUS_PENDING:
-                qs = qs.filter(
-                    Q(workflow__status=m.CandidateWorkflow.STATUS_PENDING)
-                    | Q(workflow__isnull=True)
-                )
-            else:
-                qs = qs.filter(workflow__status=status_filter)
-        if p.get("imported_after"):
-            qs = qs.filter(imported_at__date__gte=p["imported_after"])
-        if p.get("imported_before"):
-            qs = qs.filter(imported_at__date__lte=p["imported_before"])
-        return qs.distinct()
+        return system_status.apply_candidate_filters(qs, self.request.query_params)
 
     @action(detail=False, methods=["get"], url_path="export")
     def export_resumes(self, request):
@@ -384,6 +395,11 @@ class JobViewSet(PermissionedModelViewSet):
     def get_queryset(self):
         qs = m.Job.objects.select_related("department").all().order_by("id")
         p = self.request.query_params
+        is_active = bool_query_value(p.get("is_active"))
+        if is_active is None:
+            qs = qs.filter(is_active=True)
+        else:
+            qs = qs.filter(is_active=is_active)
         if p.get("entity"):
             qs = qs.filter(entity__icontains=p["entity"])
         if p.get("public_name"):
@@ -406,6 +422,12 @@ class JobViewSet(PermissionedModelViewSet):
         if is_public is not None:
             qs = qs.filter(is_public=is_public)
         return qs
+
+    def destroy(self, request, *args, **kwargs):
+        job = self.get_object()
+        job.is_active = False
+        job.save(update_fields=["is_active"])
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class SchoolViewSet(PermissionedModelViewSet):
@@ -515,7 +537,7 @@ class ContactViewSet(PermissionedModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         contact = self.get_object()
-        _deactivate_contact(contact)
+        delete_contact_and_bound_users(contact)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -581,7 +603,15 @@ class AssignmentAttemptViewSet(PermissionedReadOnlyModelViewSet):
         if "attempt.view_all" not in permissions:
             scope = Q(pk__in=[])
             if contact_id and "attempt.view_received" in permissions:
-                scope |= Q(contact_id=contact_id)
+                scope |= Q(
+                    contact_id=contact_id,
+                    status__in=[
+                        m.AssignmentAttempt.STATUS_DISPATCHED_L2,
+                        m.AssignmentAttempt.STATUS_ASSIGNED_L3,
+                        m.AssignmentAttempt.STATUS_PASSED,
+                        m.AssignmentAttempt.STATUS_REJECTED,
+                    ],
+                )
             if contact_id and "attempt.view_assigned" in permissions:
                 scope |= Q(sub_contact_id=contact_id)
             qs = qs.filter(scope)
@@ -779,7 +809,8 @@ class PipelineRunView(APIView):
     def post(self, request):
         step = request.data.get("step", "all")
         mode = request.data.get("mode", "rule")
-        run = runner.run_step(step, mode=mode)
+        scope = request.data.get("scope") or {}
+        run = runner.run_step(step, mode=mode, scope=scope)
         return Response(
             {
                 "id": run.id,
@@ -805,6 +836,11 @@ class UserViewSet(PermissionedModelViewSet):
         if p.get("is_active") in ["true", "false"]:
             qs = qs.filter(is_active=p["is_active"] == "true")
         return qs
+
+    def destroy(self, request, *args, **kwargs):
+        user = self.get_object()
+        delete_user_and_bound_contact(user)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class RoleViewSet(PermissionedModelViewSet):

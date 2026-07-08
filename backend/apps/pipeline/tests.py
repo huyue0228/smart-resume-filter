@@ -2,6 +2,7 @@ from unittest.mock import patch
 
 from django.test import TestCase
 
+from apps.accounts.models import User
 from apps.core import models as m
 from apps.pipeline import ai_config
 from apps.pipeline.services import allocate
@@ -110,6 +111,24 @@ class AllocationDesignContractTests(TestCase):
         self.assertEqual(decision.recommendation, m.AgentDispatchDecision.RECOMMEND_REVIEW)
         self.assertGreaterEqual(decision.confidence_score, 0.5)
         self.assertLess(decision.confidence_score, 0.8)
+        self.assertEqual(decision.recommended_contact_name_snapshot, "二级接口人")
+        self.assertEqual(decision.recommended_contact_employee_no_snapshot, "L2001")
+
+    def test_dispatch_attempt_records_handoff_snapshots(self):
+        allocate.run(mode="rule")
+        attempt = m.AssignmentAttempt.objects.get()
+        user = User.objects.create_user(username="hr-snapshot", password="pass")
+
+        allocate.dispatch_attempt(attempt, user=user)
+
+        attempt.refresh_from_db()
+        handoff = m.AssignmentHandoff.objects.get()
+        self.assertEqual(attempt.contact_name_snapshot, "二级接口人")
+        self.assertEqual(attempt.contact_employee_no_snapshot, "L2001")
+        self.assertEqual(handoff.to_department_name_snapshot, "技术部")
+        self.assertEqual(handoff.to_contact_name_snapshot, "二级接口人")
+        self.assertEqual(handoff.to_contact_employee_no_snapshot, "L2001")
+        self.assertEqual(handoff.created_by_username_snapshot, "hr-snapshot")
 
     def test_ai_model_versions_come_from_backend_config(self):
         with patch.dict(
@@ -177,3 +196,52 @@ class AllocationDesignContractTests(TestCase):
             ).count(),
             1,
         )
+
+    def test_scoped_reprocess_reopens_only_selected_system_statuses(self):
+        allocate.run(mode="rule")
+        passed_attempt = m.AssignmentAttempt.objects.get()
+        allocate.dispatch_attempt(passed_attempt)
+        tertiary_department = m.Department.objects.create(
+            name="技术三部", level=3, parent=self.department
+        )
+        tertiary_contact = m.Contact.objects.create(
+            name="三级接口人",
+            employee_no="T2001",
+            department=tertiary_department,
+            contact_level=m.Contact.LEVEL_TERTIARY,
+            is_active=True,
+        )
+        allocate.assign_sub_contact(passed_attempt, tertiary_contact)
+        allocate.submit_feedback(passed_attempt, m.AssignmentAttempt.FEEDBACK_PASSED)
+        self.candidate.workflow.refresh_from_db()
+        self.assertEqual(self.candidate.workflow.status, m.CandidateWorkflow.STATUS_PASSED)
+
+        other_candidate = m.Candidate.objects.create(
+            identity_hash="candidate-unselected",
+            name="李四",
+            phone="13900000000",
+            first_degree_platform="平台A",
+            highest_degree_platform="平台A",
+        )
+        m.Resume.objects.create(
+            candidate=other_candidate,
+            apply_id="B1001",
+            position_name="后端工程师",
+            volunteer_rank=1,
+            resume_file="李四（B1001）.pdf",
+        )
+
+        message = allocate.run(
+            mode="rule",
+            scope={"system_statuses": ["screening_passed"]},
+        )
+
+        self.candidate.workflow.refresh_from_db()
+        self.assertEqual(self.candidate.workflow.status, m.CandidateWorkflow.STATUS_IN_PROGRESS)
+        self.assertIsNone(self.candidate.workflow.passed_attempt_id)
+        self.assertEqual(
+            m.AssignmentAttempt.objects.filter(workflow=self.candidate.workflow).count(),
+            2,
+        )
+        self.assertFalse(hasattr(other_candidate, "workflow"))
+        self.assertIn("已生成 1 条候选人分配尝试", message)

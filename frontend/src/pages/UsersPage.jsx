@@ -7,10 +7,11 @@ import {
   ProFormText,
   ProTable,
 } from '@ant-design/pro-components'
-import { Button, Select, Space, Tabs, Tag, Tree, message } from 'antd'
+import { Button, Popconfirm, Select, Space, Tabs, Tag, Tree, message } from 'antd'
 import {
   createRole,
   createUser,
+  deleteUser,
   fetchContacts,
   fetchPermissionTree,
   fetchRoles,
@@ -110,7 +111,7 @@ export default function UsersPage() {
     {
       title: '操作',
       valueType: 'option',
-      width: 130,
+      width: 170,
       render: (_, record) => (
         <Space>
           <a onClick={() => setUserModal({ open: true, record })}>编辑</a>
@@ -123,6 +124,20 @@ export default function UsersPage() {
           >
             {record.is_active ? '停用' : '启用'}
           </a>
+          <Popconfirm
+            title="删除用户"
+            description="删除后账号、Token 和角色绑定会清理；若绑定接口人，将同步删除接口人，历史记录仅保留快照。"
+            okText="删除"
+            okButtonProps={{ danger: true }}
+            onConfirm={async () => {
+              await deleteUser(record.id)
+              message.success('用户已删除')
+              await loadOptions()
+              userActionRef.current?.reload()
+            }}
+          >
+            <a style={{ color: '#cf1322' }}>删除</a>
+          </Popconfirm>
         </Space>
       ),
     },

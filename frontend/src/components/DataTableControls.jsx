@@ -40,10 +40,10 @@ export function textColumnFilter(placeholder) {
   }
 }
 
-export function selectColumnFilter(options) {
+export function selectColumnFilter(options, multiple = false) {
   return {
     filters: options,
-    filterMultiple: false,
+    filterMultiple: multiple,
     filterIcon: (filtered) => (
       <FilterOutlined style={{ color: filtered ? '#1677ff' : undefined }} />
     ),
@@ -54,7 +54,7 @@ export function normalizeTableFilters(filters, fields) {
   return fields.reduce((acc, field) => {
     const value = filters?.[field]
     if (Array.isArray(value) && value.length > 0 && value[0] !== undefined) {
-      acc[field] = value[0]
+      acc[field] = value.length === 1 ? value[0] : value
     }
     return acc
   }, {})

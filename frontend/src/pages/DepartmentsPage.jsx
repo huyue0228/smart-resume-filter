@@ -98,7 +98,7 @@ export default function DepartmentsPage() {
         <Space>
           <Popconfirm
             title="删除接口人"
-            description="将停用该接口人及绑定账号，历史分配记录会保留。"
+            description="将删除该接口人及绑定用户，历史分配记录仅保留快照。"
             okText="删除"
             cancelText="取消"
             okButtonProps={{ danger: true }}

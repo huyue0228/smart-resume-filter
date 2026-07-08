@@ -5,7 +5,6 @@ import { fetchSchools } from '../api/services'
 import ImportButton from '../components/ImportButton'
 import {
   normalizeTableFilters,
-  selectColumnFilter,
   textColumnFilter,
   useResizableColumns,
 } from '../components/DataTableControls'
@@ -13,8 +12,6 @@ import {
 const IMPORT_FIELDS = [
   { key: 'schools', label: '院校分类 (.xlsx/.xls/.csv)', accept: '.xlsx,.xls,.csv' },
 ]
-
-const REGION_COLOR = { 南: 'geekblue', 北: 'volcano' }
 
 export default function SchoolsPage() {
   const actionRef = useRef()
@@ -35,22 +32,11 @@ export default function SchoolsPage() {
       ...textColumnFilter('筛选平台标签'),
       render: (_, r) => (r.platform ? <Tag color="blue">{r.platform}</Tag> : '-'),
     },
-    {
-      title: '所在地（南/北）',
-      dataIndex: 'region',
-      width: 140,
-      ...selectColumnFilter([
-        { text: '南', value: '南' },
-        { text: '北', value: '北' },
-      ]),
-      render: (_, r) =>
-        r.region ? <Tag color={REGION_COLOR[r.region]}>{r.region}</Tag> : '-',
-    },
   ]
   const { columns, components, scrollX } = useResizableColumns(baseColumns)
 
   return (
-    <PageContainer title="院校清单" content="院校平台标签与南北所在地，可导入维护。">
+    <PageContainer title="院校清单" content="维护院校与院校标签，可导入更新。">
       <ProTable
         actionRef={actionRef}
         rowKey="id"
@@ -73,7 +59,6 @@ export default function SchoolsPage() {
           const tableFilters = normalizeTableFilters(filters, [
             'name',
             'platform',
-            'region',
           ])
           try {
             const { data } = await fetchSchools({

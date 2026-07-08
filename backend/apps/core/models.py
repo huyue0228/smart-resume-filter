@@ -98,6 +98,13 @@ class Job(models.Model):
     location = models.CharField(max_length=64, blank=True, help_text="工作地点")
     education = models.CharField(max_length=32, blank=True, help_text="学历要求")
     headcount = models.PositiveIntegerField(default=0, help_text="需求数量(HC)")
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["is_active", "entity"]),
+            models.Index(fields=["is_active", "category"]),
+        ]
 
     def __str__(self):
         return self.public_name or self.position_name or f"Job#{self.pk}"
@@ -119,6 +126,8 @@ class Candidate(models.Model):
     identity_hash = models.CharField(max_length=64, unique=True)
     name = models.CharField(max_length=64)
     phone = models.CharField(max_length=32, blank=True)
+    name_pinyin = models.CharField(max_length=128, blank=True)
+    name_pinyin_initials = models.CharField(max_length=32, blank=True)
     gender = models.CharField(max_length=8, blank=True)
     household_province = models.CharField(max_length=32, blank=True, help_text="户口所在地")
     first_degree_school = models.CharField(max_length=128, blank=True)
@@ -147,6 +156,25 @@ class Candidate(models.Model):
 
     def __str__(self):
         return self.name
+
+    def save(self, *args, **kwargs):
+        from .name_pinyin import name_to_pinyin
+
+        self.name_pinyin, self.name_pinyin_initials = name_to_pinyin(self.name)
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None and "name" in update_fields:
+            kwargs["update_fields"] = set(update_fields) | {
+                "name_pinyin",
+                "name_pinyin_initials",
+            }
+        super().save(*args, **kwargs)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["name"]),
+            models.Index(fields=["name_pinyin"]),
+            models.Index(fields=["name_pinyin_initials"]),
+        ]
 
 
 class Resume(models.Model):
@@ -380,7 +408,11 @@ class AssignmentAttempt(models.Model):
         related_name="assignment_attempts",
     )
     contact = models.ForeignKey(
-        Contact, on_delete=models.PROTECT, related_name="assignment_attempts"
+        Contact,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="assignment_attempts",
     )
     sub_department = models.ForeignKey(
         Department,
@@ -393,7 +425,7 @@ class AssignmentAttempt(models.Model):
         Contact,
         null=True,
         blank=True,
-        on_delete=models.PROTECT,
+        on_delete=models.SET_NULL,
         related_name="sub_assignment_attempts",
     )
     matched_rule = models.ForeignKey(
@@ -433,6 +465,7 @@ class AssignmentAttempt(models.Model):
     sub_contact_employee_no_snapshot = models.CharField(max_length=32, blank=True)
     resume_apply_id_snapshot = models.CharField(max_length=64, blank=True)
     position_name_snapshot = models.CharField(max_length=128, blank=True)
+    created_by_username_snapshot = models.CharField(max_length=150, blank=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,
@@ -488,9 +521,19 @@ class AssignmentHandoff(models.Model):
         related_name="handoffs_to",
     )
     to_contact = models.ForeignKey(
-        Contact, on_delete=models.PROTECT, related_name="handoffs_to"
+        Contact,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="handoffs_to",
     )
+    from_contact_name_snapshot = models.CharField(max_length=64, blank=True)
+    from_contact_employee_no_snapshot = models.CharField(max_length=32, blank=True)
+    to_department_name_snapshot = models.CharField(max_length=128, blank=True)
+    to_contact_name_snapshot = models.CharField(max_length=64, blank=True)
+    to_contact_employee_no_snapshot = models.CharField(max_length=32, blank=True)
     note = models.TextField(blank=True)
+    created_by_username_snapshot = models.CharField(max_length=150, blank=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,
@@ -568,6 +611,8 @@ class AgentDispatchDecision(models.Model):
         on_delete=models.SET_NULL,
         related_name="agent_decisions",
     )
+    recommended_contact_name_snapshot = models.CharField(max_length=64, blank=True)
+    recommended_contact_employee_no_snapshot = models.CharField(max_length=32, blank=True)
     confidence_score = models.FloatField(null=True, blank=True)
     score_breakdown = models.JSONField(default=dict, blank=True)
     summary = models.TextField(blank=True)

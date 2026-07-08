@@ -30,6 +30,7 @@ import { useRole } from '../contexts/RoleContext'
 import { useMode } from '../contexts/ModeContext'
 import { useProcessRunner } from '../components/useProcessRunner'
 import ResumePreview from '../components/ResumePreview'
+import { downloadBlobFromResponse } from '../utils/download'
 
 const REPROCESS_STEPS = [
   { step: 'step2', label: '简历分类、分配与下发' },
@@ -49,17 +50,6 @@ const SOURCE_TEXT = {
   rule: '规则',
   ai: 'AI',
   manual: '手动',
-}
-
-function triggerDownload(data, filename) {
-  const url = URL.createObjectURL(new Blob([data]))
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  URL.revokeObjectURL(url)
 }
 
 export default function AllocationsPage() {
@@ -246,10 +236,10 @@ export default function AllocationsPage() {
       const resp = await exportAllocations(ids, lastQuery)
       const count = Number(resp.headers?.['x-export-count'] ?? 0)
       const missing = Number(resp.headers?.['x-export-missing'] ?? 0)
-      if (count === 0) {
+      if (count === 0 && missing === 0) {
         message.warning('所选记录暂无可导出的简历文件')
       } else {
-        triggerDownload(resp.data, 'resumes_export.zip')
+        downloadBlobFromResponse(resp, 'resumes_export.zip')
         message.success(
           `已导出 ${count} 份简历${missing ? `，${missing} 份缺文件（见压缩包内清单）` : ''}`,
         )
@@ -260,6 +250,15 @@ export default function AllocationsPage() {
       setExporting(false)
     }
   }
+
+  const statusValueEnum = isContact
+    ? {
+        dispatched_l2: STATUS_ENUM.dispatched_l2,
+        assigned_l3: STATUS_ENUM.assigned_l3,
+        passed: STATUS_ENUM.passed,
+        rejected: STATUS_ENUM.rejected,
+      }
+    : STATUS_ENUM
 
   const columns = [
     { title: '候选人', dataIndex: 'candidate_name', width: 120, fixed: 'left' },
@@ -272,7 +271,7 @@ export default function AllocationsPage() {
       render: (value) => SOURCE_TEXT[value] || value || '-',
     },
     { title: '分配部门', dataIndex: 'department_name', width: 160 },
-    { title: '二级接口人', dataIndex: 'contact_name', width: 120 },
+    !isSecondaryContact && { title: '二级接口人', dataIndex: 'contact_name', width: 120 },
     { title: '三级接口人', dataIndex: 'sub_contact_name', width: 120 },
     { title: '分配理由', dataIndex: 'match_reason', ellipsis: true, search: false },
     {
@@ -280,7 +279,7 @@ export default function AllocationsPage() {
       dataIndex: 'status',
       width: 120,
       valueType: 'select',
-      valueEnum: STATUS_ENUM,
+      valueEnum: statusValueEnum,
     },
     {
       title: '操作',
@@ -362,7 +361,7 @@ export default function AllocationsPage() {
         )
       },
     },
-  ]
+  ].filter(Boolean)
 
   return (
     <PageContainer

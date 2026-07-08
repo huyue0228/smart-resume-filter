@@ -5,6 +5,7 @@ django-filter==24.3
 pandas==2.2.3
 openpyxl==3.1.5
 xlrd==2.0.1
+pypinyin==0.51.0
 celery[redis]==5.4.0
 gunicorn==22.0.0
 psycopg[binary]>=3.1.18,<4.0

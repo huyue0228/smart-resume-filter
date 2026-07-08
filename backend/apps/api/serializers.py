@@ -10,6 +10,7 @@ from apps.accounts.permissions import (
     user_role_names,
 )
 from apps.core import models as m
+from apps.core import system_status
 
 
 class CurrentUserSerializer(serializers.ModelSerializer):
@@ -225,6 +226,8 @@ class ResumeBriefSerializer(serializers.ModelSerializer):
 
 class CandidateSerializer(serializers.ModelSerializer):
     school_tag = serializers.SerializerMethodField()
+    system_status = serializers.SerializerMethodField()
+    system_status_label = serializers.SerializerMethodField()
     workflow_id = serializers.SerializerMethodField()
     workflow_status = serializers.SerializerMethodField()
     current_resume = serializers.SerializerMethodField()
@@ -251,6 +254,8 @@ class CandidateSerializer(serializers.ModelSerializer):
             "first_degree_platform",
             "highest_degree_platform",
             "school_tag",
+            "system_status",
+            "system_status_label",
             "workflow_id",
             "workflow_status",
             "current_resume",
@@ -293,6 +298,12 @@ class CandidateSerializer(serializers.ModelSerializer):
             or obj.first_degree_platform
             or ""
         )
+
+    def get_system_status(self, obj):
+        return system_status.candidate_system_status(obj)
+
+    def get_system_status_label(self, obj):
+        return system_status.system_status_label(self.get_system_status(obj))
 
     def get_workflow_id(self, obj):
         workflow = self._workflow(obj)
@@ -368,6 +379,12 @@ class CandidateSerializer(serializers.ModelSerializer):
 
 class JobSerializer(serializers.ModelSerializer):
     department_name = serializers.CharField(source="department.name", read_only=True)
+    majors = serializers.SerializerMethodField()
+    major_names = serializers.ListField(
+        child=serializers.CharField(allow_blank=False),
+        write_only=True,
+        required=False,
+    )
 
     class Meta:
         model = m.Job
@@ -384,7 +401,48 @@ class JobSerializer(serializers.ModelSerializer):
             "location",
             "education",
             "headcount",
+            "is_active",
+            "majors",
+            "major_names",
         ]
+
+    def get_majors(self, obj):
+        return list(obj.majors.order_by("id").values_list("major", flat=True))
+
+    def validate_department(self, department):
+        if department and department.level != 2:
+            raise serializers.ValidationError("岗位必须绑定二级部门")
+        return department
+
+    def _clean_major_names(self, values):
+        seen = set()
+        result = []
+        for value in values:
+            text = str(value).strip()
+            if text and text not in seen:
+                seen.add(text)
+                result.append(text)
+        return result
+
+    def _replace_majors(self, job, major_names):
+        m.JobMajor.objects.filter(job=job).delete()
+        m.JobMajor.objects.bulk_create(
+            [m.JobMajor(job=job, major=major) for major in major_names]
+        )
+
+    def create(self, validated_data):
+        major_names = self._clean_major_names(validated_data.pop("major_names", []))
+        job = super().create(validated_data)
+        self._replace_majors(job, major_names)
+        return job
+
+    def update(self, instance, validated_data):
+        has_major_names = "major_names" in validated_data
+        major_names = self._clean_major_names(validated_data.pop("major_names", []))
+        job = super().update(instance, validated_data)
+        if has_major_names:
+            self._replace_majors(job, major_names)
+        return job
 
 
 class SchoolSerializer(serializers.ModelSerializer):
@@ -701,6 +759,7 @@ class AssignmentAttemptSerializer(serializers.ModelSerializer):
             "sub_contact_employee_no_snapshot",
             "resume_apply_id_snapshot",
             "position_name_snapshot",
+            "created_by_username_snapshot",
             "created_by",
             "created_at",
             "updated_at",
@@ -726,6 +785,7 @@ class AssignmentAttemptSerializer(serializers.ModelSerializer):
             "cancelled_at",
             "cancel_reason",
             "created_by",
+            "created_by_username_snapshot",
         ]
 
 
@@ -782,6 +842,8 @@ class AgentDispatchDecisionSerializer(serializers.ModelSerializer):
             "recommended_department_name",
             "recommended_contact",
             "recommended_contact_name",
+            "recommended_contact_name_snapshot",
+            "recommended_contact_employee_no_snapshot",
             "confidence_score",
             "score_breakdown",
             "summary",
