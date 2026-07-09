@@ -1,6 +1,18 @@
 import { useRef, useEffect, useState } from 'react'
 import { PageContainer, ProTable } from '@ant-design/pro-components'
-import { Button, Tag, Space, Modal, message, Drawer, Descriptions, Table, Typography, Tooltip } from 'antd'
+import {
+  Button,
+  Checkbox,
+  Tag,
+  Space,
+  Modal,
+  message,
+  Drawer,
+  Descriptions,
+  Table,
+  Typography,
+  Tooltip,
+} from 'antd'
 import { DownloadOutlined, PlayCircleOutlined, UndoOutlined } from '@ant-design/icons'
 import {
   deleteCandidate,
@@ -113,6 +125,8 @@ export default function ResumesPage() {
   const [previewRecord, setPreviewRecord] = useState(null)
   const [exporting, setExporting] = useState(false)
   const [processing, setProcessing] = useState(false)
+  const [processModalOpen, setProcessModalOpen] = useState(false)
+  const [processStatusSelection, setProcessStatusSelection] = useState([])
   const [lastQuery, setLastQuery] = useState({})
 
   const refreshUndo = async () => {
@@ -215,41 +229,38 @@ export default function ResumesPage() {
   }
 
   const handleProcessSelectedStatuses = () => {
-    const statuses = selectedSystemStatuses()
+    setProcessStatusSelection(selectedSystemStatuses())
+    setProcessModalOpen(true)
+  }
+
+  const handleConfirmProcess = async () => {
+    const statuses = processStatusSelection
     if (!statuses.length) {
-      message.warning('请先在“系统简历状态”列勾选需要重新分配的状态')
+      message.warning('请先勾选需要处理的简历状态')
       return
     }
-    const statusText = statuses
-      .map((status) => SYSTEM_STATUS_OPTIONS[status]?.text || status)
-      .join('、')
-    Modal.confirm({
-      title: '处理简历',
-      content: `将按当前${mode === 'ai' ? 'AI' : '规则'}模式，对当前筛选条件下状态为“${statusText}”的候选人重新执行分配；历史分配与反馈记录会保留，未反馈的自动分配会取消。确定继续？`,
-      okText: '开始处理',
-      onOk: async () => {
-        setProcessing(true)
-        try {
-          const r = await run(
-            [{ step: 'step2', label: '简历分类、分配与下发' }],
-            mode,
-            `正在重新处理简历（${mode === 'ai' ? 'AI' : '规则'}模式）`,
-            {
-              scope: {
-                system_statuses: statuses,
-                candidate_filters: lastQuery,
-              },
-            },
-          )
-          if (r.success) {
-            message.success('简历重新处理完成')
-            actionRef.current?.reload()
-          }
-        } finally {
-          setProcessing(false)
-        }
-      },
-    })
+    setProcessing(true)
+    try {
+      const { system_status: _ignoredSystemStatus, ...candidateFilters } = lastQuery
+      const r = await run(
+        [{ step: 'step2', label: '简历分类、分配与下发' }],
+        mode,
+        `正在重新处理简历（${mode === 'ai' ? 'AI' : '规则'}模式）`,
+        {
+          scope: {
+            system_statuses: statuses,
+            candidate_filters: candidateFilters,
+          },
+        },
+      )
+      if (r.success) {
+        message.success('简历重新处理完成')
+        setProcessModalOpen(false)
+        actionRef.current?.reload()
+      }
+    } finally {
+      setProcessing(false)
+    }
   }
 
   const baseColumns = [
@@ -525,6 +536,37 @@ export default function ResumesPage() {
           }
         }}
       />
+      <Modal
+        title="处理简历"
+        open={processModalOpen}
+        okText="开始处理"
+        cancelText="取消"
+        confirmLoading={processing}
+        okButtonProps={{ disabled: !processStatusSelection.length }}
+        onOk={handleConfirmProcess}
+        onCancel={() => {
+          if (!processing) setProcessModalOpen(false)
+        }}
+      >
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Typography.Text>
+            选择需要重新处理的系统简历状态。系统会按当前表格的其它筛选条件限定范围，并保留历史分配与反馈记录。
+          </Typography.Text>
+          <Checkbox.Group
+            value={processStatusSelection}
+            onChange={setProcessStatusSelection}
+            style={{ width: '100%' }}
+          >
+            <Space direction="vertical">
+              {Object.entries(SYSTEM_STATUS_OPTIONS).map(([value, item]) => (
+                <Checkbox key={value} value={value}>
+                  {item.text}
+                </Checkbox>
+              ))}
+            </Space>
+          </Checkbox.Group>
+        </Space>
+      </Modal>
       <Drawer
         title={detailRecord ? `${detailRecord.name} 的简历详情` : '简历详情'}
         width={1100}
