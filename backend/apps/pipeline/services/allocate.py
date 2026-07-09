@@ -8,7 +8,7 @@ from apps.core import system_status
 from apps.pipeline import ai_config
 
 from ..strategies import get_strategy
-from . import school_admission
+from . import classify_school, school_admission
 
 
 UNFEEDBACKED_STATUSES = [
@@ -689,7 +689,10 @@ def run(scope=None, mode="rule", processing_run=None):
         status=m.CandidateWorkflow.STATUS_ARCHIVED
     ).count()
 
-    for candidate in _candidate_queryset(scope):
+    candidates = list(_candidate_queryset(scope))
+    classify_school.classify_candidates(candidates, overwrite=False)
+
+    for candidate in candidates:
         workflow, _ = m.CandidateWorkflow.objects.get_or_create(candidate=candidate)
         if not scoped_reprocess and workflow.status in [
             m.CandidateWorkflow.STATUS_PASSED,

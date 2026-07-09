@@ -50,6 +50,47 @@ class AllocationDesignContractTests(TestCase):
         self.assertIsNone(attempt.matched_rule)
         self.assertEqual(self.candidate.workflow.status, m.CandidateWorkflow.STATUS_IN_PROGRESS)
 
+    def test_scoped_reprocess_classifies_school_tags_before_school_gate(self):
+        target_tag = m.SchoolTag.objects.create(code="TARGET", name="目标院校")
+        m.School.objects.create(name="南京大学", school_tag=target_tag)
+        rule = m.SchoolTagRule.objects.create(name="目标院校", priority=1, is_active=True)
+        m.SchoolTagRuleTag.objects.create(
+            rule=rule,
+            school_tag=target_tag,
+            degree_type=m.SchoolTagRuleTag.DEGREE_FIRST,
+        )
+        m.SchoolTagRuleTag.objects.create(
+            rule=rule,
+            school_tag=target_tag,
+            degree_type=m.SchoolTagRuleTag.DEGREE_HIGHEST,
+        )
+        self.candidate.first_degree_school = "南京大学"
+        self.candidate.highest_degree_school = "南京大学"
+        self.candidate.first_degree_platform = ""
+        self.candidate.highest_degree_platform = ""
+        self.candidate.first_degree_tag = None
+        self.candidate.highest_degree_tag = None
+        self.candidate.save(
+            update_fields=[
+                "first_degree_school",
+                "highest_degree_school",
+                "first_degree_platform",
+                "highest_degree_platform",
+                "first_degree_tag",
+                "highest_degree_tag",
+            ]
+        )
+
+        message = allocate.run(mode="rule", scope={"system_statuses": ["raw"]})
+
+        self.candidate.refresh_from_db()
+        self.assertEqual(self.candidate.first_degree_tag, target_tag)
+        self.assertEqual(self.candidate.highest_degree_tag, target_tag)
+        attempt = m.AssignmentAttempt.objects.get()
+        self.assertEqual(attempt.matched_rule, rule)
+        self.assertEqual(self.candidate.workflow.status, m.CandidateWorkflow.STATUS_IN_PROGRESS)
+        self.assertIn("已生成 1 条候选人分配尝试", message)
+
     def test_rule_allocation_skips_resume_when_required_major_not_matched(self):
         self.candidate.highest_major = "计算机科学与技术"
         self.candidate.save(update_fields=["highest_major"])
