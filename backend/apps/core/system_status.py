@@ -42,6 +42,17 @@ def normalize_statuses(value):
     return [item for item in [str(v).strip() for v in values] if item in LABELS]
 
 
+def normalize_workflow_statuses(value):
+    if not value:
+        return []
+    if isinstance(value, str):
+        values = value.split(",")
+    else:
+        values = value
+    allowed = {choice[0] for choice in m.CandidateWorkflow.STATUS_CHOICES}
+    return [item for item in [str(v).strip() for v in values] if item in allowed]
+
+
 def current_resume(candidate, workflow=None):
     workflow = workflow or _workflow(candidate)
     if workflow and workflow.current_resume_id:
@@ -193,15 +204,24 @@ def apply_candidate_filters(qs, params):
             | Q(highest_degree_platform__icontains=school_tag)
             | Q(first_degree_platform__icontains=school_tag)
         )
-    workflow_status = _value(params, "workflow_status") or _value(params, "status")
-    if workflow_status:
-        if workflow_status == m.CandidateWorkflow.STATUS_PENDING:
-            qs = qs.filter(
-                Q(workflow__status=m.CandidateWorkflow.STATUS_PENDING)
-                | Q(workflow__isnull=True)
+    workflow_statuses = (
+        normalize_workflow_statuses(_list_value(params, "workflow_status"))
+        or normalize_workflow_statuses(_list_value(params, "status"))
+    )
+    if workflow_statuses:
+        status_filter = Q()
+        if m.CandidateWorkflow.STATUS_PENDING in workflow_statuses:
+            status_filter |= Q(workflow__status=m.CandidateWorkflow.STATUS_PENDING) | Q(
+                workflow__isnull=True
             )
-        else:
-            qs = qs.filter(workflow__status=workflow_status)
+        explicit_statuses = [
+            status
+            for status in workflow_statuses
+            if status != m.CandidateWorkflow.STATUS_PENDING
+        ]
+        if explicit_statuses:
+            status_filter |= Q(workflow__status__in=explicit_statuses)
+        qs = qs.filter(status_filter)
     reason_type = _value(params, "reason_type")
     if reason_type:
         expected_reason = "" if reason_type == "none" else reason_type
@@ -293,10 +313,20 @@ def _list_value(params, key):
     if hasattr(params, "getlist"):
         values = params.getlist(key)
         if values:
-            return values
+            return [
+                item.strip()
+                for value in values
+                for item in str(value).split(",")
+                if item.strip()
+            ]
     value = _value(params, key)
     if value is None:
         return []
     if isinstance(value, list):
-        return value
+        return [
+            item.strip()
+            for entry in value
+            for item in str(entry).split(",")
+            if item.strip()
+        ]
     return str(value).split(",")

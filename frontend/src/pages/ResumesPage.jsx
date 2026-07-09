@@ -364,6 +364,7 @@ export default function ResumesPage() {
           text: item.text,
           value,
         })),
+        true,
       ),
       render: (value) => {
         const item = WORKFLOW_STATUS[value]
@@ -502,7 +503,9 @@ export default function ResumesPage() {
             job_department_name: tableFilters.job_department_name,
             current_job_category: tableFilters.current_job_category,
             school_tag: tableFilters.school_tag,
-            workflow_status: tableFilters.workflow_status,
+            workflow_status: Array.isArray(tableFilters.workflow_status)
+              ? tableFilters.workflow_status.join(',')
+              : tableFilters.workflow_status,
             reason_type: tableFilters.reason_type,
           }
           setLastQuery(query)

@@ -749,6 +749,47 @@ class ListFilteringPaginationApiTests(TestCase):
         self.assertEqual(row["reason_type"], "block")
         self.assertIn("研发中心", row["reason_text"])
 
+    def test_candidate_list_filters_by_multiple_workflow_statuses(self):
+        pending = m.Candidate.objects.create(
+            identity_hash="candidate-workflow-pending",
+            name="待处理候选人",
+            phone="13830000004",
+        )
+        archived = m.Candidate.objects.create(
+            identity_hash="candidate-workflow-archived",
+            name="归档候选人",
+            phone="13830000005",
+        )
+        passed = m.Candidate.objects.create(
+            identity_hash="candidate-workflow-passed",
+            name="通过候选人",
+            phone="13830000006",
+        )
+        m.CandidateWorkflow.objects.create(
+            candidate=archived,
+            status=m.CandidateWorkflow.STATUS_ARCHIVED,
+        )
+        m.CandidateWorkflow.objects.create(
+            candidate=passed,
+            status=m.CandidateWorkflow.STATUS_PASSED,
+        )
+
+        response = self.client.get(
+            "/api/candidates/",
+            {
+                "workflow_status": ",".join(
+                    [
+                        m.CandidateWorkflow.STATUS_PENDING,
+                        m.CandidateWorkflow.STATUS_ARCHIVED,
+                    ]
+                )
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        result_ids = {item["id"] for item in response.data["results"]}
+        self.assertEqual(result_ids, {pending.id, archived.id})
+
     def test_candidate_list_uses_current_resume_department_when_history_attempt_exists(self):
         old_department = m.Department.objects.create(name="旧部门", level=2)
         new_department = m.Department.objects.create(name="新部门", level=2)
