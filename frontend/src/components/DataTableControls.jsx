@@ -1,11 +1,11 @@
 import { useMemo, useState } from 'react'
-import { Button, Input, Space } from 'antd'
+import { Button, Checkbox, Input, Space } from 'antd'
 import { FilterOutlined, SearchOutlined } from '@ant-design/icons'
 import ResizableHeaderCell from './ResizableHeaderCell'
 
 export function textColumnFilter(placeholder) {
   return {
-    filterDropdown: ({ selectedKeys, setSelectedKeys, confirm, clearFilters }) => (
+    filterDropdown: ({ selectedKeys, setSelectedKeys, confirm, clearFilters, close }) => (
       <div style={{ padding: 8, width: 220 }} onKeyDown={(event) => event.stopPropagation()}>
         <Input
           autoFocus
@@ -20,7 +20,7 @@ export function textColumnFilter(placeholder) {
         />
         <Space>
           <Button type="primary" size="small" icon={<SearchOutlined />} onClick={() => confirm()}>
-            筛选
+            确认
           </Button>
           <Button
             size="small"
@@ -30,6 +30,9 @@ export function textColumnFilter(placeholder) {
             }}
           >
             重置
+          </Button>
+          <Button size="small" onClick={() => close?.()}>
+            取消
           </Button>
         </Space>
       </div>
@@ -42,8 +45,52 @@ export function textColumnFilter(placeholder) {
 
 export function selectColumnFilter(options, multiple = false) {
   return {
-    filters: options,
     filterMultiple: multiple,
+    filterDropdown: ({ selectedKeys, setSelectedKeys, confirm, clearFilters, close }) => (
+      <div style={{ padding: 8, width: 220 }} onKeyDown={(event) => event.stopPropagation()}>
+        <Space direction="vertical" size={4} style={{ width: '100%', marginBottom: 8 }}>
+          {options.map((option) => {
+            const checked = selectedKeys.includes(option.value)
+            return (
+              <Checkbox
+                key={option.value}
+                checked={checked}
+                onChange={(event) => {
+                  if (multiple) {
+                    setSelectedKeys(
+                      event.target.checked
+                        ? [...selectedKeys, option.value]
+                        : selectedKeys.filter((value) => value !== option.value),
+                    )
+                    return
+                  }
+                  setSelectedKeys(event.target.checked ? [option.value] : [])
+                }}
+              >
+                {option.text}
+              </Checkbox>
+            )
+          })}
+        </Space>
+        <Space>
+          <Button type="primary" size="small" icon={<FilterOutlined />} onClick={() => confirm()}>
+            确认
+          </Button>
+          <Button
+            size="small"
+            onClick={() => {
+              clearFilters?.()
+              confirm()
+            }}
+          >
+            重置
+          </Button>
+          <Button size="small" onClick={() => close?.()}>
+            取消
+          </Button>
+        </Space>
+      </div>
+    ),
     filterIcon: (filtered) => (
       <FilterOutlined style={{ color: filtered ? '#1677ff' : undefined }} />
     ),
