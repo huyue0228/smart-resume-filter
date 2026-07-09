@@ -2,6 +2,29 @@
 from apps.core import models as m
 
 
+NON_TARGET_TAG_NAME = "非目标院校"
+
+
+def _normalized(value):
+    return "".join((value or "").lower().split())
+
+
+def _default_school_tag():
+    default_tag = m.SchoolTag.objects.filter(is_default=True, is_active=True).first()
+    if default_tag:
+        return default_tag
+    non_target = _normalized(NON_TARGET_TAG_NAME)
+    return next(
+        (
+            tag
+            for tag in m.SchoolTag.objects.filter(is_active=True).order_by("id")
+            if _normalized(tag.name) == non_target
+            or _normalized(tag.code) == non_target
+        ),
+        None,
+    )
+
+
 def _school_tag(school, default_tag):
     if school and school.school_tag:
         return school.school_tag
@@ -23,7 +46,7 @@ def classify_candidates(candidates, *, overwrite=True):
     """
     count = 0
     school_map = {s.name: s for s in m.School.objects.select_related("school_tag")}
-    default_tag = m.SchoolTag.objects.filter(is_default=True, is_active=True).first()
+    default_tag = _default_school_tag()
     for cand in candidates:
         first_school = (
             school_map.get(cand.first_degree_school) if cand.first_degree_school else None

@@ -15,6 +15,7 @@ from rest_framework.test import APIClient
 from apps.accounts.models import User
 from apps.accounts.permissions import ensure_rbac_defaults
 from apps.core import models as m
+from apps.pipeline.services import classify_school
 
 
 def rest_framework_test_settings():
@@ -597,6 +598,37 @@ class ListFilteringPaginationApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual([item["id"] for item in response.data["results"]], [keep.id])
         self.assertEqual(response.data["results"][0]["highest_major"], "计算机")
+
+    def test_candidate_school_tag_filter_matches_manual_non_target_tag(self):
+        non_target_tag = m.SchoolTag.objects.create(
+            code="NON_TARGET",
+            name="非目标院校",
+            is_default=False,
+            is_active=True,
+        )
+        candidate = m.Candidate.objects.create(
+            identity_hash="candidate-manual-non-target",
+            name="未知院校候选人",
+            phone="13830000100",
+            first_degree_school="未收录大学",
+            highest_degree_school="未收录大学",
+        )
+        m.Resume.objects.create(
+            candidate=candidate,
+            apply_id="UNKNOWN-SCHOOL",
+            position_name="后端工程师",
+            volunteer_rank=1,
+        )
+
+        classify_school.run()
+        candidate.refresh_from_db()
+        response = self.client.get("/api/candidates/", {"school_tag": "非目标院校"})
+
+        self.assertEqual(candidate.first_degree_tag, non_target_tag)
+        self.assertEqual(candidate.highest_degree_tag, non_target_tag)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item["id"] for item in response.data["results"]], [candidate.id])
+        self.assertEqual(response.data["results"][0]["school_tag"], "非目标院校")
 
     def test_candidate_list_exposes_workflow_merge_fields_and_assignment_reason(self):
         department = m.Department.objects.create(name="研发中心", level=2)
