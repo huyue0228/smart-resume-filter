@@ -569,6 +569,7 @@ def _create_next_auto_attempt(workflow, rules, mode="rule", processing_run=None)
     after_rank = workflow.current_rank if workflow.current_rank else None
     for resume in _candidate_resumes(candidate, after_rank=after_rank):
         had_resume = True
+        _touch_workflow(workflow, resume, mode)
         # strategy.classify 内部负责 Rule/AI 的岗位选择口径；Rule 会校验主体、
         # 岗位名优先级和需求专业，AI 当前仍是 demo 占位策略。
         job, _category, classify_reason = _classify_resume(resume, strategy, jobs, mode)

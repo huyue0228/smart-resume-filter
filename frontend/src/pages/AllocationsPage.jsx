@@ -262,7 +262,15 @@ export default function AllocationsPage() {
 
   const columns = [
     { title: '候选人', dataIndex: 'candidate_name', width: 120, fixed: 'left' },
-    { title: '投递岗位', dataIndex: 'position_name', ellipsis: true },
+    {
+      title: '当前志愿',
+      dataIndex: 'volunteer_rank',
+      width: 90,
+      search: false,
+      render: (_, record) => record.volunteer_rank || '-',
+    },
+    { title: '应聘ID', dataIndex: 'apply_id', width: 120, search: false },
+    { title: '当前投递', dataIndex: 'position_name', ellipsis: true },
     {
       title: '来源',
       dataIndex: 'source',

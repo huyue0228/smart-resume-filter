@@ -313,6 +313,9 @@ class RbacApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         ids = [item["id"] for item in response.data["results"]]
         self.assertEqual(ids, [self.attempt_a.id])
+        self.assertEqual(response.data["results"][0]["volunteer_rank"], 1)
+        self.assertEqual(response.data["results"][0]["apply_id"], "A1001")
+        self.assertEqual(response.data["results"][0]["position_name"], "后端工程师")
 
     def test_secondary_contact_does_not_see_hr_pending_attempts(self):
         pending_candidate = m.Candidate.objects.create(
@@ -722,6 +725,40 @@ class ListFilteringPaginationApiTests(TestCase):
         self.assertEqual(response.data["count"], 1)
         self.assertEqual(response.data["results"][0]["id"], keep.id)
         self.assertEqual(response.data["results"][0]["current_position_name"], "后端工程师")
+
+    def test_workflow_list_falls_back_to_latest_attempt_resume(self):
+        candidate = m.Candidate.objects.create(
+            identity_hash="candidate-workflow-fallback",
+            name="历史候选人",
+            phone="13820000003",
+        )
+        resume = m.Resume.objects.create(
+            candidate=candidate,
+            apply_id="WF004",
+            position_name="算法工程师",
+            volunteer_rank=2,
+        )
+        workflow = m.CandidateWorkflow.objects.create(
+            candidate=candidate,
+            status=m.CandidateWorkflow.STATUS_ARCHIVED,
+            archive_reason=m.CandidateWorkflow.ARCHIVE_JOB_NOT_MATCHED,
+        )
+        m.AssignmentAttempt.objects.create(
+            workflow=workflow,
+            resume=resume,
+            attempt_no=1,
+            source=m.AssignmentAttempt.SOURCE_RULE,
+            status=m.AssignmentAttempt.STATUS_CANCELLED,
+        )
+
+        response = self.client.get("/api/workflows/", {"status": "archived"})
+
+        self.assertEqual(response.status_code, 200)
+        row = response.data["results"][0]
+        self.assertEqual(row["current_resume"], resume.id)
+        self.assertEqual(row["current_rank"], 2)
+        self.assertEqual(row["current_apply_id"], "WF004")
+        self.assertEqual(row["current_position_name"], "算法工程师")
 
     def test_candidate_search_matches_name_full_pinyin_and_initials(self):
         keep = m.Candidate.objects.create(

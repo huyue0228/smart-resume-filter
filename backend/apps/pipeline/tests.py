@@ -292,6 +292,24 @@ class AllocationDesignContractTests(TestCase):
             1,
         )
 
+    def test_archived_workflow_keeps_last_attempted_resume_when_job_not_matched(self):
+        self.job.is_active = False
+        self.job.save(update_fields=["is_active"])
+
+        allocate.run(mode="rule")
+
+        self.candidate.workflow.refresh_from_db()
+        self.assertEqual(
+            self.candidate.workflow.status,
+            m.CandidateWorkflow.STATUS_ARCHIVED,
+        )
+        self.assertEqual(
+            self.candidate.workflow.archive_reason,
+            m.CandidateWorkflow.ARCHIVE_JOB_NOT_MATCHED,
+        )
+        self.assertEqual(self.candidate.workflow.current_resume, self.resume)
+        self.assertEqual(self.candidate.workflow.current_rank, 1)
+
     def test_scoped_reprocess_reopens_only_selected_system_statuses(self):
         allocate.run(mode="rule")
         passed_attempt = m.AssignmentAttempt.objects.get()

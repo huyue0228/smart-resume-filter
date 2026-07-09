@@ -643,12 +643,45 @@ class SchoolTagRuleSerializer(serializers.ModelSerializer):
 class CandidateWorkflowSerializer(serializers.ModelSerializer):
     candidate_name = serializers.CharField(source="candidate.name", read_only=True)
     phone = serializers.CharField(source="candidate.phone", read_only=True)
-    current_apply_id = serializers.CharField(
-        source="current_resume.apply_id", read_only=True, default=""
-    )
-    current_position_name = serializers.CharField(
-        source="current_resume.position_name", read_only=True, default=""
-    )
+    current_resume = serializers.SerializerMethodField()
+    current_apply_id = serializers.SerializerMethodField()
+    current_position_name = serializers.SerializerMethodField()
+    current_rank = serializers.SerializerMethodField()
+
+    def _display_resume(self, obj):
+        if hasattr(obj, "_display_resume_cache"):
+            return obj._display_resume_cache
+        if obj.current_resume_id:
+            resume = obj.current_resume
+        elif obj.passed_attempt_id and obj.passed_attempt:
+            resume = obj.passed_attempt.resume
+        else:
+            latest_attempt = (
+                obj.attempts.select_related("resume")
+                .order_by("-attempt_no", "-created_at", "-id")
+                .first()
+            )
+            resume = latest_attempt.resume if latest_attempt else None
+        obj._display_resume_cache = resume
+        return resume
+
+    def get_current_resume(self, obj):
+        resume = self._display_resume(obj)
+        return resume.id if resume else None
+
+    def get_current_apply_id(self, obj):
+        resume = self._display_resume(obj)
+        return resume.apply_id if resume else ""
+
+    def get_current_position_name(self, obj):
+        resume = self._display_resume(obj)
+        return resume.position_name if resume else ""
+
+    def get_current_rank(self, obj):
+        if obj.current_rank:
+            return obj.current_rank
+        resume = self._display_resume(obj)
+        return resume.volunteer_rank if resume else None
 
     class Meta:
         model = m.CandidateWorkflow
@@ -679,6 +712,9 @@ class AssignmentAttemptSerializer(serializers.ModelSerializer):
     )
     apply_id = serializers.CharField(source="resume.apply_id", read_only=True)
     position_name = serializers.CharField(source="resume.position_name", read_only=True)
+    volunteer_rank = serializers.IntegerField(
+        source="resume.volunteer_rank", read_only=True
+    )
     department_name = serializers.CharField(
         source="department.name", read_only=True, default=""
     )
@@ -723,6 +759,7 @@ class AssignmentAttemptSerializer(serializers.ModelSerializer):
             "candidate_name",
             "apply_id",
             "position_name",
+            "volunteer_rank",
             "attempt_no",
             "source",
             "status",

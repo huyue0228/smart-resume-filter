@@ -561,7 +561,7 @@ class CandidateWorkflowViewSet(PermissionedReadOnlyModelViewSet):
 
     def get_queryset(self):
         qs = m.CandidateWorkflow.objects.select_related(
-            "candidate", "current_resume", "passed_attempt"
+            "candidate", "current_resume", "passed_attempt__resume"
         ).order_by("-updated_at")
         p = self.request.query_params
         if p.get("status"):
