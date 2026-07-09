@@ -120,6 +120,85 @@ class JobMajor(models.Model):
         return self.major
 
 
+class MajorCategory(models.Model):
+    """专业大类词表的一级分类。
+
+    这个模型只保存可维护主数据，不直接挂到候选人或岗位上。分配时会按
+    当前启用词表即时解析专业文本，历史分配结果则通过 match_reason 保留
+    当时命中的大类名称，避免后续维护词表时影响历史审计。
+    """
+
+    code = models.CharField(max_length=64, unique=True)
+    name = models.CharField(max_length=64)
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    sort_order = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["sort_order", "code", "id"]
+        indexes = [
+            models.Index(fields=["is_active", "sort_order"]),
+            models.Index(fields=["code", "is_active"]),
+        ]
+
+    def __str__(self):
+        return self.name
+
+
+class MajorAlias(models.Model):
+    """专业大类的别名、关键词或原始专业名。
+
+    `normalized_name` 由序列化器 / seed 命令按统一规则写入，分配时直接复用；
+    内置项也允许用户编辑和停用。`category` 使用 PROTECT，确保一个大类仍有
+    别名时不会被误删，符合“先删除或迁移别名，再删大类”的维护口径。
+    """
+
+    MATCH_EXACT = "exact"
+    MATCH_CONTAINS = "contains"
+    MATCH_TYPE_CHOICES = [
+        (MATCH_EXACT, "精确匹配"),
+        (MATCH_CONTAINS, "包含匹配"),
+    ]
+
+    SOURCE_BUILTIN = "builtin"
+    SOURCE_USER = "user"
+    SOURCE_IMPORT = "import"
+    SOURCE_CHOICES = [
+        (SOURCE_BUILTIN, "内置"),
+        (SOURCE_USER, "人工维护"),
+        (SOURCE_IMPORT, "导入"),
+    ]
+
+    category = models.ForeignKey(
+        MajorCategory,
+        on_delete=models.PROTECT,
+        related_name="aliases",
+    )
+    name = models.CharField(max_length=128)
+    normalized_name = models.CharField(max_length=128)
+    match_type = models.CharField(
+        max_length=16, choices=MATCH_TYPE_CHOICES, default=MATCH_CONTAINS
+    )
+    source = models.CharField(max_length=16, choices=SOURCE_CHOICES, default=SOURCE_USER)
+    note = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["category__sort_order", "category__code", "name", "id"]
+        indexes = [
+            models.Index(fields=["normalized_name", "is_active"]),
+            models.Index(fields=["match_type", "is_active"]),
+            models.Index(fields=["source"]),
+        ]
+
+    def __str__(self):
+        return self.name
+
+
 class Candidate(models.Model):
     """同学 / 人。以 identity_hash(规范化姓名+手机号) 全局唯一标识。"""
 
@@ -308,6 +387,11 @@ class CandidateWorkflow(models.Model):
         (ARCHIVE_RERUN_PRESERVED, "重跑时保留归档"),
     ]
 
+    BLOCK_CONTACT_NOT_FOUND = "contact_not_found"
+    BLOCK_REASON_CHOICES = [
+        (BLOCK_CONTACT_NOT_FOUND, "当前志愿无可用二级接口人"),
+    ]
+
     candidate = models.OneToOneField(
         Candidate, on_delete=models.CASCADE, related_name="workflow"
     )
@@ -327,6 +411,10 @@ class CandidateWorkflow(models.Model):
         max_length=64, choices=ARCHIVE_REASON_CHOICES, blank=True
     )
     archive_detail = models.TextField(blank=True)
+    block_reason = models.CharField(
+        max_length=64, choices=BLOCK_REASON_CHOICES, blank=True
+    )
+    block_detail = models.TextField(blank=True)
     passed_attempt = models.ForeignKey(
         "AssignmentAttempt",
         null=True,

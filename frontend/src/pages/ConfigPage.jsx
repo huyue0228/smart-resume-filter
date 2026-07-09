@@ -1,5 +1,6 @@
 import { PageContainer } from '@ant-design/pro-components'
 import { Tabs } from 'antd'
+import MajorDictionaryTab from './config/MajorDictionaryTab'
 import SchoolAdmissionRulesTab from './config/SchoolAdmissionRulesTab'
 import SchoolTagsTab from './config/SchoolTagsTab'
 import SystemConfigTab from './config/SystemConfigTab'
@@ -15,6 +16,11 @@ export default function ConfigPage() {
             key: 'school-rules',
             label: '院校准入规则',
             children: <SchoolAdmissionRulesTab />,
+          },
+          {
+            key: 'major-dictionary',
+            label: '专业大类词表',
+            children: <MajorDictionaryTab />,
           },
         ]}
       />

@@ -16,16 +16,24 @@ import {
 } from '@ant-design/icons'
 import { useRole, ROLES } from '../contexts/RoleContext'
 
-// 简历分配分组（接口人唯一可见）
+const ROOT_MENU_KEYS = ['/data', '/system']
+
+function pathMatchesGroup(pathname, route) {
+  if (!route.routes) return false
+  return route.routes.some((child) => child.path === pathname)
+}
+
+function defaultOpenKeys(pathname) {
+  return allRoute.routes
+    .filter((route) => ROOT_MENU_KEYS.includes(route.path) && pathMatchesGroup(pathname, route))
+    .map((route) => route.path)
+}
+
+// 简历分配直接进入分配尝试操作台，避免只有一个子页时多一层点击。
 const assignGroup = {
-  path: '/assign',
+  path: '/allocations',
   name: '简历分配',
   icon: <DeploymentUnitOutlined />,
-  routes: [
-    { path: '/workflows', name: '候选人工作流', icon: <ProfileOutlined /> },
-    { path: '/allocations', name: '分配尝试', icon: <DeploymentUnitOutlined /> },
-    { path: '/archives', name: '归档候选人', icon: <DatabaseOutlined /> },
-  ],
 }
 
 const allRoute = {
@@ -61,9 +69,7 @@ function filterRoutesByPermission(routes, hasPermission) {
     '/jobs': 'job.view',
     '/schools': 'school.view',
     '/departments': 'department.view',
-    '/workflows': 'attempt.view_all',
     '/allocations': ['attempt.view_all', 'attempt.view_received', 'attempt.view_assigned'],
-    '/archives': 'attempt.view_all',
     '/config': 'settings.manage_config',
     '/users': 'settings.manage_permissions',
   }
@@ -92,6 +98,7 @@ export default function BasicLayout() {
   const location = useLocation()
   const { role, roles, user, logout, hasPermission, isContact } = useRole()
   const [pathname, setPathname] = useState(location.pathname)
+  const [openKeys, setOpenKeys] = useState(() => defaultOpenKeys(location.pathname))
 
   const handleLogout = async () => {
     await logout()
@@ -113,6 +120,10 @@ export default function BasicLayout() {
       route={route}
       location={{ pathname }}
       onPageChange={(loc) => setPathname(loc?.pathname || location.pathname)}
+      menuProps={{
+        openKeys,
+        onOpenChange: setOpenKeys,
+      }}
       menuItemRender={(item, dom) => (
         <div
           onClick={() => {

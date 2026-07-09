@@ -598,6 +598,308 @@ class ListFilteringPaginationApiTests(TestCase):
         self.assertEqual([item["id"] for item in response.data["results"]], [keep.id])
         self.assertEqual(response.data["results"][0]["highest_major"], "计算机")
 
+    def test_candidate_list_exposes_workflow_merge_fields_and_assignment_reason(self):
+        department = m.Department.objects.create(name="研发中心", level=2)
+        contact = m.Contact.objects.create(
+            name="二级接口人",
+            employee_no="L2200",
+            department=department,
+            contact_level=m.Contact.LEVEL_SECONDARY,
+            is_active=True,
+        )
+        candidate = m.Candidate.objects.create(
+            identity_hash="candidate-merge-assignment",
+            name="分配候选人",
+            phone="13830000001",
+        )
+        resume = m.Resume.objects.create(
+            candidate=candidate,
+            apply_id="MERGE001",
+            position_name="后端工程师",
+            volunteer_rank=1,
+            job_category="技术类",
+            category_reason="岗位名命中",
+        )
+        workflow = m.CandidateWorkflow.objects.create(
+            candidate=candidate,
+            status=m.CandidateWorkflow.STATUS_IN_PROGRESS,
+            current_resume=resume,
+            current_rank=1,
+        )
+        m.AssignmentAttempt.objects.create(
+            workflow=workflow,
+            resume=resume,
+            attempt_no=1,
+            source=m.AssignmentAttempt.SOURCE_RULE,
+            status=m.AssignmentAttempt.STATUS_PENDING_DISPATCH,
+            department=department,
+            contact=contact,
+            match_reason="院校准入；分配至研发中心/二级接口人",
+        )
+
+        response = self.client.get("/api/candidates/", {"current_apply_id": "MERGE001"})
+
+        self.assertEqual(response.status_code, 200)
+        row = response.data["results"][0]
+        self.assertEqual(row["current_apply_id"], "MERGE001")
+        self.assertEqual(row["job_department_name"], "研发中心")
+        self.assertEqual(row["workflow_status"], m.CandidateWorkflow.STATUS_IN_PROGRESS)
+        self.assertEqual(row["reason_type"], "assignment")
+        self.assertEqual(row["reason_text"], "院校准入；分配至研发中心/二级接口人")
+        self.assertEqual(row["attempts"][0]["match_reason"], "院校准入；分配至研发中心/二级接口人")
+
+    def test_candidate_list_filters_by_blocked_workflow_merge_fields(self):
+        department = m.Department.objects.create(name="研发中心", level=2)
+        keep = m.Candidate.objects.create(
+            identity_hash="candidate-merge-blocked",
+            name="阻塞候选人",
+            phone="13830000002",
+        )
+        keep_resume = m.Resume.objects.create(
+            candidate=keep,
+            apply_id="BLOCK001",
+            position_name="后端工程师",
+            volunteer_rank=1,
+        )
+        job = m.Job.objects.create(
+            department=department,
+            public_name="后端工程师",
+            position_name="后端工程师",
+            category="技术类",
+            headcount=1,
+        )
+        keep_resume.job = job
+        keep_resume.save(update_fields=["job"])
+        m.CandidateWorkflow.objects.create(
+            candidate=keep,
+            status=m.CandidateWorkflow.STATUS_IN_PROGRESS,
+            current_resume=keep_resume,
+            current_rank=1,
+            block_reason=m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND,
+            block_detail="二级部门研发中心缺少启用接口人",
+        )
+        drop = m.Candidate.objects.create(
+            identity_hash="candidate-merge-drop",
+            name="其他候选人",
+            phone="13830000003",
+        )
+        drop_resume = m.Resume.objects.create(
+            candidate=drop,
+            apply_id="DROP001",
+            position_name="产品经理",
+            volunteer_rank=1,
+        )
+        m.CandidateWorkflow.objects.create(
+            candidate=drop,
+            status=m.CandidateWorkflow.STATUS_ARCHIVED,
+            current_resume=drop_resume,
+            current_rank=1,
+            archive_reason=m.CandidateWorkflow.ARCHIVE_JOB_NOT_MATCHED,
+            archive_detail="未匹配岗位",
+        )
+
+        response = self.client.get(
+            "/api/candidates/",
+            {
+                "current_apply_id": "BLOCK",
+                "job_department_name": "研发",
+                "workflow_status": m.CandidateWorkflow.STATUS_IN_PROGRESS,
+                "reason_type": "block",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["count"], 1)
+        row = response.data["results"][0]
+        self.assertEqual(row["id"], keep.id)
+        self.assertEqual(row["reason_type"], "block")
+        self.assertIn("研发中心", row["reason_text"])
+
+    def test_candidate_list_uses_current_resume_department_when_history_attempt_exists(self):
+        old_department = m.Department.objects.create(name="旧部门", level=2)
+        new_department = m.Department.objects.create(name="新部门", level=2)
+        old_contact = m.Contact.objects.create(
+            name="旧接口人",
+            employee_no="L2300",
+            department=old_department,
+            contact_level=m.Contact.LEVEL_SECONDARY,
+            is_active=True,
+        )
+        candidate = m.Candidate.objects.create(
+            identity_hash="candidate-current-department",
+            name="当前志愿候选人",
+            phone="13830000004",
+        )
+        old_resume = m.Resume.objects.create(
+            candidate=candidate,
+            apply_id="OLD001",
+            position_name="测试工程师",
+            volunteer_rank=1,
+        )
+        current_resume = m.Resume.objects.create(
+            candidate=candidate,
+            apply_id="CUR001",
+            position_name="后端工程师",
+            volunteer_rank=2,
+        )
+        current_job = m.Job.objects.create(
+            department=new_department,
+            public_name="后端工程师",
+            position_name="后端工程师",
+            category="技术类",
+            headcount=1,
+        )
+        current_resume.job = current_job
+        current_resume.save(update_fields=["job"])
+        workflow = m.CandidateWorkflow.objects.create(
+            candidate=candidate,
+            status=m.CandidateWorkflow.STATUS_IN_PROGRESS,
+            current_resume=current_resume,
+            current_rank=2,
+            block_reason=m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND,
+            block_detail="当前志愿缺少新部门接口人",
+        )
+        m.AssignmentAttempt.objects.create(
+            workflow=workflow,
+            resume=old_resume,
+            attempt_no=1,
+            source=m.AssignmentAttempt.SOURCE_RULE,
+            status=m.AssignmentAttempt.STATUS_REJECTED,
+            department=old_department,
+            contact=old_contact,
+            match_reason="历史分配至旧部门",
+        )
+
+        response = self.client.get("/api/candidates/", {"current_apply_id": "CUR001"})
+
+        self.assertEqual(response.status_code, 200)
+        row = response.data["results"][0]
+        self.assertEqual(row["current_apply_id"], "CUR001")
+        self.assertEqual(row["job_department_name"], "新部门")
+        self.assertEqual(row["reason_type"], "block")
+        self.assertIn("新部门", row["reason_text"])
+
+    def test_candidate_list_filters_follow_current_summary_not_history_attempts(self):
+        old_department = m.Department.objects.create(name="旧部门", level=2)
+        new_department = m.Department.objects.create(name="新部门", level=2)
+        old_contact = m.Contact.objects.create(
+            name="旧接口人",
+            employee_no="L2301",
+            department=old_department,
+            contact_level=m.Contact.LEVEL_SECONDARY,
+            is_active=True,
+        )
+        candidate = m.Candidate.objects.create(
+            identity_hash="candidate-current-filter-summary",
+            name="当前筛选候选人",
+            phone="13830000005",
+        )
+        old_resume = m.Resume.objects.create(
+            candidate=candidate,
+            apply_id="OLD002",
+            position_name="测试工程师",
+            volunteer_rank=1,
+            category_reason="历史分类原因",
+        )
+        current_resume = m.Resume.objects.create(
+            candidate=candidate,
+            apply_id="CUR002",
+            position_name="后端工程师",
+            volunteer_rank=2,
+        )
+        current_job = m.Job.objects.create(
+            department=new_department,
+            public_name="后端工程师",
+            position_name="后端工程师",
+            category="技术类",
+            headcount=1,
+        )
+        current_resume.job = current_job
+        current_resume.save(update_fields=["job"])
+        workflow = m.CandidateWorkflow.objects.create(
+            candidate=candidate,
+            status=m.CandidateWorkflow.STATUS_IN_PROGRESS,
+            current_resume=current_resume,
+            current_rank=2,
+            block_reason=m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND,
+            block_detail="当前志愿缺少新部门接口人",
+        )
+        m.AssignmentAttempt.objects.create(
+            workflow=workflow,
+            resume=old_resume,
+            attempt_no=1,
+            source=m.AssignmentAttempt.SOURCE_RULE,
+            status=m.AssignmentAttempt.STATUS_REJECTED,
+            department=old_department,
+            contact=old_contact,
+            match_reason="历史分配至旧部门",
+        )
+
+        old_department_response = self.client.get(
+            "/api/candidates/", {"job_department_name": "旧部门"}
+        )
+        assignment_response = self.client.get(
+            "/api/candidates/", {"reason_type": "assignment"}
+        )
+        classification_response = self.client.get(
+            "/api/candidates/", {"reason_type": "classification"}
+        )
+        current_response = self.client.get(
+            "/api/candidates/",
+            {"job_department_name": "新部门", "reason_type": "block"},
+        )
+
+        self.assertEqual(old_department_response.status_code, 200)
+        self.assertEqual(old_department_response.data["count"], 0)
+        self.assertEqual(assignment_response.data["count"], 0)
+        self.assertEqual(classification_response.data["count"], 0)
+        self.assertEqual(current_response.data["count"], 1)
+        self.assertEqual(current_response.data["results"][0]["id"], candidate.id)
+
+    def test_candidate_list_current_filters_fallback_to_first_resume_when_workflow_has_no_current_resume(self):
+        candidate = m.Candidate.objects.create(
+            identity_hash="candidate-current-filter-fallback",
+            name="当前字段回退候选人",
+            phone="13830000006",
+        )
+        m.CandidateWorkflow.objects.create(
+            candidate=candidate,
+            status=m.CandidateWorkflow.STATUS_PENDING,
+        )
+        m.Resume.objects.create(
+            candidate=candidate,
+            apply_id="FALL001",
+            entity="GW",
+            position_name="后端工程师",
+            volunteer_rank=1,
+            job_category="技术类",
+        )
+        m.Resume.objects.create(
+            candidate=candidate,
+            apply_id="FALL002",
+            entity="YLS",
+            position_name="产品经理",
+            volunteer_rank=2,
+            job_category="产品类",
+        )
+
+        response = self.client.get(
+            "/api/candidates/",
+            {
+                "current_apply_id": "FALL001",
+                "current_entity": "GW",
+                "current_position_name": "后端",
+                "current_job_category": "技术",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["count"], 1)
+        row = response.data["results"][0]
+        self.assertEqual(row["id"], candidate.id)
+        self.assertEqual(row["current_apply_id"], "FALL001")
+        self.assertEqual(row["current_resume"]["position_name"], "后端工程师")
+
     def test_candidate_list_filters_by_system_resume_status(self):
         tag = m.SchoolTag.objects.create(code="TARGET", name="目标院校")
         raw = m.Candidate.objects.create(
@@ -1431,6 +1733,33 @@ class ImportApiTests(TestCase):
         old_user.refresh_from_db()
         self.assertFalse(old_user.is_active)
         self.assertEqual(old_user.contact_id, old_contact.id)
+
+    @patch("apps.api.views.import_files")
+    @patch("apps.api.views.snapshot.take_snapshot")
+    def test_large_resume_package_reaches_import_service(
+        self, mock_take_snapshot, mock_import_files
+    ):
+        mock_import_files.return_value = {
+            "candidates_created": 0,
+            "candidates_updated": 0,
+            "resumes_created": 0,
+            "resumes_updated": 0,
+        }
+        large_package = SimpleUploadedFile(
+            "简历包.zip",
+            b"x" * (4 * 1024 * 1024),
+            content_type="application/zip",
+        )
+
+        response = self.client.post(
+            "/api/import/",
+            {"mode": "incremental", "resume_package": large_package},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        mock_take_snapshot.assert_called_once_with(label="上传简历前")
+        mock_import_files.assert_called_once()
 
 
 class ContactDeleteApiTests(TestCase):

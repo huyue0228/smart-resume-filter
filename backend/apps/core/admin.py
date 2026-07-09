@@ -9,6 +9,8 @@ for model in (
     models.School,
     models.Job,
     models.JobMajor,
+    models.MajorCategory,
+    models.MajorAlias,
     models.Candidate,
     models.Resume,
     models.ResumeProfile,

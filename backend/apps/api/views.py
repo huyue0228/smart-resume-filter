@@ -8,6 +8,8 @@ from django.conf import settings
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import Group
 from django.db import transaction
+from django.db.models import Count
+from django.db.models.deletion import ProtectedError
 from django.http import HttpResponse
 from django.db.models import Q
 from rest_framework.authtoken.models import Token
@@ -355,13 +357,19 @@ class CandidateViewSet(PermissionedModelViewSet):
         qs = (
             m.Candidate.objects.prefetch_related(
                 "resumes",
+                "resumes__job__department__parent",
                 "workflow__attempts__resume",
                 "workflow__attempts__contact",
                 "workflow__attempts__sub_contact",
                 "workflow__attempts__department",
                 "workflow__attempts__sub_department",
             )
-            .select_related("workflow__current_resume")
+            .select_related(
+                "workflow__current_resume",
+                "workflow__current_resume__job",
+                "workflow__current_resume__job__department",
+                "workflow__current_resume__job__department__parent",
+            )
             .order_by("-updated_at")
         )
         return system_status.apply_candidate_filters(qs, self.request.query_params)
@@ -470,6 +478,61 @@ class SchoolTagViewSet(PermissionedModelViewSet):
             qs = qs.filter(code__icontains=p["code"])
         if p.get("name"):
             qs = qs.filter(name__icontains=p["name"])
+        is_active = bool_query_value(p.get("is_active"))
+        if is_active is not None:
+            qs = qs.filter(is_active=is_active)
+        return qs
+
+
+class MajorCategoryViewSet(PermissionedModelViewSet):
+    serializer_class = serializers.MajorCategorySerializer
+    permission_code = "settings.manage_config"
+
+    def get_queryset(self):
+        qs = m.MajorCategory.objects.annotate(alias_count=Count("aliases")).order_by(
+            "sort_order", "code", "id"
+        )
+        p = self.request.query_params
+        if p.get("code"):
+            qs = qs.filter(code__icontains=p["code"])
+        if p.get("name"):
+            qs = qs.filter(name__icontains=p["name"])
+        is_active = bool_query_value(p.get("is_active"))
+        if is_active is not None:
+            qs = qs.filter(is_active=is_active)
+        return qs
+
+    def destroy(self, request, *args, **kwargs):
+        category = self.get_object()
+        try:
+            self.perform_destroy(category)
+        except ProtectedError:
+            return Response(
+                {"detail": "该专业大类仍有关联别名，需先删除或迁移别名后再删除。"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class MajorAliasViewSet(PermissionedModelViewSet):
+    serializer_class = serializers.MajorAliasSerializer
+    permission_code = "settings.manage_config"
+
+    def get_queryset(self):
+        qs = m.MajorAlias.objects.select_related("category").order_by(
+            "category__sort_order", "category__code", "name", "id"
+        )
+        p = self.request.query_params
+        if p.get("category"):
+            qs = qs.filter(category_id=p["category"])
+        if p.get("name"):
+            qs = qs.filter(name__icontains=p["name"])
+        if p.get("normalized_name"):
+            qs = qs.filter(normalized_name__icontains=p["normalized_name"])
+        if p.get("source"):
+            qs = qs.filter(source=p["source"])
+        if p.get("match_type"):
+            qs = qs.filter(match_type=p["match_type"])
         is_active = bool_query_value(p.get("is_active"))
         if is_active is not None:
             qs = qs.filter(is_active=is_active)

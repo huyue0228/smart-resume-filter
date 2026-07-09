@@ -1,6 +1,6 @@
 import { useRef, useEffect, useState } from 'react'
 import { PageContainer, ProTable } from '@ant-design/pro-components'
-import { Button, Tag, Space, Modal, message, Drawer, Descriptions, Table, Typography } from 'antd'
+import { Button, Tag, Space, Modal, message, Drawer, Descriptions, Table, Typography, Tooltip } from 'antd'
 import { DownloadOutlined, PlayCircleOutlined, UndoOutlined } from '@ant-design/icons'
 import {
   deleteCandidate,
@@ -35,15 +35,46 @@ const PROCESS_STEPS = [
 ]
 
 const SYSTEM_STATUS_OPTIONS = {
-  raw: { text: '待处理', color: 'default', status: 'Default' },
-  classified: { text: '已分类', color: 'blue', status: 'Processing' },
-  allocated: { text: '已分配', color: 'gold', status: 'Warning' },
-  pending_screening: { text: '待筛选', color: 'processing', status: 'Processing' },
-  screening_passed: { text: '筛选通过', color: 'success', status: 'Success' },
-  screening_rejected: { text: '筛选不通过', color: 'error', status: 'Error' },
+  raw: {
+    text: '待处理',
+    color: 'default',
+    status: 'Default',
+    description: '当前候选人/当前投递尚未完成岗位类别和院校标签分类',
+  },
+  classified: {
+    text: '已分类',
+    color: 'blue',
+    status: 'Processing',
+    description: '已完成岗位类别和院校标签分类，但没有有效业务部门推荐或下发尝试',
+  },
+  allocated: {
+    text: '已分配',
+    color: 'gold',
+    status: 'Warning',
+    description: '存在待复核/待下发等 HR 待处理尝试，业务部门尚不可见',
+  },
+  pending_screening: {
+    text: '待筛选',
+    color: 'processing',
+    status: 'Processing',
+    description: '存在已下发二级/已转派三级尝试，已给业务部门但尚未反馈',
+  },
+  screening_passed: {
+    text: '筛选通过',
+    color: 'success',
+    status: 'Success',
+    description: '当前流程或最近有效尝试已由业务部门反馈通过',
+  },
+  screening_rejected: {
+    text: '筛选不通过',
+    color: 'error',
+    status: 'Error',
+    description: '最近有效尝试已反馈未通过，或全部志愿未通过导致归档',
+  },
 }
 
 const ATTEMPT_STATUS = {
+  pending_review: { color: 'warning', text: '待复核' },
   pending_dispatch: { color: 'default', text: '待下发' },
   dispatched_l2: { color: 'processing', text: '已下发二级' },
   assigned_l3: { color: 'processing', text: '已转派三级' },
@@ -56,6 +87,21 @@ const SOURCE_TEXT = {
   rule: '规则',
   ai: 'AI',
   manual: '手动',
+}
+
+const WORKFLOW_STATUS = {
+  pending: { text: '待分配', color: 'default' },
+  in_progress: { text: '进行中', color: 'processing' },
+  passed: { text: '已通过', color: 'success' },
+  archived: { text: '已归档', color: 'default' },
+}
+
+const REASON_TYPE = {
+  assignment: { text: '分配理由', color: 'blue' },
+  archive: { text: '归档理由', color: 'default' },
+  block: { text: '阻塞原因', color: 'orange' },
+  classification: { text: '分类理由', color: 'purple' },
+  none: { text: '无', color: 'default' },
 }
 
 export default function ResumesPage() {
@@ -212,7 +258,6 @@ export default function ResumesPage() {
       width: 100,
       ...textColumnFilter('筛选姓名/拼音'),
     },
-    { title: '手机', dataIndex: 'phone', width: 130, ...textColumnFilter('筛选手机') },
     {
       title: '最高学历专业',
       dataIndex: 'highest_major',
@@ -229,6 +274,13 @@ export default function ResumesPage() {
       render: (_, record) => record.current_rank || '-',
     },
     {
+      title: '当前应聘ID',
+      dataIndex: 'current_apply_id',
+      width: 130,
+      ...textColumnFilter('筛选应聘ID'),
+      render: (value) => value || '-',
+    },
+    {
       title: '当前主体',
       dataIndex: 'current_entity',
       width: 120,
@@ -242,6 +294,14 @@ export default function ResumesPage() {
       ellipsis: true,
       ...textColumnFilter('筛选投递岗位'),
       render: (_, record) => record.current_resume?.position_name || '-',
+    },
+    {
+      title: '岗位部门',
+      dataIndex: 'job_department_name',
+      width: 130,
+      ellipsis: true,
+      ...textColumnFilter('筛选岗位部门'),
+      render: (value) => value || '-',
     },
     {
       title: '岗位类别',
@@ -279,7 +339,66 @@ export default function ResumesPage() {
       render: (_, record) => {
         const status = record.system_status
         const item = SYSTEM_STATUS_OPTIONS[status]
+        return item ? (
+          <Tooltip title={item.description}>
+            <Tag color={item.color}>{item.text}</Tag>
+          </Tooltip>
+        ) : '-'
+      },
+    },
+    {
+      title: '流程状态',
+      dataIndex: 'workflow_status',
+      width: 110,
+      valueType: 'select',
+      valueEnum: Object.fromEntries(
+        Object.entries(WORKFLOW_STATUS).map(([value, item]) => [
+          value,
+          { text: item.text },
+        ]),
+      ),
+      ...selectColumnFilter(
+        Object.entries(WORKFLOW_STATUS).map(([value, item]) => ({
+          text: item.text,
+          value,
+        })),
+      ),
+      render: (value) => {
+        const item = WORKFLOW_STATUS[value]
         return item ? <Tag color={item.color}>{item.text}</Tag> : '-'
+      },
+    },
+    {
+      title: '原因',
+      dataIndex: 'reason_type',
+      width: 240,
+      ellipsis: true,
+      valueType: 'select',
+      valueEnum: Object.fromEntries(
+        Object.entries(REASON_TYPE).map(([value, item]) => [
+          value,
+          { text: item.text },
+        ]),
+      ),
+      ...selectColumnFilter(
+        Object.entries(REASON_TYPE)
+          .filter(([value]) => value !== 'none')
+          .map(([value, item]) => ({
+            text: item.text,
+            value,
+          })),
+      ),
+      render: (_, record) => {
+        const type = record.reason_type || 'none'
+        const item = REASON_TYPE[type] || REASON_TYPE.none
+        return (
+          <Space size={4}>
+            <Tag color={item.color}>{item.text}</Tag>
+            <Typography.Text ellipsis style={{ maxWidth: 150 }}>
+              {record.reason_text || '-'}
+            </Typography.Text>
+          </Space>
+        )
       },
     },
     {
@@ -356,27 +475,33 @@ export default function ResumesPage() {
           } = params
           const tableFilters = normalizeTableFilters(filters, [
             'name',
-            'phone',
             'highest_major',
             'current_rank',
+            'current_apply_id',
             'current_entity',
             'current_position_name',
+            'job_department_name',
             'current_job_category',
             'school_tag',
             'system_status',
+            'workflow_status',
+            'reason_type',
           ])
           const query = {
             system_status: Array.isArray(tableFilters.system_status)
               ? tableFilters.system_status.join(',')
               : tableFilters.system_status,
             name: tableFilters.name,
-            phone: tableFilters.phone,
             highest_major: tableFilters.highest_major,
             current_rank: tableFilters.current_rank,
+            current_apply_id: tableFilters.current_apply_id,
             current_entity: tableFilters.current_entity,
             current_position_name: tableFilters.current_position_name,
+            job_department_name: tableFilters.job_department_name,
             current_job_category: tableFilters.current_job_category,
             school_tag: tableFilters.school_tag,
+            workflow_status: tableFilters.workflow_status,
+            reason_type: tableFilters.reason_type,
           }
           setLastQuery(query)
           try {
@@ -424,14 +549,26 @@ export default function ResumesPage() {
               <Descriptions.Item label="当前志愿">
                 {detailRecord.current_rank || '-'}
               </Descriptions.Item>
+              <Descriptions.Item label="当前应聘ID">
+                {detailRecord.current_apply_id || '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="岗位部门">
+                {detailRecord.job_department_name || '-'}
+              </Descriptions.Item>
               <Descriptions.Item label="系统简历状态">
                 {detailRecord.system_status_label || '-'}
               </Descriptions.Item>
-              {detailRecord.archive_reason && (
-                <Descriptions.Item label="归档原因" span={2}>
-                  {detailRecord.archive_detail || detailRecord.archive_reason}
-                </Descriptions.Item>
-              )}
+              <Descriptions.Item label="流程状态">
+                {WORKFLOW_STATUS[detailRecord.workflow_status]?.text || detailRecord.workflow_status || '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="原因" span={2}>
+                <Space>
+                  <Tag color={REASON_TYPE[detailRecord.reason_type || 'none']?.color || 'default'}>
+                    {REASON_TYPE[detailRecord.reason_type || 'none']?.text || '无'}
+                  </Tag>
+                  <span>{detailRecord.reason_text || '-'}</span>
+                </Space>
+              </Descriptions.Item>
             </Descriptions>
 
             <Table
@@ -485,6 +622,13 @@ export default function ResumesPage() {
                 { title: '投递岗位', dataIndex: 'position_name', ellipsis: true },
                 { title: '二级接口人', dataIndex: 'contact_name', width: 110 },
                 { title: '三级接口人', dataIndex: 'sub_contact_name', width: 110 },
+                {
+                  title: '原因',
+                  width: 220,
+                  ellipsis: true,
+                  render: (_, attempt) =>
+                    attempt.manual_reason || attempt.match_reason || attempt.feedback_note || '-',
+                },
                 {
                   title: '状态',
                   dataIndex: 'status',

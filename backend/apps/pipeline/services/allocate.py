@@ -23,12 +23,47 @@ def _archive(workflow, reason, detail):
     workflow.status = m.CandidateWorkflow.STATUS_ARCHIVED
     workflow.archive_reason = reason
     workflow.archive_detail = detail
+    workflow.block_reason = ""
+    workflow.block_detail = ""
     workflow.completed_at = timezone.now()
     workflow.save(
         update_fields=[
             "status",
             "archive_reason",
             "archive_detail",
+            "block_reason",
+            "block_detail",
+            "completed_at",
+            "updated_at",
+        ]
+    )
+
+
+def _clear_block(workflow):
+    """清除当前志愿阻塞标记。
+
+    阻塞原因只表示“当前志愿暂时无法继续自动分配”，一旦流程生成有效尝试、
+    被人工处理、重新跑批、归档或通过，都必须清空，避免简历库展示过期原因。
+    """
+    workflow.block_reason = ""
+    workflow.block_detail = ""
+
+
+def _block_current_volunteer(workflow, reason, detail):
+    """把流程停留在当前志愿，等待 HR 补齐前置数据后重新处理。"""
+    workflow.status = m.CandidateWorkflow.STATUS_IN_PROGRESS
+    workflow.archive_reason = ""
+    workflow.archive_detail = ""
+    workflow.block_reason = reason
+    workflow.block_detail = detail
+    workflow.completed_at = None
+    workflow.save(
+        update_fields=[
+            "status",
+            "archive_reason",
+            "archive_detail",
+            "block_reason",
+            "block_detail",
             "completed_at",
             "updated_at",
         ]
@@ -74,6 +109,7 @@ def _reopen_workflow(workflow, mode):
     workflow.passed_attempt = None
     workflow.archive_reason = ""
     workflow.archive_detail = ""
+    _clear_block(workflow)
     workflow.completed_at = None
     workflow.dispatch_strategy = mode
     workflow.save(
@@ -82,6 +118,8 @@ def _reopen_workflow(workflow, mode):
             "passed_attempt",
             "archive_reason",
             "archive_detail",
+            "block_reason",
+            "block_detail",
             "completed_at",
             "dispatch_strategy",
             "updated_at",
@@ -191,6 +229,7 @@ def _touch_workflow(workflow, resume, mode):
     workflow.dispatch_strategy = mode
     workflow.archive_reason = ""
     workflow.archive_detail = ""
+    _clear_block(workflow)
     workflow.started_at = workflow.started_at or timezone.now()
     workflow.completed_at = None
     workflow.save(
@@ -201,6 +240,8 @@ def _touch_workflow(workflow, resume, mode):
             "dispatch_strategy",
             "archive_reason",
             "archive_detail",
+            "block_reason",
+            "block_detail",
             "started_at",
             "completed_at",
             "updated_at",
@@ -582,8 +623,15 @@ def _create_next_auto_attempt(workflow, rules, mode="rule", processing_run=None)
             continue
         contact = _first_secondary_contact(department)
         if not contact:
+            # 岗位与二级部门已经明确命中时，缺二级接口人属于数据维护阻塞，
+            # 不能跳过当前志愿尝试下一志愿，否则会破坏候选人的志愿优先级。
+            _block_current_volunteer(
+                workflow,
+                m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND,
+                f"当前第{resume.volunteer_rank}志愿已匹配二级部门{department.name}，但没有启用的二级接口人",
+            )
             saw_contact_gap = True
-            continue
+            return None
 
         # AI 分支保留既有接口和状态机，避免 Rule 加固时改变 AI 的失败边界。
         if mode == "ai":
@@ -670,11 +718,14 @@ def run(scope=None, mode="rule", processing_run=None):
         workflow.current_rank = None
         workflow.current_resume = None
         workflow.dispatch_strategy = mode
+        _clear_block(workflow)
         workflow.save(
             update_fields=[
                 "current_rank",
                 "current_resume",
                 "dispatch_strategy",
+                "block_reason",
+                "block_detail",
                 "updated_at",
             ]
         )
@@ -836,9 +887,17 @@ def submit_feedback(attempt, result, note=""):
         )
         workflow.status = m.CandidateWorkflow.STATUS_PASSED
         workflow.passed_attempt = attempt
+        _clear_block(workflow)
         workflow.completed_at = now
         workflow.save(
-            update_fields=["status", "passed_attempt", "completed_at", "updated_at"]
+            update_fields=[
+                "status",
+                "passed_attempt",
+                "block_reason",
+                "block_detail",
+                "completed_at",
+                "updated_at",
+            ]
         )
         _cancel_unfeedbacked_attempts(
             workflow, m.AssignmentAttempt.CANCEL_WORKFLOW_PASSED

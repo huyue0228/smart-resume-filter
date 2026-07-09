@@ -76,6 +76,146 @@ class AllocationDesignContractTests(TestCase):
         self.assertEqual(attempt.resume, next_resume)
         self.assertEqual(attempt.resume.job, next_job)
 
+    def test_rule_allocation_blocks_current_volunteer_when_secondary_contact_missing(self):
+        self.contact.is_active = False
+        self.contact.save(update_fields=["is_active"])
+        fallback_department = m.Department.objects.create(name="产品部", level=2)
+        m.Contact.objects.create(
+            name="产品接口人",
+            employee_no="L2002",
+            department=fallback_department,
+            contact_level=m.Contact.LEVEL_SECONDARY,
+            is_active=True,
+        )
+        fallback_resume = m.Resume.objects.create(
+            candidate=self.candidate,
+            apply_id="A1002",
+            position_name="产品经理",
+            volunteer_rank=2,
+            resume_file="张三（A1002）.pdf",
+        )
+        m.Job.objects.create(
+            department=fallback_department,
+            public_name="产品经理",
+            position_name="产品经理",
+            category="产品类",
+            headcount=1,
+        )
+
+        allocate.run(mode="rule")
+
+        self.assertFalse(m.AssignmentAttempt.objects.exists())
+        self.candidate.workflow.refresh_from_db()
+        self.resume.refresh_from_db()
+        fallback_resume.refresh_from_db()
+        self.assertEqual(
+            self.candidate.workflow.status,
+            m.CandidateWorkflow.STATUS_IN_PROGRESS,
+        )
+        self.assertEqual(self.candidate.workflow.current_resume, self.resume)
+        self.assertEqual(self.candidate.workflow.current_rank, 1)
+        self.assertEqual(
+            self.candidate.workflow.block_reason,
+            m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND,
+        )
+        self.assertIn("技术部", self.candidate.workflow.block_detail)
+        self.assertEqual(self.resume.job, self.job)
+        self.assertIsNone(fallback_resume.job)
+
+    def test_rule_allocation_clears_contact_block_when_valid_attempt_is_created(self):
+        workflow = m.CandidateWorkflow.objects.create(
+            candidate=self.candidate,
+            status=m.CandidateWorkflow.STATUS_IN_PROGRESS,
+            current_resume=self.resume,
+            current_rank=1,
+            block_reason=m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND,
+            block_detail="旧阻塞原因",
+        )
+
+        allocate._create_attempt(
+            workflow=workflow,
+            resume=self.resume,
+            contact=self.contact,
+            source=m.AssignmentAttempt.SOURCE_RULE,
+            mode="rule",
+            match_reason="测试分配",
+        )
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.block_reason, "")
+        self.assertEqual(workflow.block_detail, "")
+
+    def test_rule_allocation_matches_major_category_dictionary_before_name_fallback(self):
+        self.candidate.highest_major = "软件工程"
+        self.candidate.save(update_fields=["highest_major"])
+        m.JobMajor.objects.create(job=self.job, major="计算机类")
+        category = m.MajorCategory.objects.create(
+            code="CS_SOFTWARE",
+            name="计算机与软件类",
+            is_active=True,
+        )
+        m.MajorAlias.objects.create(
+            category=category,
+            name="软件工程",
+            normalized_name="软件工程",
+            match_type=m.MajorAlias.MATCH_EXACT,
+            source=m.MajorAlias.SOURCE_BUILTIN,
+            is_active=True,
+        )
+        m.MajorAlias.objects.create(
+            category=category,
+            name="计算机类",
+            normalized_name="计算机类",
+            match_type=m.MajorAlias.MATCH_EXACT,
+            source=m.MajorAlias.SOURCE_BUILTIN,
+            is_active=True,
+        )
+
+        allocate.run(mode="rule")
+
+        attempt = m.AssignmentAttempt.objects.get()
+        self.assertEqual(attempt.resume, self.resume)
+        self.assertEqual(attempt.resume.job, self.job)
+        self.assertIn("专业大类匹配", attempt.match_reason)
+        self.assertIn("计算机与软件类", attempt.match_reason)
+
+    def test_rule_allocation_allows_wildcard_required_major(self):
+        m.JobMajor.objects.create(job=self.job, major="不限专业")
+
+        allocate.run(mode="rule")
+
+        attempt = m.AssignmentAttempt.objects.get()
+        self.assertEqual(attempt.resume, self.resume)
+        self.assertEqual(attempt.resume.job, self.job)
+        self.assertIn("需求专业为不限", attempt.match_reason)
+
+    def test_rule_allocation_does_not_treat_related_major_as_default_wildcard(self):
+        self.candidate.highest_major = "软件工程"
+        self.candidate.save(update_fields=["highest_major"])
+        m.JobMajor.objects.create(job=self.job, major="相关专业")
+        general = m.MajorCategory.objects.create(
+            code="OTHER_GENERAL",
+            name="其他通用类",
+            is_active=False,
+        )
+        m.MajorAlias.objects.create(
+            category=general,
+            name="相关专业",
+            normalized_name="相关专业",
+            match_type=m.MajorAlias.MATCH_CONTAINS,
+            source=m.MajorAlias.SOURCE_BUILTIN,
+            is_active=True,
+        )
+
+        allocate.run(mode="rule")
+
+        self.assertFalse(m.AssignmentAttempt.objects.exists())
+        self.candidate.workflow.refresh_from_db()
+        self.assertEqual(
+            self.candidate.workflow.archive_reason,
+            m.CandidateWorkflow.ARCHIVE_JOB_NOT_MATCHED,
+        )
+
     def test_rule_allocation_allows_job_without_required_majors(self):
         self.candidate.highest_major = "材料科学与工程"
         self.candidate.save(update_fields=["highest_major"])

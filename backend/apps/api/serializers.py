@@ -9,6 +9,7 @@ from apps.accounts.permissions import (
     user_permission_codes,
     user_role_names,
 )
+from apps.core import candidate_summary
 from apps.core import models as m
 from apps.core import system_status
 
@@ -232,6 +233,10 @@ class CandidateSerializer(serializers.ModelSerializer):
     workflow_status = serializers.SerializerMethodField()
     current_resume = serializers.SerializerMethodField()
     current_rank = serializers.SerializerMethodField()
+    current_apply_id = serializers.SerializerMethodField()
+    job_department_name = serializers.SerializerMethodField()
+    reason_type = serializers.SerializerMethodField()
+    reason_text = serializers.SerializerMethodField()
     archive_reason = serializers.SerializerMethodField()
     archive_detail = serializers.SerializerMethodField()
     resumes = serializers.SerializerMethodField()
@@ -260,6 +265,10 @@ class CandidateSerializer(serializers.ModelSerializer):
             "workflow_status",
             "current_resume",
             "current_rank",
+            "current_apply_id",
+            "job_department_name",
+            "reason_type",
+            "reason_text",
             "archive_reason",
             "archive_detail",
             "resumes",
@@ -269,26 +278,10 @@ class CandidateSerializer(serializers.ModelSerializer):
         ]
 
     def _workflow(self, obj):
-        try:
-            return obj.workflow
-        except (m.CandidateWorkflow.DoesNotExist, AttributeError):
-            return None
+        return candidate_summary.workflow_or_none(obj)
 
     def _current_resume(self, obj):
-        workflow = self._workflow(obj)
-        if workflow and workflow.current_resume:
-            return workflow.current_resume
-        resumes = list(obj.resumes.all())
-        if not resumes:
-            return None
-        return sorted(
-            resumes,
-            key=lambda resume: (
-                resume.volunteer_rank if resume.volunteer_rank is not None else 999,
-                resume.apply_date.toordinal() if resume.apply_date else 0,
-                resume.id,
-            ),
-        )[0]
+        return candidate_summary.current_resume(obj)
 
     def get_school_tag(self, obj):
         return (
@@ -318,11 +311,19 @@ class CandidateSerializer(serializers.ModelSerializer):
         return ResumeBriefSerializer(resume).data if resume else None
 
     def get_current_rank(self, obj):
-        workflow = self._workflow(obj)
-        if workflow and workflow.current_rank:
-            return workflow.current_rank
-        resume = self._current_resume(obj)
-        return resume.volunteer_rank if resume else None
+        return candidate_summary.current_rank(obj)
+
+    def get_current_apply_id(self, obj):
+        return candidate_summary.current_apply_id(obj)
+
+    def get_job_department_name(self, obj):
+        return candidate_summary.job_department_name(obj)
+
+    def get_reason_type(self, obj):
+        return candidate_summary.reason(obj)[0]
+
+    def get_reason_text(self, obj):
+        return candidate_summary.reason(obj)[1]
 
     def get_archive_reason(self, obj):
         workflow = self._workflow(obj)
@@ -371,6 +372,8 @@ class CandidateSerializer(serializers.ModelSerializer):
                 "feedback_result": attempt.feedback_result,
                 "feedback_note": attempt.feedback_note,
                 "feedback_at": attempt.feedback_at,
+                "match_reason": attempt.match_reason,
+                "manual_reason": attempt.manual_reason,
                 "created_at": attempt.created_at,
             }
             for attempt in attempts
@@ -498,6 +501,97 @@ class SchoolTagSerializer(serializers.ModelSerializer):
     class Meta:
         model = m.SchoolTag
         fields = ["id", "code", "name", "is_default", "is_active"]
+
+
+def normalize_major_name(value):
+    """专业词表统一规范化口径：忽略大小写和空白。"""
+    return "".join((value or "").lower().split())
+
+
+class MajorCategorySerializer(serializers.ModelSerializer):
+    alias_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = m.MajorCategory
+        fields = [
+            "id",
+            "code",
+            "name",
+            "description",
+            "is_active",
+            "sort_order",
+            "alias_count",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["created_at", "updated_at"]
+
+    def get_alias_count(self, obj):
+        if hasattr(obj, "alias_count"):
+            return obj.alias_count
+        return obj.aliases.count()
+
+
+class MajorAliasSerializer(serializers.ModelSerializer):
+    category_name = serializers.CharField(source="category.name", read_only=True)
+    normalized_name = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = m.MajorAlias
+        fields = [
+            "id",
+            "category",
+            "category_name",
+            "name",
+            "normalized_name",
+            "match_type",
+            "source",
+            "note",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["created_at", "updated_at"]
+
+    def validate_name(self, value):
+        if not value or not str(value).strip():
+            raise serializers.ValidationError("请输入专业名称或关键词")
+        return str(value).strip()
+
+    def validate(self, attrs):
+        category = attrs.get("category") or (
+            self.instance.category if self.instance else None
+        )
+        name = attrs.get("name") or (self.instance.name if self.instance else "")
+        match_type = attrs.get("match_type") or (
+            self.instance.match_type if self.instance else m.MajorAlias.MATCH_CONTAINS
+        )
+        normalized_name = normalize_major_name(name)
+        qs = m.MajorAlias.objects.filter(
+            category=category,
+            normalized_name=normalized_name,
+            match_type=match_type,
+        )
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if category and normalized_name and qs.exists():
+            raise serializers.ValidationError(
+                {"name": "同一专业大类下已存在相同专业名称和匹配方式的别名"}
+            )
+        return attrs
+
+    def create(self, validated_data):
+        validated_data["normalized_name"] = normalize_major_name(
+            validated_data.get("name")
+        )
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        if "name" in validated_data:
+            validated_data["normalized_name"] = normalize_major_name(
+                validated_data.get("name")
+            )
+        return super().update(instance, validated_data)
 
 
 class SchoolTagRuleSerializer(serializers.ModelSerializer):

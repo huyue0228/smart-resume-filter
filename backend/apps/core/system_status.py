@@ -2,6 +2,7 @@
 
 from django.db.models import Q
 
+from apps.core import candidate_summary
 from apps.core import models as m
 
 
@@ -141,46 +142,46 @@ def apply_candidate_filters(qs, params):
     if _value(params, "highest_major"):
         qs = qs.filter(highest_major__icontains=_value(params, "highest_major"))
     if _value(params, "current_rank"):
-        qs = qs.filter(
-            Q(workflow__current_rank=_value(params, "current_rank"))
-            | Q(
-                workflow__isnull=True,
-                resumes__volunteer_rank=_value(params, "current_rank"),
-            )
+        rank = _value(params, "current_rank")
+        qs = _filter_by_candidate_summary(
+            qs,
+            lambda candidate: str(candidate_summary.current_rank(candidate) or "")
+            == rank,
+        )
+    if _value(params, "current_apply_id"):
+        apply_id = _value(params, "current_apply_id")
+        qs = _filter_by_candidate_summary(
+            qs,
+            lambda candidate: apply_id.lower()
+            in candidate_summary.current_apply_id(candidate).lower(),
         )
     if _value(params, "current_entity"):
-        qs = qs.filter(
-            Q(workflow__current_resume__entity__icontains=_value(params, "current_entity"))
-            | Q(
-                workflow__isnull=True,
-                resumes__entity__icontains=_value(params, "current_entity"),
-            )
+        entity = _value(params, "current_entity")
+        qs = _filter_by_candidate_summary(
+            qs,
+            lambda candidate: entity.lower()
+            in _current_resume_text(candidate, "entity").lower(),
         )
     if _value(params, "current_position_name"):
-        qs = qs.filter(
-            Q(
-                workflow__current_resume__position_name__icontains=_value(
-                    params, "current_position_name"
-                )
-            )
-            | Q(
-                workflow__isnull=True,
-                resumes__position_name__icontains=_value(
-                    params, "current_position_name"
-                ),
-            )
+        position_name = _value(params, "current_position_name")
+        qs = _filter_by_candidate_summary(
+            qs,
+            lambda candidate: position_name.lower()
+            in _current_resume_text(candidate, "position_name").lower(),
         )
     if _value(params, "current_job_category"):
-        qs = qs.filter(
-            Q(
-                workflow__current_resume__job_category__icontains=_value(
-                    params, "current_job_category"
-                )
-            )
-            | Q(
-                workflow__isnull=True,
-                resumes__job_category__icontains=_value(params, "current_job_category"),
-            )
+        job_category = _value(params, "current_job_category")
+        qs = _filter_by_candidate_summary(
+            qs,
+            lambda candidate: job_category.lower()
+            in _current_resume_text(candidate, "job_category").lower(),
+        )
+    if _value(params, "job_department_name"):
+        department_name = _value(params, "job_department_name")
+        qs = _filter_by_candidate_summary(
+            qs,
+            lambda candidate: department_name.lower()
+            in candidate_summary.job_department_name(candidate).lower(),
         )
     if _value(params, "school_tag"):
         school_tag = _value(params, "school_tag")
@@ -192,7 +193,7 @@ def apply_candidate_filters(qs, params):
             | Q(highest_degree_platform__icontains=school_tag)
             | Q(first_degree_platform__icontains=school_tag)
         )
-    workflow_status = _value(params, "status")
+    workflow_status = _value(params, "workflow_status") or _value(params, "status")
     if workflow_status:
         if workflow_status == m.CandidateWorkflow.STATUS_PENDING:
             qs = qs.filter(
@@ -201,6 +202,13 @@ def apply_candidate_filters(qs, params):
             )
         else:
             qs = qs.filter(workflow__status=workflow_status)
+    reason_type = _value(params, "reason_type")
+    if reason_type:
+        expected_reason = "" if reason_type == "none" else reason_type
+        qs = _filter_by_candidate_summary(
+            qs,
+            lambda candidate: candidate_summary.reason(candidate)[0] == expected_reason,
+        )
     if _value(params, "imported_after"):
         qs = qs.filter(imported_at__date__gte=_value(params, "imported_after"))
     if _value(params, "imported_before"):
@@ -209,6 +217,35 @@ def apply_candidate_filters(qs, params):
         _list_value(params, "system_statuses") or _list_value(params, "system_status")
     )
     return filter_queryset_by_system_status(qs, system_statuses).distinct()
+
+
+def _filter_by_candidate_summary(qs, predicate):
+    candidates = (
+        qs.select_related(
+            "workflow",
+            "workflow__current_resume",
+            "workflow__current_resume__job",
+            "workflow__current_resume__job__department",
+            "workflow__current_resume__job__department__parent",
+        )
+        .prefetch_related(
+            "resumes",
+            "resumes__job__department__parent",
+            "workflow__attempts__resume",
+            "workflow__attempts__department",
+            "workflow__attempts__contact",
+            "workflow__attempts__sub_department",
+            "workflow__attempts__sub_contact",
+        )
+        .distinct()
+    )
+    ids = [candidate.id for candidate in candidates if predicate(candidate)]
+    return qs.filter(id__in=ids)
+
+
+def _current_resume_text(candidate, attr):
+    resume = candidate_summary.current_resume(candidate)
+    return str(getattr(resume, attr, "") or "") if resume else ""
 
 
 def _workflow(candidate):
