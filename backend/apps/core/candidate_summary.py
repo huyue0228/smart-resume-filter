@@ -39,6 +39,30 @@ def current_resume(candidate):
     )[0]
 
 
+def preview_resume(candidate):
+    """返回详情页默认预览用的投递。
+
+    当前有效志愿仍由 `current_resume` 表示；但当前志愿可能还没有关联简历文件。
+    预览场景优先使用当前志愿，有文件才直接返回；否则回退到同候选人第一条
+    有 `resume_file` 的投递，避免详情页明明存在其他简历文件却显示不可预览。
+    """
+    current = current_resume(candidate)
+    if current and current.resume_file:
+        return current
+    resumes = sorted(
+        list(candidate.resumes.all()),
+        key=lambda resume: (
+            resume.volunteer_rank if resume.volunteer_rank is not None else 999,
+            resume.apply_date.toordinal() if resume.apply_date else 0,
+            resume.id,
+        ),
+    )
+    for resume in resumes:
+        if resume.resume_file:
+            return resume
+    return None
+
+
 def latest_effective_attempt(workflow, resume_id=None):
     if not workflow:
         return None

@@ -232,6 +232,7 @@ class CandidateSerializer(serializers.ModelSerializer):
     workflow_id = serializers.SerializerMethodField()
     workflow_status = serializers.SerializerMethodField()
     current_resume = serializers.SerializerMethodField()
+    preview_resume = serializers.SerializerMethodField()
     current_rank = serializers.SerializerMethodField()
     current_apply_id = serializers.SerializerMethodField()
     job_department_name = serializers.SerializerMethodField()
@@ -264,6 +265,7 @@ class CandidateSerializer(serializers.ModelSerializer):
             "workflow_id",
             "workflow_status",
             "current_resume",
+            "preview_resume",
             "current_rank",
             "current_apply_id",
             "job_department_name",
@@ -308,6 +310,10 @@ class CandidateSerializer(serializers.ModelSerializer):
 
     def get_current_resume(self, obj):
         resume = self._current_resume(obj)
+        return ResumeBriefSerializer(resume).data if resume else None
+
+    def get_preview_resume(self, obj):
+        resume = candidate_summary.preview_resume(obj)
         return ResumeBriefSerializer(resume).data if resume else None
 
     def get_current_rank(self, obj):

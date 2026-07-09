@@ -33,6 +33,20 @@ function decodeFilename(value) {
   }
 }
 
+async function previewErrorMessage(error) {
+  const data = error?.response?.data
+  if (data instanceof Blob) {
+    try {
+      const text = await data.text()
+      const body = text ? JSON.parse(text) : {}
+      return body.detail || body.message || error?.message || '暂无可预览的简历文件'
+    } catch {
+      return error?.message || '暂无可预览的简历文件'
+    }
+  }
+  return data?.detail || data?.message || error?.message || '暂无可预览的简历文件'
+}
+
 export default function ResumePreview({ resume, attemptId, height = 520 }) {
   const canvasRef = useRef(null)
   const [state, setState] = useState({
@@ -117,7 +131,9 @@ export default function ResumePreview({ resume, attemptId, height = 520 }) {
           renderError: '',
         })
       })
-      .catch((error) => {
+      .catch(async (error) => {
+        if (!alive) return
+        const message = await previewErrorMessage(error)
         if (!alive) return
         setState({
           loading: false,
@@ -129,7 +145,7 @@ export default function ResumePreview({ resume, attemptId, height = 520 }) {
           pdfDoc: null,
           pageNumber: 1,
           pageCount: 0,
-          error: error?.response?.data?.detail || '暂无可预览的简历文件',
+          error: message,
           renderError: '',
         })
       })

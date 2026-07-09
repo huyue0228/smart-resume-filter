@@ -133,7 +133,9 @@ export default function ResumesPage() {
       setPreviewRecord(null)
       return
     }
-    setPreviewRecord(detailRecord.current_resume || detailRecord.resumes?.[0] || null)
+    setPreviewRecord(
+      detailRecord.preview_resume || detailRecord.current_resume || detailRecord.resumes?.[0] || null,
+    )
   }, [detailRecord])
 
   // 导入成功 → 自动按当前模式跑五步 → 刷新
@@ -589,9 +591,14 @@ export default function ResumesPage() {
                   title: '预览',
                   valueType: 'option',
                   width: 70,
-                  render: (_, resume) => (
-                    <a onClick={() => setPreviewRecord(resume)}>预览</a>
-                  ),
+                  render: (_, resume) =>
+                    resume.resume_file ? (
+                      <a onClick={() => setPreviewRecord(resume)}>预览</a>
+                    ) : (
+                      <Tooltip title="该投递暂无简历文件">
+                        <Typography.Text type="secondary">预览</Typography.Text>
+                      </Tooltip>
+                    ),
                 },
               ]}
             />

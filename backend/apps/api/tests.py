@@ -648,6 +648,40 @@ class ListFilteringPaginationApiTests(TestCase):
         self.assertEqual(row["reason_text"], "院校准入；分配至研发中心/二级接口人")
         self.assertEqual(row["attempts"][0]["match_reason"], "院校准入；分配至研发中心/二级接口人")
 
+    def test_candidate_list_exposes_preview_resume_with_file_fallback(self):
+        candidate = m.Candidate.objects.create(
+            identity_hash="candidate-preview-fallback",
+            name="预览候选人",
+            phone="13830000002",
+        )
+        current_resume = m.Resume.objects.create(
+            candidate=candidate,
+            apply_id="NOFILE",
+            position_name="当前无文件岗位",
+            volunteer_rank=1,
+        )
+        file_resume = m.Resume.objects.create(
+            candidate=candidate,
+            apply_id="HASFILE",
+            position_name="有文件岗位",
+            volunteer_rank=2,
+            resume_file="预览候选人（HASFILE）.pdf",
+        )
+        m.CandidateWorkflow.objects.create(
+            candidate=candidate,
+            status=m.CandidateWorkflow.STATUS_IN_PROGRESS,
+            current_resume=current_resume,
+            current_rank=1,
+        )
+
+        response = self.client.get("/api/candidates/", {"name": "预览候选人"})
+
+        self.assertEqual(response.status_code, 200)
+        row = response.data["results"][0]
+        self.assertEqual(row["current_resume"]["id"], current_resume.id)
+        self.assertEqual(row["preview_resume"]["id"], file_resume.id)
+        self.assertEqual(row["preview_resume"]["resume_file"], "预览候选人（HASFILE）.pdf")
+
     def test_candidate_list_filters_by_blocked_workflow_merge_fields(self):
         department = m.Department.objects.create(name="研发中心", level=2)
         keep = m.Candidate.objects.create(
