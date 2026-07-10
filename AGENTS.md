@@ -81,9 +81,9 @@ Use focused verification for the files changed:
 ## Pipeline Notes
 
 - Entry point: `backend/apps/pipeline/runner.py`, `run_step(step, mode, scope)`.
-- The `all` order is intentionally `step1`, `step3`, `step2`, `step4`; do not assume numeric order. `step5` is only a legacy allocation alias, and new frontend/backend work should prefer the Step2 allocation flow. Step3 must run before allocation so school tags are ready.
+- The `all` order is intentionally `step3`, `step4`, `step1`, `step2`; do not assume numeric order. Step3/Step4 prepare or verify prerequisite data before the candidate flow. A normal resume upload should run `step1`, then `step2`. `step5` is only a legacy allocation alias, and new frontend/backend work should prefer the Step2 allocation flow.
 - Step implementations live in `backend/apps/pipeline/services/`.
-- `strategies.py` exposes `RuleStrategy` and `AIStrategy`; existing code may still contain AI placeholder or rule-fallback behavior, but new development must follow the AI Agent screening design in the four docs.
+- `strategies.py` exposes `RuleStrategy` and `AIStrategy`; the current AI path is a demo placeholder and is not a production capability. Until the formal Agent design in the four docs is implemented, production must disable/fail-fast the AI mode rather than presenting Rule fallback or fixed scores as AI output.
 - AI Agent screening is a hard-rule-constrained recommendation flow: it only evaluates the candidate's current effective volunteer, never skips volunteer order or school admission rules, and never automatically falls back to Rule after AI failure.
 - AI failures, timeouts, parse failures, invalid output, missing references, and guardrail blocks should be recorded for HR handling. HR chooses retry AI, switch to Rule, manual assignment, or archive handling.
 - Frontend drives processing by calling `/api/pipeline/run/` step by step via `frontend/src/components/useProcessRunner.jsx`.
@@ -110,7 +110,7 @@ Use focused verification for the files changed:
 - Import UI is decentralized through `frontend/src/components/ImportButton.jsx`; there is no standalone import page.
 - Shared table header filters and resizable column wiring live in `frontend/src/components/DataTableControls.jsx` and `frontend/src/components/ResizableHeaderCell.jsx`; reuse them for dense data tables instead of rebuilding per page.
 - PDF preview UI lives in `frontend/src/components/ResumePreview.jsx` and supports direct resume previews and assignment-attempt scoped previews.
-- `SchoolsPage.jsx` currently exposes the legacy `region` 南/北 filter because the demo model still has `School.region`; formal design docs keep `School.province` as the target database口径, so future model work should migrate the implementation rather than expanding the formal design around `region`.
+- `SchoolsPage.jsx` no longer exposes the legacy `region` filter. The remaining drift is in backend `School.region` / `ProvinceRegion` models and APIs; migrate backend behavior to runtime province-based judgment rather than reintroducing region configuration in the frontend.
 
 ## Migration Gotchas
 

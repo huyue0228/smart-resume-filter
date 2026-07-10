@@ -1,10 +1,12 @@
 # 智能简历筛选系统
 
-校招智能简历筛选系统，覆盖「查重与志愿排序 -> 岗位分类 -> 院校分类 -> 需求录入 -> 简历分配」主流程。系统按正式项目方式建设：后端启用登录与 RBAC 权限校验，前端菜单和按钮由后端权限码驱动；W3 认证、WeLink 真实下发等外部接口在方案确认后接入。
+校招智能简历筛选系统。候选人主流程为「Step1 查重与志愿排序 → Step2 简历分类、分配与下发」；院校分类 Step3 和需求数据准备核对 Step4 是分配前置步骤，显式全流程按 `Step3 → Step4 → Step1 → Step2` 执行。系统按正式项目方式建设：后端启用登录与 RBAC 权限校验，前端菜单和按钮由后端权限码驱动；正式 AI Agent、W3 认证、WeLink 真实下发等能力尚待接入。
 
 设计文档以 [`docs/需求描述.md`](docs/需求描述.md)、[`docs/后端设计.md`](docs/后端设计.md)、[`docs/数据库设计.md`](docs/数据库设计.md)、[`docs/前端设计.md`](docs/前端设计.md) 为准。
 
-当前实现已包含：候选人聚合简历库、表头筛选、可拖拽列宽、候选人/分配尝试 PDF 预览、按当前筛选导出简历 zip、Token 登录、RBAC 权限控制、部门接口人导入自动创建账号。
+当前实现已包含：候选人聚合简历库、表头筛选、可拖拽列宽、候选人/分配尝试 PDF 预览、按当前筛选导出单个原文件或 zip、Token 登录、RBAC 权限控制、部门接口人导入自动创建账号。当前 AI 路径仅为 demo 占位，不属于生产可用能力。
+
+> 当前生产阻断项：现有 Compose/Nginx 仍需移除 `/media/` 静态暴露，流水线 API 仍需真正接入 Celery 异步提交，正式 AI Agent 也尚未实现。在这些问题修复并验收前，不应把当前版本作为公网或真实 AI 生产版本交付。
 
 关键实现落点：
 
@@ -48,7 +50,7 @@ python manage.py runserver 8000
 `seed_base` 会初始化：
 
 - RBAC 权限点与预置角色。
-- AI、WeLink、W3 预留开关等配置项。
+- AI、WeLink 等非敏感运行配置；当前可能仍出现的 `w3_auth_enabled` 只是无效占位，不能启用 W3 认证。
 - 多接口人功能测试账号和对应 Contact/Department。
 
 ### 前端
@@ -97,16 +99,16 @@ git --version
 ```bash
 git clone https://github.com/huyue0228/smart-resume-filter.git
 cd smart-resume-filter
-git checkout main
+git fetch --tags origin
+git checkout --detach <交付说明中的发布标签或 commit>
 ```
 
 如果服务器已经有旧代码：
 
 ```bash
 cd smart-resume-filter
-git fetch origin
-git checkout main
-git pull --ff-only origin main
+git fetch --tags origin
+git checkout --detach <交付说明中的发布标签或 commit>
 ```
 
 ### 3. 创建服务器 `.env`
@@ -125,7 +127,7 @@ cp .env.example .env
 - `APP_VERSION`：建议发布时改成明确版本号，如 `2026-07-03-1`，方便回滚和排查。
 - `DOCKER_PLATFORM`：内网服务器是常见 x86_64 Linux 时保持 `linux/amd64`；如果是 ARM 服务器，改成 `linux/arm64` 后重新构建镜像包。
 
-暂时不接真实大模型时，`OPENAI_API_KEY` 可以留空。后续接入真实模型时只需要改 `.env` 并重启 backend/worker。
+正式 AI Agent 尚未实现，`OPENAI_API_KEY` 当前应留空。环境变量只预留连接配置；仅修改 `.env` 并重启不会把 demo 占位升级成真实 AI，必须等待 Agent 调用、结构化输出、守卫、重试和批处理链路完成并通过验收。
 
 `RUN_SEED_BASE` 默认保持 `0`。不要在长期运行环境里把它改成 `1`，否则每次 backend 重启都可能把配置页中的参数重置为种子默认值。首次初始化请使用下一节的一次性 `init` 命令。
 
@@ -194,7 +196,7 @@ docker compose exec backend python manage.py load_sample
 
 - 简历库按候选人聚合展示，一名候选人一行；详情抽屉可查看全部投递、分配尝试、反馈和 PDF 预览。
 - 简历库、岗位、院校、接口人等主要表格支持表头筛选和列宽拖拽；筛选在后端执行，分页接口支持 `page_size`，单页最大 500。
-- 简历库可以按当前筛选条件导出候选人简历 zip；分配尝试页可以单条、勾选批量或按筛选导出。缺失文件会写入压缩包内的缺失清单，页面会提示导出成功数量和缺失数量。
+- 简历库可以按当前筛选条件导出候选人简历；分配尝试页可以单条、勾选批量或按筛选导出。仅命中一个可用文件且无缺失清单时返回原文件，多文件或存在缺失时返回 zip，并在页面提示导出成功数量和缺失数量。
 - 部门接口人导入会按工号自动创建或更新登录账号，新账号默认密码 `pass1234`；清空重导时，本次文件中不存在的旧接口人及绑定账号会同步停用。
 
 ### 8. 常用运维命令
@@ -304,9 +306,9 @@ docker compose cp backend:/app/media "backups/$MEDIA_BACKUP"
 tar -czf "backups/$MEDIA_BACKUP.tar.gz" -C backups "$MEDIA_BACKUP"
 ```
 
-### 10. AI 配置调整
+### 10. AI 配置预留（正式 Agent 未实现）
 
-AI 运行阈值、超时、并发、重试参数在系统配置页维护：
+以下 AI 运行阈值、超时、并发、重试参数已预留在系统配置页，但当前 demo 不等于正式 Agent；这些参数需要在正式链路完成后才具备生产含义：
 
 - `ai_dispatch_threshold`
 - `ai_review_threshold`
@@ -328,7 +330,7 @@ OPENAI_API_KEY=sk-...
 OPENAI_BASE_URL=
 ```
 
-修改 `.env` 后重启 backend 和 worker：
+正式 Agent 完成后，修改 `.env` 需要重启 backend 和 worker：
 
 ```bash
 docker compose up -d backend worker
@@ -402,8 +404,8 @@ docker compose up -d
 
 权限边界：
 
-- 管理员：维护配置项、用户、角色、权限。
-- HR：导入主数据、运行处理流程、手动分配、下发二级接口人、查看全部分配。
+- 管理员：维护用户、角色、权限、认证与安全配置，也可维护业务规则。
+- HR：导入主数据、运行处理流程、手动分配、下发二级接口人、查看全部分配，并维护获授权的院校准入、专业词表等业务规则。
 - 二级接口人：只能查看下发给自己的分配，只能转派给本二级部门下的三级接口人。
 - 三级接口人：只能查看转派给自己的分配，并提交通过/未通过反馈。
 
@@ -416,7 +418,6 @@ docker compose up -d
 - `ai_retry_count`
 - `ai_retry_backoff_seconds`
 - `welink_enabled`
-- `w3_auth_enabled`
 
 大模型连接配置不放在前端，也不进入普通配置表；后端统一由
 `backend/apps/pipeline/ai_config.py` 抽象。当前支持的环境变量：
@@ -443,12 +444,12 @@ export AI_DECISION_VERSION="dispatch-schema-v1"
 
 1. 使用 `admin` 或 `hr` 登录。
 2. 在简历库、岗位需求、院校清单、部门接口人页面导入对应 Excel/简历包；也可先执行 `gen_sample` 和 `load_sample`。
-3. 简历导入后自动触发主流程；也可在分配页切换规则/AI 模式后重新处理。
+3. 简历导入后自动触发 Step1→Step2；正式 AI Agent 未落地前只使用 Rule 模式。
 4. HR 在「简历分配」查看待下发、待复核、已下发等分配尝试。
 5. HR 单条、批量或一键全部下发给二级接口人。
 6. 二级接口人登录后仅看到自己的分配，可导出简历并转派本部门三级接口人。
 7. 三级接口人登录后仅看到转派给自己的分配，可导出简历并提交反馈。
-8. HR/管理员可在配置项和用户权限页维护系统参数与 RBAC 绑定。
+8. HR/管理员按权限维护业务配置；仅管理员在用户权限页维护 RBAC 和安全设置。
 
 ## API 速览
 
@@ -460,13 +461,14 @@ export AI_DECISION_VERSION="dispatch-schema-v1"
 | GET/POST/PATCH | `/api/users/` | 用户管理 |
 | GET/POST/PATCH | `/api/roles/` | 角色管理与角色权限绑定 |
 | GET | `/api/permissions/` | 后端预置权限树 |
-| GET/PATCH | `/api/configs/` | 系统配置项 |
+| GET | `/api/configs/`、`/api/configs/{key}/` | 查询白名单内的非敏感配置项 |
+| PATCH | `/api/configs/{key}/` | 更新白名单配置值 |
 | POST | `/api/import/` | 上传简历列表、岗位、院校、接口人和简历包 |
 | GET/POST | `/api/import/undo/` | 查看并撤销最近一次简历上传 |
 | GET | `/api/resumes/` | 投递清单 |
 | GET | `/api/resumes/{id}/preview/` | 预览单条投递 PDF |
 | GET | `/api/candidates/` | 候选人聚合列表 |
-| GET | `/api/candidates/export/` | 按候选人 ID 或当前筛选条件导出简历 zip |
+| GET | `/api/candidates/export/` | 按候选人 ID 或当前筛选条件导出单个原文件或 zip |
 | GET/POST/PATCH | `/api/jobs/` `/api/schools/` `/api/departments/` `/api/contacts/` | 主数据维护 |
 | POST | `/api/pipeline/run/` | 触发处理流程，支持 `rule` / `ai` |
 | GET | `/api/pipeline/runs/` | 处理运行记录 |
@@ -475,7 +477,7 @@ export AI_DECISION_VERSION="dispatch-schema-v1"
 | POST | `/api/workflow-attempts/bulk-dispatch/` | HR 批量或一键全部下发 |
 | POST | `/api/workflow-attempts/{id}/assign-sub-contact/` | 二级接口人转派三级接口人 |
 | POST | `/api/workflow-attempts/{id}/feedback/` | 三级接口人提交反馈 |
-| GET | `/api/workflow-attempts/export/` | 导出简历 zip |
+| GET | `/api/workflow-attempts/export/` | 导出单个原文件或 zip |
 | GET | `/api/workflow-attempts/{id}/resume-preview/` | 按分配尝试数据范围预览 PDF |
 | GET | `/api/agent-decisions/` | AI 决策查看 |
 | POST | `/api/agent-decisions/{id}/retry/` | AI 决策重试 |
@@ -503,7 +505,7 @@ npm run build
 
 ## 生产与外部系统预留
 
-- W3 认证：当前保留 `w3_auth_enabled` 配置和本地 Token 登录。待 W3 接口方案确认后，应新增认证适配层，按工号映射到 `User.username`，并继续复用既有 RBAC 角色和 `Contact` 绑定。
+- W3 认证：当前未实现，现有 `w3_auth_enabled` 只是无效的 legacy 占位，不属于通用业务配置。待 W3 接口方案确认后，应新增仅管理员可维护的认证适配层，按工号映射到 `User.username`，并继续复用既有 RBAC 角色和 `Contact` 绑定。
 - WeLink：当前下发流程已保留状态和消息 ID 字段，`welink_enabled` 控制是否启用真实外部下发。真实接口确认后在服务层替换发送实现。
 - 数据库：本地默认 SQLite；生产环境通过 `POSTGRES_DB`、`POSTGRES_USER`、`POSTGRES_PASSWORD`、`POSTGRES_HOST`、`POSTGRES_PORT` 切换 PostgreSQL。
 - Celery：本地默认 `CELERY_TASK_ALWAYS_EAGER=True`；生产环境应配置 Redis broker/backend 并启动 worker。
