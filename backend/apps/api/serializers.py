@@ -927,16 +927,43 @@ class AssignmentAttemptSerializer(serializers.ModelSerializer):
 
 
 class ProcessingRunSerializer(serializers.ModelSerializer):
+    stages = serializers.SerializerMethodField()
+    scope_summary = serializers.JSONField(read_only=True)
+
     class Meta:
         model = m.ProcessingRun
         fields = [
-            "id", "step", "mode", "status", "message", "scope",
+            "id", "step", "mode", "status", "message", "scope_summary",
+            "current_stage", "last_heartbeat_at",
+            "created_by", "created_by_username_snapshot",
             "celery_task_id", "celery_group_id", "params",
             "total_count", "processed_count", "success_count", "failed_count",
             "review_count", "dispatch_count", "archive_count",
             "chunk_size", "chunk_total", "chunk_done", "chunk_failed", "chunk_errors",
             "model_name", "prompt_version", "decision_version",
             "created_at", "started_at", "finished_at", "undone_at", "undone_by", "error",
+            "stages",
+        ]
+
+    def get_stages(self, obj):
+        return [
+            {
+                "step": stage.step,
+                "label": stage.label,
+                "status": stage.status,
+                "total_count": stage.total_count,
+                "processed_count": stage.processed_count,
+                "success_count": stage.success_count,
+                "failed_count": stage.failed_count,
+                "review_count": stage.review_count,
+                "dispatch_count": stage.dispatch_count,
+                "archive_count": stage.archive_count,
+                "message": stage.message,
+                "error": stage.error,
+                "started_at": stage.started_at,
+                "finished_at": stage.finished_at,
+            }
+            for stage in obj.stages.all()
         ]
 
 

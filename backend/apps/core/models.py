@@ -434,12 +434,21 @@ class CandidateWorkflow(models.Model):
     completed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    revision = models.PositiveIntegerField(default=0)
 
     class Meta:
         indexes = [
             models.Index(fields=["status"]),
             models.Index(fields=["updated_at"]),
         ]
+
+    def save(self, *args, **kwargs):
+        """把候选人流程的每次写入变成可供后台任务校验的单调版本。"""
+        self.revision = (self.revision or 0) + 1
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None:
+            kwargs["update_fields"] = set(update_fields) | {"revision"}
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.candidate.name}-{self.status}"
@@ -734,9 +743,11 @@ class ProcessingRun(models.Model):
     """流水线处理任务记录（Celery 跟踪）。"""
 
     scope = models.JSONField(default=dict, blank=True, help_text="处理范围/筛选条件")
+    scope_summary = models.JSONField(default=dict, blank=True, help_text="可对外展示的处理范围摘要")
     step = models.CharField(max_length=16)
     mode = models.CharField(max_length=8, default="rule")
-    status = models.CharField(max_length=16, default="pending")
+    status = models.CharField(max_length=24, default="pending")
+    current_stage = models.CharField(max_length=32, blank=True)
     celery_task_id = models.CharField(max_length=64, blank=True)
     celery_group_id = models.CharField(max_length=64, blank=True)
     params = models.JSONField(default=dict, blank=True)
@@ -758,6 +769,7 @@ class ProcessingRun(models.Model):
     decision_version = models.CharField(max_length=32, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     started_at = models.DateTimeField(null=True, blank=True)
+    last_heartbeat_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
     undone_at = models.DateTimeField(null=True, blank=True)
     undone_by = models.ForeignKey(
@@ -767,10 +779,69 @@ class ProcessingRun(models.Model):
         on_delete=models.SET_NULL,
         related_name="processing_runs_undone",
     )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="processing_runs_created",
+    )
+    created_by_username_snapshot = models.CharField(max_length=150, blank=True)
     error = models.TextField(blank=True)
 
     class Meta:
         ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["status", "created_at"]),
+            models.Index(fields=["created_by", "status"]),
+        ]
+
+
+class ProcessingRunStage(models.Model):
+    """一个处理任务中的可观测阶段，支持上传后 Step1 → Step2 的连续展示。"""
+
+    run = models.ForeignKey(
+        ProcessingRun, on_delete=models.CASCADE, related_name="stages"
+    )
+    sequence = models.PositiveSmallIntegerField()
+    step = models.CharField(max_length=16)
+    label = models.CharField(max_length=64)
+    status = models.CharField(max_length=24, default="pending")
+    total_count = models.PositiveIntegerField(default=0)
+    processed_count = models.PositiveIntegerField(default=0)
+    success_count = models.PositiveIntegerField(default=0)
+    failed_count = models.PositiveIntegerField(default=0)
+    review_count = models.PositiveIntegerField(default=0)
+    dispatch_count = models.PositiveIntegerField(default=0)
+    archive_count = models.PositiveIntegerField(default=0)
+    message = models.TextField(blank=True)
+    error = models.TextField(blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["sequence", "id"]
+        unique_together = ("run", "sequence")
+        indexes = [models.Index(fields=["run", "status"])]
+
+
+class ProcessingRunScopeItem(models.Model):
+    """提交任务时冻结的候选人范围，避免运行中重新解释页面筛选条件。"""
+
+    run = models.ForeignKey(
+        ProcessingRun, on_delete=models.CASCADE, related_name="scope_items"
+    )
+    candidate = models.ForeignKey(
+        Candidate, on_delete=models.CASCADE, related_name="processing_scope_items"
+    )
+    workflow_revision_at_submit = models.PositiveIntegerField(null=True, blank=True)
+    status = models.CharField(max_length=32, default="pending")
+    skip_reason = models.CharField(max_length=64, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("run", "candidate")
+        indexes = [models.Index(fields=["run", "candidate"])]
 
 
 class Config(models.Model):

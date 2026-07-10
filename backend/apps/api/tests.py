@@ -224,7 +224,9 @@ class PipelineRunApiTests(TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        mock_create.assert_called_once_with("step2", mode="rule", scope=scope)
+        mock_create.assert_called_once_with(
+            "step2", mode="rule", scope=scope, created_by=self.user
+        )
         self.assertEqual(response.data["message"], "ok")
 
 
@@ -629,6 +631,84 @@ class ListFilteringPaginationApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual([item["id"] for item in response.data["results"]], [keep.id])
         self.assertEqual(response.data["results"][0]["highest_major"], "计算机")
+
+    def test_candidate_selector_filters_and_options_use_current_display_values(self):
+        school_tag = m.SchoolTag.objects.create(code="TARGET", name="目标院校")
+        department = m.Department.objects.create(name="研发中心", level=2)
+        job = m.Job.objects.create(
+            department=department,
+            public_name="后端工程师",
+            position_name="后端工程师",
+            category="技术类",
+            headcount=1,
+        )
+        keep = m.Candidate.objects.create(
+            identity_hash="candidate-selector-keep",
+            name="选择器候选人",
+            phone="13830000901",
+            highest_major="计算机科学与技术",
+            highest_degree_tag=school_tag,
+        )
+        keep_resume = m.Resume.objects.create(
+            candidate=keep,
+            apply_id="SELECT001",
+            entity="GW",
+            position_name="后端工程师",
+            volunteer_rank=2,
+            job_category="技术类",
+            job=job,
+        )
+        m.CandidateWorkflow.objects.create(
+            candidate=keep,
+            status=m.CandidateWorkflow.STATUS_IN_PROGRESS,
+            current_resume=keep_resume,
+            current_rank=2,
+        )
+        drop = m.Candidate.objects.create(
+            identity_hash="candidate-selector-drop",
+            name="其他选择器候选人",
+            phone="13830000902",
+            highest_major="市场营销",
+        )
+        drop_resume = m.Resume.objects.create(
+            candidate=drop,
+            apply_id="SELECT002",
+            entity="YLS",
+            position_name="产品经理",
+            volunteer_rank=1,
+            job_category="产品类",
+        )
+        m.CandidateWorkflow.objects.create(
+            candidate=drop,
+            status=m.CandidateWorkflow.STATUS_PENDING,
+            current_resume=drop_resume,
+            current_rank=1,
+        )
+
+        options_response = self.client.get("/api/candidates/filter-options/")
+        filter_response = self.client.get(
+            "/api/candidates/",
+            {
+                "highest_major_in": "计算机科学与技术",
+                "current_rank_in": "2",
+                "current_entity_in": "GW",
+                "current_position_name_in": "后端工程师",
+                "job_department_name_in": "研发中心",
+                "current_job_category_in": "技术类",
+                "school_tag_in": "目标院校",
+            },
+        )
+
+        self.assertEqual(options_response.status_code, 200)
+        self.assertEqual(options_response.data["highest_major"], ["市场营销", "计算机科学与技术"])
+        self.assertEqual(options_response.data["current_rank"], ["1", "2"])
+        self.assertIn("GW", options_response.data["current_entity"])
+        self.assertIn("后端工程师", options_response.data["current_position_name"])
+        self.assertIn("研发中心", options_response.data["job_department_name"])
+        self.assertIn("技术类", options_response.data["current_job_category"])
+        self.assertIn("目标院校", options_response.data["school_tag"])
+        self.assertEqual(filter_response.status_code, 200)
+        self.assertEqual([item["id"] for item in filter_response.data["results"]], [keep.id])
 
     def test_candidate_school_tag_filter_matches_manual_non_target_tag(self):
         non_target_tag = m.SchoolTag.objects.create(

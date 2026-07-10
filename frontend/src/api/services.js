@@ -127,6 +127,9 @@ export function manualAssignResume(id, body) {
 export function fetchCandidates(params) {
   return client.get('/candidates/', { params })
 }
+export function fetchCandidateFilterOptions() {
+  return client.get('/candidates/filter-options/')
+}
 export function deleteCandidate(id) {
   return client.delete(`/candidates/${id}/`)
 }

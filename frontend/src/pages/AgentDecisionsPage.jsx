@@ -18,7 +18,7 @@ const SCORE_LABELS = {
   resume_quality: '简历文本质量',
 }
 
-export default function AgentDecisionsPage() {
+export function AgentDecisionsTable() {
   const actionRef = useRef()
   const [detail, setDetail] = useState(null)
   const [retrying, setRetrying] = useState(null)
@@ -84,7 +84,7 @@ export default function AgentDecisionsPage() {
   ]
 
   return (
-    <PageContainer title="AI 筛选决策" subTitle="查看结构化评分、简历证据、风险与失败原因">
+    <>
       <ProTable
         rowKey="id"
         actionRef={actionRef}
@@ -136,6 +136,15 @@ export default function AgentDecisionsPage() {
           </>
         )}
       </Drawer>
+    </>
+  )
+}
+
+// 兼容旧路由；主入口已合并进“简历分配”的 AI 筛选决策视图。
+export default function AgentDecisionsPage() {
+  return (
+    <PageContainer title="AI 筛选决策" subTitle="查看结构化评分、简历证据、风险与失败原因">
+      <AgentDecisionsTable />
     </PageContainer>
   )
 }

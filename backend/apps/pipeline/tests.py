@@ -5,7 +5,7 @@ from django.test import TestCase
 
 from apps.accounts.models import User
 from apps.core import models as m
-from apps.pipeline import ai_config
+from apps.pipeline import ai_config, runner
 from apps.pipeline.ai.service import AIServiceError
 from apps.pipeline.services import allocate, classify_school
 
@@ -84,6 +84,44 @@ class AllocationDesignContractTests(TestCase):
         self.assertEqual(attempt.status, m.AssignmentAttempt.STATUS_PENDING_DISPATCH)
         self.assertIsNone(attempt.matched_rule)
         self.assertEqual(self.candidate.workflow.status, m.CandidateWorkflow.STATUS_IN_PROGRESS)
+
+    def test_resume_process_freezes_scope_and_exposes_two_stages(self):
+        user = User.objects.create_user(username="hr-run-owner", password="pass")
+        run = runner.create_run(
+            "resume_process",
+            mode="rule",
+            scope={"candidate_ids": [self.candidate.id], "source": "resume_import"},
+            created_by=user,
+        )
+
+        self.assertEqual(run.scope, {"source": "resume_import"})
+        self.assertEqual(run.scope_summary["candidate_count"], 1)
+        self.assertEqual(
+            list(run.scope_items.values_list("candidate_id", flat=True)), [self.candidate.id]
+        )
+        self.assertEqual(list(run.stages.values_list("step", flat=True)), ["step1", "step2"])
+
+        runner.execute_run(run.id)
+
+        run.refresh_from_db()
+        self.assertEqual(run.status, "success")
+        self.assertEqual(run.created_by, user)
+        self.assertTrue(run.last_heartbeat_at)
+        self.assertEqual(list(run.stages.values_list("status", flat=True)), ["success", "success"])
+
+    def test_run_skips_candidate_changed_after_submit(self):
+        workflow = m.CandidateWorkflow.objects.create(candidate=self.candidate)
+        run = runner.create_run(
+            "step2", mode="rule", scope={"candidate_ids": [self.candidate.id]}
+        )
+        workflow.status = m.CandidateWorkflow.STATUS_IN_PROGRESS
+        workflow.save(update_fields=["status"])
+
+        runner.execute_run(run.id)
+
+        scope_item = run.scope_items.get(candidate=self.candidate)
+        self.assertEqual(scope_item.status, "skipped_manual_change")
+        self.assertFalse(m.AssignmentAttempt.objects.exists())
 
     def test_scoped_reprocess_classifies_school_tags_before_school_gate(self):
         target_tag = m.SchoolTag.objects.create(code="TARGET", name="目标院校")

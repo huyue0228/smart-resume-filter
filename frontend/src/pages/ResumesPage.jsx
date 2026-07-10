@@ -3,6 +3,7 @@ import { PageContainer, ProTable } from '@ant-design/pro-components'
 import {
   Button,
   Checkbox,
+  Radio,
   Tag,
   Space,
   Modal,
@@ -20,6 +21,7 @@ import {
   deleteCandidate,
   exportCandidates,
   fetchCandidates,
+  fetchCandidateFilterOptions,
   fetchUndoStatus,
   undoLastImport,
   fetchContacts,
@@ -41,12 +43,6 @@ import { downloadBlobFromResponse } from '../utils/download'
 const RESUME_IMPORT_FIELDS = [
   { key: 'resume_list', label: '① 简历信息列表 (.xlsx/.xls/.csv)', accept: '.xlsx,.xls,.csv' },
   { key: 'resume_package', label: '② 简历包 (.zip，文件名含应聘ID)', accept: '.zip' },
-]
-
-// 普通简历上传只跑候选人主流程；Step3/Step4 由前置主数据维护负责。
-const PROCESS_STEPS = [
-  { step: 'step1', label: '查重与志愿排序' },
-  { step: 'step2', label: '简历分类、分配与下发' },
 ]
 
 const SYSTEM_STATUS_OPTIONS = {
@@ -123,7 +119,7 @@ export default function ResumesPage() {
   const actionRef = useRef()
   const { mode } = useMode()
   const { hasPermission } = useRole()
-  const { run, modal } = useProcessRunner()
+  const { run } = useProcessRunner()
   const [undo, setUndo] = useState({ available: false })
   const [detailRecord, setDetailRecord] = useState(null)
   const [previewRecord, setPreviewRecord] = useState(null)
@@ -131,7 +127,10 @@ export default function ResumesPage() {
   const [processing, setProcessing] = useState(false)
   const [processModalOpen, setProcessModalOpen] = useState(false)
   const [processStatusSelection, setProcessStatusSelection] = useState([])
+  const [processMode, setProcessMode] = useState(mode)
   const [lastQuery, setLastQuery] = useState({})
+  const [filterOptions, setFilterOptions] = useState({})
+  const [tableFilters, setTableFilters] = useState({})
   const [manualModal, setManualModal] = useState({
     open: false,
     resume: null,
@@ -185,9 +184,25 @@ export default function ResumesPage() {
     }
   }
 
+  const refreshFilterOptions = async () => {
+    try {
+      const { data } = await fetchCandidateFilterOptions()
+      setFilterOptions(data || {})
+    } catch {
+      setFilterOptions({})
+    }
+  }
+
   useEffect(() => {
     refreshUndo()
+    refreshFilterOptions()
   }, [])
+
+  useEffect(() => {
+    if (Object.keys(tableFilters).length || actionRef.current) {
+      actionRef.current?.reloadAndRest()
+    }
+  }, [tableFilters])
 
   useEffect(() => {
     if (!detailRecord) {
@@ -199,16 +214,14 @@ export default function ResumesPage() {
     )
   }, [detailRecord])
 
-  // 导入成功 → 自动按当前模式跑五步 → 刷新
-  const handleImported = async () => {
+  // 导入接口已在服务端创建并提交 Step1 → Step2 后台任务，页面无需等待执行完成。
+  const handleImported = async (data) => {
     await refreshUndo()
-    const r = await run(
-      PROCESS_STEPS,
-      mode,
-      `正在处理简历（${mode === 'ai' ? 'AI' : '规则'}模式）`,
-    )
-    if (r.success) message.success('简历处理完成')
+    await refreshFilterOptions()
     actionRef.current?.reload()
+    if (data?.processing_run) {
+      message.success('简历已导入并提交后台处理，可继续操作并在任务中心查看进度')
+    }
   }
 
   const handleUndo = () => {
@@ -222,6 +235,7 @@ export default function ResumesPage() {
           const { data } = await undoLastImport()
           message.success(data?.detail || '已撤销')
           await refreshUndo()
+          await refreshFilterOptions()
           actionRef.current?.reload()
         } catch {
           message.error('撤销失败')
@@ -240,6 +254,7 @@ export default function ResumesPage() {
         try {
           await deleteCandidate(record.id)
           message.success('已删除')
+          await refreshFilterOptions()
           actionRef.current?.reload()
         } catch (error) {
           message.error(error?.response?.data?.detail || '删除失败')
@@ -277,6 +292,7 @@ export default function ResumesPage() {
 
   const handleProcessSelectedStatuses = () => {
     setProcessStatusSelection(selectedSystemStatuses())
+    setProcessMode(mode)
     setProcessModalOpen(true)
   }
 
@@ -291,8 +307,8 @@ export default function ResumesPage() {
       const { system_status: _ignoredSystemStatus, ...candidateFilters } = lastQuery
       const r = await run(
         [{ step: 'step2', label: '简历分类、分配与下发' }],
-        mode,
-        `正在重新处理简历（${mode === 'ai' ? 'AI' : '规则'}模式）`,
+        processMode,
+        `正在重新处理简历（${processMode === 'ai' ? 'AI' : '规则'}模式）`,
         {
           scope: {
             system_statuses: statuses,
@@ -301,14 +317,35 @@ export default function ResumesPage() {
         },
       )
       if (r.success) {
-        message.success('简历重新处理完成')
+        message.success('已提交重新处理任务，可继续操作并在任务中心查看进度')
         setProcessModalOpen(false)
-        actionRef.current?.reload()
       }
     } finally {
       setProcessing(false)
     }
   }
+
+  const selectorOptions = (field, labelFormatter = (value) => value) =>
+    (filterOptions[field] || []).map((value) => ({
+      text: labelFormatter(value),
+      value,
+    }))
+  const toFilterValue = (value) =>
+    Array.isArray(value) ? value.join(',') : value
+  const updateTableFilter = (field, values) => {
+    setTableFilters((previous) => {
+      const next = { ...previous }
+      if (values?.length) {
+        next[field] = values
+      } else {
+        delete next[field]
+      }
+      return next
+    })
+  }
+  const controlledFilter = (field) => ({
+    filteredValue: tableFilters[field] || null,
+  })
 
   const baseColumns = [
     {
@@ -316,35 +353,50 @@ export default function ResumesPage() {
       dataIndex: 'name',
       fixed: 'left',
       width: 100,
-      ...textColumnFilter('筛选姓名/拼音'),
+      ...controlledFilter('name'),
+      ...textColumnFilter('筛选姓名/拼音', (values) => updateTableFilter('name', values)),
     },
     {
       title: '最高学历专业',
       dataIndex: 'highest_major',
       width: 130,
       ellipsis: true,
-      ...textColumnFilter('筛选最高学历专业'),
+      ...controlledFilter('highest_major'),
+      ...selectColumnFilter(selectorOptions('highest_major'), true, (values) =>
+        updateTableFilter('highest_major', values),
+      ),
       render: (_, record) => record.highest_major || '-',
     },
     {
       title: '当前志愿',
       dataIndex: 'current_rank',
       width: 90,
-      ...textColumnFilter('筛选志愿'),
+      ...controlledFilter('current_rank'),
+      ...selectColumnFilter(
+        selectorOptions('current_rank', (value) => `第${value}志愿`),
+        true,
+        (values) => updateTableFilter('current_rank', values),
+      ),
       render: (_, record) => record.current_rank || '-',
     },
     {
       title: '当前应聘ID',
       dataIndex: 'current_apply_id',
       width: 130,
-      ...textColumnFilter('筛选应聘ID'),
+      ...controlledFilter('current_apply_id'),
+      ...textColumnFilter('筛选应聘ID', (values) =>
+        updateTableFilter('current_apply_id', values),
+      ),
       render: (value) => value || '-',
     },
     {
       title: '当前主体',
       dataIndex: 'current_entity',
       width: 120,
-      ...textColumnFilter('筛选主体'),
+      ...controlledFilter('current_entity'),
+      ...selectColumnFilter(selectorOptions('current_entity'), true, (values) =>
+        updateTableFilter('current_entity', values),
+      ),
       render: (_, record) => record.current_resume?.entity || '-',
     },
     {
@@ -352,7 +404,10 @@ export default function ResumesPage() {
       dataIndex: 'current_position_name',
       width: 180,
       ellipsis: true,
-      ...textColumnFilter('筛选投递岗位'),
+      ...controlledFilter('current_position_name'),
+      ...selectColumnFilter(selectorOptions('current_position_name'), true, (values) =>
+        updateTableFilter('current_position_name', values),
+      ),
       render: (_, record) => record.current_resume?.position_name || '-',
     },
     {
@@ -360,21 +415,30 @@ export default function ResumesPage() {
       dataIndex: 'job_department_name',
       width: 130,
       ellipsis: true,
-      ...textColumnFilter('筛选岗位部门'),
+      ...controlledFilter('job_department_name'),
+      ...selectColumnFilter(selectorOptions('job_department_name'), true, (values) =>
+        updateTableFilter('job_department_name', values),
+      ),
       render: (value) => value || '-',
     },
     {
       title: '岗位类别',
       dataIndex: 'current_job_category',
       width: 110,
-      ...textColumnFilter('筛选岗位类别'),
+      ...controlledFilter('current_job_category'),
+      ...selectColumnFilter(selectorOptions('current_job_category'), true, (values) =>
+        updateTableFilter('current_job_category', values),
+      ),
       render: (_, record) => record.current_resume?.job_category || '-',
     },
     {
       title: '院校标签',
       dataIndex: 'school_tag',
       width: 110,
-      ...textColumnFilter('筛选院校标签'),
+      ...controlledFilter('school_tag'),
+      ...selectColumnFilter(selectorOptions('school_tag'), true, (values) =>
+        updateTableFilter('school_tag', values),
+      ),
       render: (_, record) =>
         record.school_tag ? <Tag color="blue">{record.school_tag}</Tag> : '-',
     },
@@ -389,12 +453,14 @@ export default function ResumesPage() {
           { text: item.text, status: item.status },
         ]),
       ),
+      ...controlledFilter('system_status'),
       ...selectColumnFilter(
         Object.entries(SYSTEM_STATUS_OPTIONS).map(([value, item]) => ({
           text: item.text,
           value,
         })),
         true,
+        (values) => updateTableFilter('system_status', values),
       ),
       render: (_, record) => {
         const status = record.system_status
@@ -417,12 +483,14 @@ export default function ResumesPage() {
           { text: item.text },
         ]),
       ),
+      ...controlledFilter('workflow_status'),
       ...selectColumnFilter(
         Object.entries(WORKFLOW_STATUS).map(([value, item]) => ({
           text: item.text,
           value,
         })),
         true,
+        (values) => updateTableFilter('workflow_status', values),
       ),
       render: (value) => {
         const item = WORKFLOW_STATUS[value]
@@ -441,6 +509,7 @@ export default function ResumesPage() {
           { text: item.text },
         ]),
       ),
+      ...controlledFilter('reason_type'),
       ...selectColumnFilter(
         Object.entries(REASON_TYPE)
           .filter(([value]) => value !== 'none')
@@ -448,6 +517,8 @@ export default function ResumesPage() {
             text: item.text,
             value,
           })),
+        false,
+        (values) => updateTableFilter('reason_type', values),
       ),
       render: (_, record) => {
         const type = record.reason_type || 'none'
@@ -501,7 +572,8 @@ export default function ResumesPage() {
             buttonText="上传简历"
             title="上传简历（简历列表 + 简历包），上传后自动处理"
             fields={RESUME_IMPORT_FIELDS}
-            onDone={handleImported}
+              onDone={handleImported}
+              processingMode={mode}
           />,
           <Button
             key="process"
@@ -529,12 +601,12 @@ export default function ResumesPage() {
             导出
           </Button>,
         ]}
-        request={async (params, _sort, filters) => {
+        request={async (params) => {
           const {
             current,
             pageSize,
           } = params
-          const tableFilters = normalizeTableFilters(filters, [
+          const normalizedFilters = normalizeTableFilters(tableFilters, [
             'name',
             'highest_major',
             'current_rank',
@@ -549,22 +621,18 @@ export default function ResumesPage() {
             'reason_type',
           ])
           const query = {
-            system_status: Array.isArray(tableFilters.system_status)
-              ? tableFilters.system_status.join(',')
-              : tableFilters.system_status,
-            name: tableFilters.name,
-            highest_major: tableFilters.highest_major,
-            current_rank: tableFilters.current_rank,
-            current_apply_id: tableFilters.current_apply_id,
-            current_entity: tableFilters.current_entity,
-            current_position_name: tableFilters.current_position_name,
-            job_department_name: tableFilters.job_department_name,
-            current_job_category: tableFilters.current_job_category,
-            school_tag: tableFilters.school_tag,
-            workflow_status: Array.isArray(tableFilters.workflow_status)
-              ? tableFilters.workflow_status.join(',')
-              : tableFilters.workflow_status,
-            reason_type: tableFilters.reason_type,
+            system_status: toFilterValue(normalizedFilters.system_status),
+            name: toFilterValue(normalizedFilters.name),
+            highest_major_in: toFilterValue(normalizedFilters.highest_major),
+            current_rank_in: toFilterValue(normalizedFilters.current_rank),
+            current_apply_id: toFilterValue(normalizedFilters.current_apply_id),
+            current_entity_in: toFilterValue(normalizedFilters.current_entity),
+            current_position_name_in: toFilterValue(normalizedFilters.current_position_name),
+            job_department_name_in: toFilterValue(normalizedFilters.job_department_name),
+            current_job_category_in: toFilterValue(normalizedFilters.current_job_category),
+            school_tag_in: toFilterValue(normalizedFilters.school_tag),
+            workflow_status: toFilterValue(normalizedFilters.workflow_status),
+            reason_type: toFilterValue(normalizedFilters.reason_type),
           }
           setLastQuery(query)
           try {
@@ -599,6 +667,18 @@ export default function ResumesPage() {
           <Typography.Text>
             选择需要重新处理的系统简历状态。系统会按当前表格的其它筛选条件限定范围，并保留历史分配与反馈记录。
           </Typography.Text>
+          <div>
+            <Typography.Text>处理策略：</Typography.Text>
+            <Radio.Group
+              value={processMode}
+              onChange={(event) => setProcessMode(event.target.value)}
+              disabled={processing}
+              style={{ marginLeft: 12 }}
+            >
+              <Radio value="rule">规则分配</Radio>
+              <Radio value="ai">AI 分配</Radio>
+            </Radio.Group>
+          </div>
           <Checkbox.Group
             value={processStatusSelection}
             onChange={setProcessStatusSelection}
@@ -806,7 +886,6 @@ export default function ResumesPage() {
           />
         </Space>
       </Modal>
-      {modal}
     </PageContainer>
   )
 }

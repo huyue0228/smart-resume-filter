@@ -3,16 +3,18 @@ import { FilterOutlined, SearchOutlined } from '@ant-design/icons'
 import { SelectFilterDropdown, TextFilterDropdown } from './DataTableFilterDropdowns'
 import ResizableHeaderCell from './ResizableHeaderCell'
 
-export function textColumnFilter(placeholder) {
+export function textColumnFilter(placeholder, onApply) {
   return {
-    filterDropdown: (props) => <TextFilterDropdown {...props} placeholder={placeholder} />,
+    filterDropdown: (props) => (
+      <TextFilterDropdown {...props} placeholder={placeholder} onApply={onApply} />
+    ),
     filterIcon: (filtered) => (
       <SearchOutlined style={{ color: filtered ? '#1677ff' : undefined }} />
     ),
   }
 }
 
-export function selectColumnFilter(options, multiple = false) {
+export function selectColumnFilter(options, multiple = false, onApply) {
   return {
     filterMultiple: multiple,
     filterDropdown: (props) => {
@@ -21,6 +23,7 @@ export function selectColumnFilter(options, multiple = false) {
         <SelectFilterDropdown
           key={filterKey}
           {...props}
+          onApply={onApply}
           options={options}
           multiple={multiple}
         />

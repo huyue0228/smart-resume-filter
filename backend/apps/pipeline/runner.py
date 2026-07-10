@@ -1,7 +1,14 @@
-"""流水线编排：单步或一键全流程，记录 ProcessingRun。"""
+"""流水线编排：单步、上传后主流程或一键全流程，记录共享 ProcessingRun。"""
+from copy import deepcopy
+
 from django.utils import timezone
 
-from apps.core.models import ProcessingRun
+from apps.core.models import (
+    CandidateWorkflow,
+    ProcessingRun,
+    ProcessingRunScopeItem,
+    ProcessingRunStage,
+)
 from apps.pipeline import ai_config
 
 from .services import allocate, classify_job, classify_school, dedup, demand
@@ -15,15 +22,59 @@ STEP_FUNCS = {
     "step5": lambda mode, scope, run: allocate.run(scope, mode, processing_run=run),
 }
 
+RESUME_PROCESS_STEP = "resume_process"
+STAGE_LABELS = {
+    "step1": "查重与志愿排序",
+    "step2": "简历分类、分配与下发",
+    "step3": "院校分类",
+    "step4": "需求数据准备核对",
+    "step5": "简历分类、分配与下发",
+}
+
 # 一键全流程：前置院校分类、需求录入先完成，再执行候选人主流程。
 STEP_ORDER = ["step3", "step4", "step1", "step2"]
 
 
-def create_run(step, mode="rule", scope=None):
-    if step != "all" and step not in STEP_FUNCS:
+def _candidate_ids_for_run(step, scope):
+    """在提交时冻结候选人范围，后台执行不再重新解释页面筛选。"""
+    candidate_ids = scope.get("candidate_ids") or []
+    if candidate_ids:
+        return sorted({int(candidate_id) for candidate_id in candidate_ids})
+    if step in {"step2", "step5", RESUME_PROCESS_STEP}:
+        return list(allocate.candidate_ids_for_scope(scope))
+    if step == "step1":
+        return list(dedup.candidate_ids_for_scope(scope))
+    return []
+
+
+def _scope_summary(scope, candidate_ids):
+    summary = {"candidate_count": len(candidate_ids)}
+    statuses = scope.get("system_statuses") or []
+    if statuses:
+        summary["system_statuses"] = statuses
+    source = scope.get("source")
+    if source:
+        summary["source"] = source
+    return summary
+
+
+def _stage_steps(step):
+    if step == RESUME_PROCESS_STEP:
+        return ["step1", "step2"]
+    if step == "all":
+        return STEP_ORDER
+    return [step]
+
+
+def create_run(step, mode="rule", scope=None, created_by=None):
+    if step not in {"all", RESUME_PROCESS_STEP} and step not in STEP_FUNCS:
         raise ValueError(f"未知步骤: {step}")
     if mode not in ["rule", "ai"]:
         raise ValueError(f"未知模式: {mode}")
+    scope = deepcopy(scope or {})
+    candidate_ids = _candidate_ids_for_run(step, scope)
+    # candidate_ids 保存在范围明细表；scope 只保留触发时的可审计筛选快照。
+    scope.pop("candidate_ids", None)
     versions = {}
     if mode == "ai":
         config = ai_config.get_ai_model_config()
@@ -32,23 +83,98 @@ def create_run(step, mode="rule", scope=None):
             "prompt_version": config.prompt_version,
             "decision_version": config.decision_version,
         }
-    return ProcessingRun.objects.create(
-        step=step, mode=mode, scope=scope or {}, status="pending", **versions
+    run = ProcessingRun.objects.create(
+        step=step,
+        mode=mode,
+        scope=scope,
+        scope_summary=_scope_summary(scope, candidate_ids),
+        status="pending",
+        created_by=created_by if getattr(created_by, "is_authenticated", False) else None,
+        created_by_username_snapshot=(
+            created_by.username if getattr(created_by, "is_authenticated", False) else ""
+        ),
+        **versions,
     )
+    workflow_revisions = dict(
+        CandidateWorkflow.objects.filter(candidate_id__in=candidate_ids).values_list(
+            "candidate_id", "revision"
+        )
+    )
+    ProcessingRunScopeItem.objects.bulk_create(
+        [
+            ProcessingRunScopeItem(
+                run=run,
+                candidate_id=candidate_id,
+                workflow_revision_at_submit=workflow_revisions.get(candidate_id),
+            )
+            for candidate_id in candidate_ids
+        ],
+        batch_size=1000,
+    )
+    ProcessingRunStage.objects.bulk_create(
+        [
+            ProcessingRunStage(
+                run=run,
+                sequence=index,
+                step=stage_step,
+                label=STAGE_LABELS[stage_step],
+            )
+            for index, stage_step in enumerate(_stage_steps(step), start=1)
+        ]
+    )
+    return run
+
+
+def _run_scope(run):
+    scope = deepcopy(run.scope or {})
+    candidate_ids = list(run.scope_items.order_by("candidate_id").values_list("candidate_id", flat=True))
+    if candidate_ids:
+        scope["candidate_ids"] = candidate_ids
+    return scope
+
+
+def _heartbeat(run, *, stage=""):
+    run.current_stage = stage
+    run.last_heartbeat_at = timezone.now()
+    run.save(update_fields=["current_stage", "last_heartbeat_at"])
+
+
+def _run_one_stage(run, stage, mode, scope):
+    stage_record = run.stages.get(step=stage)
+    stage_record.status = "running"
+    stage_record.started_at = timezone.now()
+    stage_record.save(update_fields=["status", "started_at"])
+    _heartbeat(run, stage=stage)
+    if stage == "step1":
+        message = dedup.run(scope, processing_run=run, processing_stage=stage_record)
+    elif stage in {"step2", "step5"}:
+        message = allocate.run(
+            scope, mode, processing_run=run, processing_stage=stage_record
+        )
+    else:
+        message = STEP_FUNCS[stage](mode, scope, run)
+    run.refresh_from_db()
+    stage_record.refresh_from_db()
+    stage_record.status = "partial_failed" if stage_record.failed_count else "success"
+    stage_record.message = message
+    stage_record.finished_at = timezone.now()
+    stage_record.save(update_fields=["status", "message", "finished_at"])
+    return message
 
 
 def execute_run(run_id):
     run = ProcessingRun.objects.get(pk=run_id)
     run.status = "running"
     run.started_at = timezone.now()
-    run.save(update_fields=["status", "started_at"])
-    step, mode, scope = run.step, run.mode, run.scope or {}
+    run.last_heartbeat_at = run.started_at
+    run.save(update_fields=["status", "started_at", "last_heartbeat_at"])
+    step, mode, scope = run.step, run.mode, _run_scope(run)
     try:
-        if step == "all":
-            msgs = [f"{s}: {STEP_FUNCS[s](mode, scope, run)}" for s in STEP_ORDER]
-            message = " | ".join(msgs)
-        else:
-            message = STEP_FUNCS[step](mode, scope, run)
+        messages = [
+            f"{stage}: {_run_one_stage(run, stage, mode, scope)}"
+            for stage in _stage_steps(step)
+        ]
+        message = " | ".join(messages)
         run.refresh_from_db()
         run.status = "partial_failed" if run.failed_count else "success"
         run.message = message
@@ -57,6 +183,8 @@ def execute_run(run_id):
         run.message = f"{type(exc).__name__}: {exc}"
         run.error = run.message
     run.finished_at = timezone.now()
+    run.last_heartbeat_at = run.finished_at
+    run.current_stage = ""
     run.save()
     return run
 

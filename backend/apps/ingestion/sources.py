@@ -248,6 +248,7 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
         "contacts": 0,
         "candidates_skipped": 0,
     }
+    affected_candidate_ids = set()
 
     if mode == "replace" and (files.get("resume_list") or files.get("resume_package")):
         m.AssignmentHandoff.objects.all().delete()
@@ -381,6 +382,7 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
                 },
             )
             counts["candidates_created" if created else "candidates_updated"] += 1
+            affected_candidate_ids.add(cand.id)
 
             resume, r_created = m.Resume.objects.update_or_create(
                 apply_id=apply_id,
@@ -418,7 +420,10 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
                             out.write(zf.read(fname))
                         resume.resume_file = base
                         resume.save(update_fields=["resume_file"])
+                        affected_candidate_ids.add(resume.candidate_id)
         except zipfile.BadZipFile:
             pass
 
+    # 仅供 API 在创建后台 ProcessingRun 时冻结处理范围，不作为导入统计直接返回。
+    counts["_candidate_ids"] = sorted(affected_candidate_ids)
     return counts

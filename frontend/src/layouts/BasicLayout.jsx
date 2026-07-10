@@ -13,9 +13,9 @@ import {
   ControlOutlined,
   UserOutlined,
   SafetyCertificateOutlined,
-  RobotOutlined,
 } from '@ant-design/icons'
 import { useRole, ROLES } from '../contexts/RoleContext'
+import ProcessingTaskCenter from '../components/ProcessingTaskCenter'
 
 const ROOT_MENU_KEYS = ['/data', '/system']
 
@@ -52,7 +52,6 @@ const allRoute = {
       ],
     },
     assignGroup,
-    { path: '/agent-decisions', name: 'AI 筛选决策', icon: <RobotOutlined /> },
     {
       path: '/system',
       name: '系统设置',
@@ -72,7 +71,6 @@ function filterRoutesByPermission(routes, hasPermission) {
     '/schools': 'school.view',
     '/departments': 'department.view',
     '/allocations': ['attempt.view_all', 'attempt.view_received', 'attempt.view_assigned'],
-    '/agent-decisions': 'attempt.view_all',
     '/config': 'settings.manage_config',
     '/users': 'settings.manage_permissions',
   }
@@ -137,6 +135,7 @@ export default function BasicLayout() {
           {dom}
         </div>
       )}
+      actionsRender={() => (hasPermission('pipeline.view') ? [<ProcessingTaskCenter key="processing-tasks" />] : [])}
       avatarProps={{
         icon: <UserOutlined />,
         title: (

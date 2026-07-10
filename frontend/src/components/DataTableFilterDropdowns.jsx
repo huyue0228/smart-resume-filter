@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Button, Checkbox, Input, Space } from 'antd'
+import { Button, Input, Select, Space } from 'antd'
 import { FilterOutlined, SearchOutlined } from '@ant-design/icons'
 
 export function TextFilterDropdown({
@@ -9,6 +9,7 @@ export function TextFilterDropdown({
   clearFilters,
   close,
   placeholder,
+  onApply,
 }) {
   const selectedValue = selectedKeys[0] || ''
   const [draft, setDraft] = useState(selectedValue)
@@ -19,12 +20,14 @@ export function TextFilterDropdown({
 
   const applyFilter = () => {
     setSelectedKeys(draft ? [draft] : [])
+    onApply?.(draft ? [draft] : [])
     confirm()
   }
 
   const resetFilter = () => {
     setDraft('')
     setSelectedKeys([])
+    onApply?.([])
     clearFilters?.()
     confirm()
   }
@@ -68,53 +71,50 @@ export function SelectFilterDropdown({
   confirm,
   clearFilters,
   close,
+  onApply,
 }) {
-  const normalizedSelectedKeys = selectedKeys || []
-  const [draftKeys, setDraftKeys] = useState([...normalizedSelectedKeys])
+  const [draftKeys, setDraftKeys] = useState([...(selectedKeys || [])])
 
-  const toggleKey = (value, checked) => {
-    if (multiple) {
-      setDraftKeys((prev) =>
-        checked ? [...prev, value] : prev.filter((item) => item !== value),
-      )
-      return
-    }
-    setDraftKeys(checked ? [value] : [])
-  }
+  useEffect(() => {
+    setDraftKeys([...(selectedKeys || [])])
+  }, [selectedKeys])
 
   const applyFilter = () => {
     setSelectedKeys(draftKeys)
+    onApply?.(draftKeys)
     confirm()
   }
 
   const resetFilter = () => {
     setDraftKeys([])
     setSelectedKeys([])
+    onApply?.([])
     clearFilters?.()
     confirm()
   }
 
   const cancelFilter = () => {
-    setDraftKeys([...normalizedSelectedKeys])
+    setDraftKeys([...(selectedKeys || [])])
     close?.()
   }
 
   return (
-    <div style={{ padding: 8, width: 220 }} onKeyDown={(event) => event.stopPropagation()}>
-      <Space direction="vertical" size={4} style={{ width: '100%', marginBottom: 8 }}>
-        {options.map((option) => {
-          const checked = draftKeys.includes(option.value)
-          return (
-            <Checkbox
-              key={option.value}
-              checked={checked}
-              onChange={(event) => toggleKey(option.value, event.target.checked)}
-            >
-              {option.text}
-            </Checkbox>
+    <div style={{ padding: 8, width: 260 }} onKeyDown={(event) => event.stopPropagation()}>
+      <Select
+        allowClear
+        mode={multiple ? 'multiple' : undefined}
+        optionFilterProp="label"
+        options={options.map((option) => ({ label: option.text, value: option.value }))}
+        placeholder="请选择"
+        showSearch
+        value={multiple ? draftKeys : draftKeys[0]}
+        onChange={(value) =>
+          setDraftKeys(
+            multiple ? value || [] : value === undefined || value === null ? [] : [value],
           )
-        })}
-      </Space>
+        }
+        style={{ width: '100%', marginBottom: 8 }}
+      />
       <Space>
         <Button type="primary" size="small" icon={<FilterOutlined />} onClick={applyFilter}>
           确认

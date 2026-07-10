@@ -101,6 +101,11 @@ def _candidate_queryset(scope):
     return qs.prefetch_related("resumes")
 
 
+def candidate_ids_for_scope(scope=None):
+    """返回提交时可被冻结的候选人范围，顺序固定以降低并发任务锁冲突。"""
+    return _candidate_queryset(scope).order_by("id").values_list("id", flat=True)
+
+
 def _is_scoped_reprocess(scope):
     return bool(system_status.normalize_statuses((scope or {}).get("system_statuses")))
 
@@ -670,7 +675,33 @@ def _create_next_auto_attempt(workflow, rules, mode="rule", processing_run=None)
     return None
 
 
-def run(scope=None, mode="rule", processing_run=None):
+def _sync_stage_progress(processing_stage, processing_run):
+    if not processing_stage or not processing_run:
+        return
+    for field in [
+        "total_count",
+        "processed_count",
+        "success_count",
+        "failed_count",
+        "review_count",
+        "dispatch_count",
+        "archive_count",
+    ]:
+        setattr(processing_stage, field, getattr(processing_run, field))
+    processing_stage.save(
+        update_fields=[
+            "total_count",
+            "processed_count",
+            "success_count",
+            "failed_count",
+            "review_count",
+            "dispatch_count",
+            "archive_count",
+        ]
+    )
+
+
+def run(scope=None, mode="rule", processing_run=None, processing_stage=None):
     scope = scope or {}
     rules = school_admission.active_rules()
 
@@ -681,9 +712,9 @@ def run(scope=None, mode="rule", processing_run=None):
         status=m.CandidateWorkflow.STATUS_ARCHIVED
     ).count()
 
-    candidates = list(_candidate_queryset(scope))
+    candidate_ids = list(candidate_ids_for_scope(scope))
     if processing_run:
-        processing_run.total_count = len(candidates)
+        processing_run.total_count = len(candidate_ids)
         processing_run.processed_count = 0
         processing_run.success_count = 0
         processing_run.failed_count = 0
@@ -696,83 +727,133 @@ def run(scope=None, mode="rule", processing_run=None):
                 "review_count", "dispatch_count", "archive_count",
             ]
         )
+        _sync_stage_progress(processing_stage, processing_run)
+    candidates = list(m.Candidate.objects.filter(id__in=candidate_ids).order_by("id"))
     classify_school.classify_candidates(candidates, overwrite=False)
+    scope_items = (
+        {
+            item.candidate_id: item
+            for item in processing_run.scope_items.all()
+        }
+        if processing_run
+        else {}
+    )
 
-    for candidate in candidates:
-        workflow, _ = m.CandidateWorkflow.objects.get_or_create(candidate=candidate)
-        if not scoped_reprocess and workflow.status in [
+    for candidate_id in candidate_ids:
+        # 同一候选人的自动处理必须串行：持有 Candidate 行锁直到该人的流程、
+        # 尝试和 AI 决策全部落库，避免两个 HR 的后台任务互相取消或重复建尝试。
+        with transaction.atomic():
+            candidate = m.Candidate.objects.select_for_update().get(pk=candidate_id)
+            workflow, workflow_created = m.CandidateWorkflow.objects.select_for_update().get_or_create(candidate=candidate)
+            scope_item = scope_items.get(candidate_id)
+            if scope_item:
+                expected_revision = scope_item.workflow_revision_at_submit
+                changed_after_submit = (
+                    (expected_revision is None and not workflow_created)
+                    or (
+                        expected_revision is not None
+                        and workflow.revision != expected_revision
+                    )
+                )
+                if changed_after_submit:
+                    scope_item.status = "skipped_manual_change"
+                    scope_item.skip_reason = "workflow_changed_after_submit"
+                    scope_item.save(update_fields=["status", "skip_reason"])
+                    if processing_run:
+                        processing_run.processed_count += 1
+                        processing_run.success_count += 1
+                        processing_run.last_heartbeat_at = timezone.now()
+                        processing_run.save(
+                            update_fields=["processed_count", "success_count", "last_heartbeat_at"]
+                        )
+                        _sync_stage_progress(processing_stage, processing_run)
+                    continue
+            if not scoped_reprocess and workflow.status in [
             m.CandidateWorkflow.STATUS_PASSED,
             m.CandidateWorkflow.STATUS_ARCHIVED,
-        ]:
-            if processing_run:
-                processing_run.processed_count += 1
-                processing_run.success_count += 1
-                processing_run.save(update_fields=["processed_count", "success_count"])
-            continue
-        if scoped_reprocess:
-            _reopen_workflow(workflow, mode)
-        cancelled += _cancel_unfeedbacked_attempts(
-            workflow,
-            m.AssignmentAttempt.CANCEL_RERUN,
-            sources=[
-                m.AssignmentAttempt.SOURCE_AI,
-                m.AssignmentAttempt.SOURCE_RULE,
-            ]
-            if scoped_reprocess
-            else None,
-            source=None
-            if scoped_reprocess
-            else (
-                m.AssignmentAttempt.SOURCE_AI
-                if mode == "ai"
-                else m.AssignmentAttempt.SOURCE_RULE
-            ),
-        )
-        workflow.current_rank = None
-        workflow.current_resume = None
-        workflow.dispatch_strategy = mode
-        _clear_block(workflow)
-        workflow.save(
-            update_fields=[
-                "current_rank",
-                "current_resume",
-                "dispatch_strategy",
-                "block_reason",
-                "block_detail",
-                "updated_at",
-            ]
-        )
-        if _create_next_auto_attempt(
-            workflow, rules, mode=mode, processing_run=processing_run
-        ):
-            created += 1
-
-        if processing_run:
-            has_failure = m.AgentDispatchDecision.objects.filter(
-                processing_run=processing_run,
-                workflow=workflow,
-            ).exclude(error_code="").exists()
-            processing_run.processed_count += 1
-            if has_failure:
-                processing_run.failed_count += 1
-            else:
-                processing_run.success_count += 1
-            latest_decision = m.AgentDispatchDecision.objects.filter(
-                processing_run=processing_run, workflow=workflow
-            ).order_by("-created_at", "-id").first()
-            if latest_decision:
-                if latest_decision.recommendation == m.AgentDispatchDecision.RECOMMEND_REVIEW:
-                    processing_run.review_count += 1
-                elif latest_decision.recommendation == m.AgentDispatchDecision.RECOMMEND_DISPATCH:
-                    processing_run.dispatch_count += 1
-                elif latest_decision.recommendation == m.AgentDispatchDecision.RECOMMEND_ARCHIVE:
-                    processing_run.archive_count += 1
-            processing_run.save(
+            ]:
+                if processing_run:
+                    processing_run.processed_count += 1
+                    processing_run.success_count += 1
+                    processing_run.last_heartbeat_at = timezone.now()
+                    processing_run.save(update_fields=["processed_count", "success_count", "last_heartbeat_at"])
+                    _sync_stage_progress(processing_stage, processing_run)
+                if scope_item:
+                    scope_item.status = "success"
+                    scope_item.skip_reason = ""
+                    scope_item.save(update_fields=["status", "skip_reason"])
+                continue
+            if scoped_reprocess:
+                _reopen_workflow(workflow, mode)
+            cancelled += _cancel_unfeedbacked_attempts(
+                workflow,
+                m.AssignmentAttempt.CANCEL_RERUN,
+                sources=[
+                    m.AssignmentAttempt.SOURCE_AI,
+                    m.AssignmentAttempt.SOURCE_RULE,
+                ]
+                if scoped_reprocess
+                else None,
+                source=None
+                if scoped_reprocess
+                else (
+                    m.AssignmentAttempt.SOURCE_AI
+                    if mode == "ai"
+                    else m.AssignmentAttempt.SOURCE_RULE
+                ),
+            )
+            workflow.current_rank = None
+            workflow.current_resume = None
+            workflow.dispatch_strategy = mode
+            _clear_block(workflow)
+            workflow.save(
                 update_fields=[
-                    "processed_count", "success_count", "failed_count",
-                    "review_count", "dispatch_count", "archive_count",
+                    "current_rank",
+                    "current_resume",
+                    "dispatch_strategy",
+                    "block_reason",
+                    "block_detail",
+                    "updated_at",
                 ]
             )
+            if _create_next_auto_attempt(
+                workflow, rules, mode=mode, processing_run=processing_run
+            ):
+                created += 1
+
+            if processing_run:
+                has_failure = m.AgentDispatchDecision.objects.filter(
+                    processing_run=processing_run,
+                    workflow=workflow,
+                ).exclude(error_code="").exists()
+                processing_run.processed_count += 1
+                if has_failure:
+                    processing_run.failed_count += 1
+                else:
+                    processing_run.success_count += 1
+                latest_decision = m.AgentDispatchDecision.objects.filter(
+                    processing_run=processing_run, workflow=workflow
+                ).order_by("-created_at", "-id").first()
+                if latest_decision:
+                    if latest_decision.recommendation == m.AgentDispatchDecision.RECOMMEND_REVIEW:
+                        processing_run.review_count += 1
+                    elif latest_decision.recommendation == m.AgentDispatchDecision.RECOMMEND_DISPATCH:
+                        processing_run.dispatch_count += 1
+                    elif latest_decision.recommendation == m.AgentDispatchDecision.RECOMMEND_ARCHIVE:
+                        processing_run.archive_count += 1
+                processing_run.last_heartbeat_at = timezone.now()
+                processing_run.save(
+                    update_fields=[
+                        "processed_count", "success_count", "failed_count",
+                        "review_count", "dispatch_count", "archive_count", "last_heartbeat_at",
+                    ]
+                )
+                _sync_stage_progress(processing_stage, processing_run)
+
+            if scope_item:
+                scope_item.status = "success"
+                scope_item.skip_reason = ""
+                scope_item.save(update_fields=["status", "skip_reason"])
 
     return (
         f"已生成 {created} 条候选人分配尝试，取消 {cancelled} 条未反馈自动尝试，"

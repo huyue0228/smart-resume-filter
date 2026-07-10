@@ -150,9 +150,19 @@ def apply_candidate_filters(qs, params):
         qs = qs.filter(
             highest_degree_school__icontains=_value(params, "highest_degree_school")
         )
-    if _value(params, "highest_major"):
+    highest_major_values = _list_value(params, "highest_major_in")
+    if highest_major_values:
+        qs = qs.filter(highest_major__in=highest_major_values)
+    elif _value(params, "highest_major"):
         qs = qs.filter(highest_major__icontains=_value(params, "highest_major"))
-    if _value(params, "current_rank"):
+    current_rank_values = _list_value(params, "current_rank_in")
+    if current_rank_values:
+        qs = _filter_by_candidate_summary_values(
+            qs,
+            current_rank_values,
+            lambda candidate: candidate_summary.current_rank(candidate),
+        )
+    elif _value(params, "current_rank"):
         rank = _value(params, "current_rank")
         qs = _filter_by_candidate_summary(
             qs,
@@ -166,35 +176,68 @@ def apply_candidate_filters(qs, params):
             lambda candidate: apply_id.lower()
             in candidate_summary.current_apply_id(candidate).lower(),
         )
-    if _value(params, "current_entity"):
+    current_entity_values = _list_value(params, "current_entity_in")
+    if current_entity_values:
+        qs = _filter_by_candidate_summary_values(
+            qs,
+            current_entity_values,
+            lambda candidate: _current_resume_text(candidate, "entity"),
+        )
+    elif _value(params, "current_entity"):
         entity = _value(params, "current_entity")
         qs = _filter_by_candidate_summary(
             qs,
             lambda candidate: entity.lower()
             in _current_resume_text(candidate, "entity").lower(),
         )
-    if _value(params, "current_position_name"):
+    position_name_values = _list_value(params, "current_position_name_in")
+    if position_name_values:
+        qs = _filter_by_candidate_summary_values(
+            qs,
+            position_name_values,
+            lambda candidate: _current_resume_text(candidate, "position_name"),
+        )
+    elif _value(params, "current_position_name"):
         position_name = _value(params, "current_position_name")
         qs = _filter_by_candidate_summary(
             qs,
             lambda candidate: position_name.lower()
             in _current_resume_text(candidate, "position_name").lower(),
         )
-    if _value(params, "current_job_category"):
+    job_category_values = _list_value(params, "current_job_category_in")
+    if job_category_values:
+        qs = _filter_by_candidate_summary_values(
+            qs,
+            job_category_values,
+            lambda candidate: _current_resume_text(candidate, "job_category"),
+        )
+    elif _value(params, "current_job_category"):
         job_category = _value(params, "current_job_category")
         qs = _filter_by_candidate_summary(
             qs,
             lambda candidate: job_category.lower()
             in _current_resume_text(candidate, "job_category").lower(),
         )
-    if _value(params, "job_department_name"):
+    department_name_values = _list_value(params, "job_department_name_in")
+    if department_name_values:
+        qs = _filter_by_candidate_summary_values(
+            qs,
+            department_name_values,
+            candidate_summary.job_department_name,
+        )
+    elif _value(params, "job_department_name"):
         department_name = _value(params, "job_department_name")
         qs = _filter_by_candidate_summary(
             qs,
             lambda candidate: department_name.lower()
             in candidate_summary.job_department_name(candidate).lower(),
         )
-    if _value(params, "school_tag"):
+    school_tag_values = _list_value(params, "school_tag_in")
+    if school_tag_values:
+        qs = _filter_by_candidate_summary_values(
+            qs, school_tag_values, candidate_school_tag
+        )
+    elif _value(params, "school_tag"):
         school_tag = _value(params, "school_tag")
         qs = qs.filter(
             Q(highest_degree_tag__name__icontains=school_tag)
@@ -239,6 +282,39 @@ def apply_candidate_filters(qs, params):
     return filter_queryset_by_system_status(qs, system_statuses).distinct()
 
 
+def candidate_filter_options(qs):
+    """汇总简历库主表当前展示字段的可选值，供前端下拉筛选复用。"""
+    values = {
+        "highest_major": set(),
+        "current_rank": set(),
+        "current_entity": set(),
+        "current_position_name": set(),
+        "job_department_name": set(),
+        "current_job_category": set(),
+        "school_tag": set(),
+    }
+    for candidate in qs:
+        resume = candidate_summary.current_resume(candidate)
+        _add_option(values["highest_major"], candidate.highest_major)
+        _add_option(values["current_rank"], candidate_summary.current_rank(candidate))
+        _add_option(values["current_entity"], getattr(resume, "entity", ""))
+        _add_option(
+            values["current_position_name"], getattr(resume, "position_name", "")
+        )
+        _add_option(values["job_department_name"], candidate_summary.job_department_name(candidate))
+        _add_option(values["current_job_category"], getattr(resume, "job_category", ""))
+        _add_option(values["school_tag"], candidate_school_tag(candidate))
+
+    return {
+        **{
+            key: sorted(items, key=str.casefold)
+            for key, items in values.items()
+            if key != "current_rank"
+        },
+        "current_rank": sorted(values["current_rank"], key=lambda value: int(value)),
+    }
+
+
 def _filter_by_candidate_summary(qs, predicate):
     candidates = (
         qs.select_related(
@@ -263,9 +339,34 @@ def _filter_by_candidate_summary(qs, predicate):
     return qs.filter(id__in=ids)
 
 
+def _filter_by_candidate_summary_values(qs, values, accessor):
+    normalized_values = {str(value).strip().casefold() for value in values if str(value).strip()}
+    return _filter_by_candidate_summary(
+        qs,
+        lambda candidate: str(accessor(candidate) or "").strip().casefold()
+        in normalized_values,
+    )
+
+
 def _current_resume_text(candidate, attr):
     resume = candidate_summary.current_resume(candidate)
     return str(getattr(resume, attr, "") or "") if resume else ""
+
+
+def candidate_school_tag(candidate):
+    return (
+        getattr(candidate.highest_degree_tag, "name", "")
+        or getattr(candidate.first_degree_tag, "name", "")
+        or candidate.highest_degree_platform
+        or candidate.first_degree_platform
+        or ""
+    )
+
+
+def _add_option(values, value):
+    text = str(value or "").strip()
+    if text:
+        values.add(text)
 
 
 def _workflow(candidate):

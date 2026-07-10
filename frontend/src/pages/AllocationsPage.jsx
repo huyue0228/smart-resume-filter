@@ -34,6 +34,7 @@ import { useRole } from '../contexts/RoleContext'
 import { useMode } from '../contexts/ModeContext'
 import { useProcessRunner } from '../components/useProcessRunner'
 import ResumePreview from '../components/ResumePreview'
+import { AgentDecisionsTable } from './AgentDecisionsPage'
 import { downloadBlobFromResponse } from '../utils/download'
 
 const REPROCESS_STEPS = [
@@ -60,12 +61,13 @@ export default function AllocationsPage() {
   const actionRef = useRef()
   const { hasPermission, isContact, isSecondaryContact, isTertiaryContact } = useRole()
   const { mode, setMode } = useMode()
-  const { run, modal } = useProcessRunner()
+  const { run } = useProcessRunner()
   const [dispatchingId, setDispatchingId] = useState(null)
   const [bulkDispatching, setBulkDispatching] = useState(false)
   const [selectedRowKeys, setSelectedRowKeys] = useState([])
   const [exporting, setExporting] = useState(false)
   const [lastQuery, setLastQuery] = useState({})
+  const [allocationView, setAllocationView] = useState('attempts')
   const [detailRecord, setDetailRecord] = useState(null)
   const [assignModal, setAssignModal] = useState({
     open: false,
@@ -104,8 +106,7 @@ export default function AllocationsPage() {
           next,
           `正在按${next === 'ai' ? 'AI' : '规则'}模式重算`,
         )
-        if (r.success) message.success('已按新模式重新分配')
-        actionRef.current?.reload()
+        if (r.success) message.success('已提交重新分配任务，可继续操作并在任务中心查看进度')
       },
     })
   }
@@ -328,6 +329,7 @@ export default function AllocationsPage() {
         rejected: STATUS_ENUM.rejected,
       }
     : STATUS_ENUM
+  const canViewAgentDecisions = hasPermission('attempt.view_all')
 
   const columns = [
     { title: '候选人', dataIndex: 'candidate_name', width: 120, fixed: 'left' },
@@ -486,6 +488,20 @@ export default function AllocationsPage() {
             ]
       }
     >
+      {canViewAgentDecisions && (
+        <Segmented
+          value={allocationView}
+          onChange={setAllocationView}
+          options={[
+            { label: '规则分配', value: 'attempts' },
+            { label: 'AI分配', value: 'agent-decisions' },
+          ]}
+          style={{ marginBottom: 16 }}
+        />
+      )}
+      {allocationView === 'agent-decisions' ? (
+        <AgentDecisionsTable />
+      ) : (
       <ProTable
         actionRef={actionRef}
         rowKey="id"
@@ -571,6 +587,7 @@ export default function AllocationsPage() {
           }
         }}
       />
+      )}
       <Drawer
         title={
           detailRecord ? `${detailRecord.candidate_name || '-'} 的分配详情` : '分配详情'
@@ -771,7 +788,6 @@ export default function AllocationsPage() {
           />
         </Space>
       </Modal>
-      {modal}
     </PageContainer>
   )
 }

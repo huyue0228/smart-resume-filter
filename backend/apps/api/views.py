@@ -248,6 +248,9 @@ class ImportView(APIView):
                 {"detail": "未上传任何文件"}, status=status.HTTP_400_BAD_REQUEST
             )
         mode = request.data.get("mode", "incremental")
+        processing_mode = request.data.get("processing_mode", "rule")
+        if processing_mode not in {"rule", "ai"}:
+            return Response({"detail": "未知分配模式"}, status=status.HTTP_400_BAD_REQUEST)
         # 含简历数据的上传：先存撤销快照（上传前状态），再导入
         takes_resume = bool(files.get("resume_list") or files.get("resume_package"))
         if takes_resume:
@@ -258,12 +261,34 @@ class ImportView(APIView):
             return Response(
                 {"detail": f"导入失败: {exc}"}, status=status.HTTP_400_BAD_REQUEST
             )
+        candidate_ids = counts.pop("_candidate_ids", [])
+        processing_run = None
+        if takes_resume and candidate_ids:
+            processing_run = runner.create_run(
+                "resume_process",
+                mode=processing_mode,
+                scope={"candidate_ids": candidate_ids, "source": "resume_import"},
+                created_by=request.user,
+            )
+            # import_files 的原子事务已结束；生产环境立即入队，本地 eager 仍保留开发便利。
+            execute_run_task.delay(processing_run.id)
+            processing_run.refresh_from_db()
         return Response(
             {
                 "detail": "导入完成",
                 "counts": counts,
                 "undo_available": takes_resume,
-            }
+                "processing_run": (
+                    serializers.ProcessingRunSerializer(processing_run).data
+                    if processing_run
+                    else None
+                ),
+            },
+            status=(
+                status.HTTP_202_ACCEPTED
+                if processing_run and processing_run.status in ["pending", "running"]
+                else status.HTTP_200_OK
+            ),
         )
 
 
@@ -362,10 +387,11 @@ class CandidateViewSet(PermissionedModelViewSet):
         "partial_update": "resume.import",
         "destroy": "resume.import",
         "export_resumes": "resume.view",
+        "filter_options": "resume.view",
     }
 
-    def get_queryset(self):
-        qs = (
+    def _base_queryset(self):
+        return (
             m.Candidate.objects.prefetch_related(
                 "resumes",
                 "resumes__job__department__parent",
@@ -376,6 +402,8 @@ class CandidateViewSet(PermissionedModelViewSet):
                 "workflow__attempts__sub_department",
             )
             .select_related(
+                "first_degree_tag",
+                "highest_degree_tag",
                 "workflow__current_resume",
                 "workflow__current_resume__job",
                 "workflow__current_resume__job__department",
@@ -383,7 +411,16 @@ class CandidateViewSet(PermissionedModelViewSet):
             )
             .order_by("-updated_at")
         )
-        return system_status.apply_candidate_filters(qs, self.request.query_params)
+
+    def get_queryset(self):
+        return system_status.apply_candidate_filters(
+            self._base_queryset(), self.request.query_params
+        )
+
+    @action(detail=False, methods=["get"], url_path="filter-options")
+    def filter_options(self, request):
+        """返回简历库表头选择器的当前可选值。"""
+        return Response(system_status.candidate_filter_options(self._base_queryset()))
 
     @action(detail=False, methods=["get"], url_path="export")
     def export_resumes(self, request):
@@ -936,9 +973,14 @@ class AgentDispatchDecisionViewSet(PermissionedReadOnlyModelViewSet):
 
 
 class ProcessingRunViewSet(PermissionedReadOnlyModelViewSet):
-    queryset = m.ProcessingRun.objects.all()
     serializer_class = serializers.ProcessingRunSerializer
     permission_code = "pipeline.view"
+
+    def get_queryset(self):
+        qs = m.ProcessingRun.objects.select_related("created_by", "undone_by").prefetch_related("stages")
+        if self.request.query_params.get("active") == "true":
+            qs = qs.filter(status__in=["pending", "running", "waiting_conflict"])
+        return qs
 
 
 class PipelineRunView(APIView):
@@ -952,7 +994,7 @@ class PipelineRunView(APIView):
         mode = request.data.get("mode", "rule")
         scope = request.data.get("scope") or {}
         try:
-            run = runner.create_run(step, mode=mode, scope=scope)
+            run = runner.create_run(step, mode=mode, scope=scope, created_by=request.user)
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         task = execute_run_task.delay(run.id)
