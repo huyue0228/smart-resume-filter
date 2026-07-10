@@ -15,13 +15,26 @@ import {
   SafetyCertificateOutlined,
 } from '@ant-design/icons'
 import { useRole, ROLES } from '../contexts/RoleContext'
+import ProcessingTaskCenter from '../components/ProcessingTaskCenter'
 
-// 简历分配分组（接口人唯一可见）
+const ROOT_MENU_KEYS = ['/data', '/system']
+
+function pathMatchesGroup(pathname, route) {
+  if (!route.routes) return false
+  return route.routes.some((child) => child.path === pathname)
+}
+
+function defaultOpenKeys(pathname) {
+  return allRoute.routes
+    .filter((route) => ROOT_MENU_KEYS.includes(route.path) && pathMatchesGroup(pathname, route))
+    .map((route) => route.path)
+}
+
+// 简历分配直接进入分配尝试操作台，避免只有一个子页时多一层点击。
 const assignGroup = {
-  path: '/assign',
+  path: '/allocations',
   name: '简历分配',
   icon: <DeploymentUnitOutlined />,
-  routes: [{ path: '/allocations', name: '分配结果', icon: <DeploymentUnitOutlined /> }],
 }
 
 const allRoute = {
@@ -86,6 +99,7 @@ export default function BasicLayout() {
   const location = useLocation()
   const { role, roles, user, logout, hasPermission, isContact } = useRole()
   const [pathname, setPathname] = useState(location.pathname)
+  const [openKeys, setOpenKeys] = useState(() => defaultOpenKeys(location.pathname))
 
   const handleLogout = async () => {
     await logout()
@@ -107,6 +121,10 @@ export default function BasicLayout() {
       route={route}
       location={{ pathname }}
       onPageChange={(loc) => setPathname(loc?.pathname || location.pathname)}
+      menuProps={{
+        openKeys,
+        onOpenChange: setOpenKeys,
+      }}
       menuItemRender={(item, dom) => (
         <div
           onClick={() => {
@@ -117,6 +135,7 @@ export default function BasicLayout() {
           {dom}
         </div>
       )}
+      actionsRender={() => (hasPermission('pipeline.view') ? [<ProcessingTaskCenter key="processing-tasks" />] : [])}
       avatarProps={{
         icon: <UserOutlined />,
         title: (

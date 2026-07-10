@@ -1,10 +1,15 @@
 import io
+import mimetypes
 import os
 import zipfile
+from urllib.parse import quote
 
 from django.conf import settings
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import Group
+from django.db import transaction
+from django.db.models import Count
+from django.db.models.deletion import ProtectedError
 from django.http import HttpResponse
 from django.db.models import Q
 from rest_framework.authtoken.models import Token
@@ -23,10 +28,15 @@ from apps.accounts.permissions import (
     user_permission_codes,
 )
 from apps.core import models as m
+from apps.core import system_status
 from apps.ingestion import snapshot
-from apps.ingestion.sources import RESUME_SUBDIR, import_files
+from apps.ingestion.sources import (
+    RESUME_SUBDIR,
+    import_files,
+)
 from apps.pipeline.ai_config import PUBLIC_AI_CONFIG_REGISTRY
-from apps.pipeline import runner
+from apps.pipeline import ai_config, runner
+from apps.pipeline.tasks import execute_run_task
 from apps.pipeline.services import allocate as allocate_service
 
 from . import serializers
@@ -47,6 +57,140 @@ CONFIG_REGISTRY = {
         "default": False,
     },
 }
+
+
+def bool_query_value(value):
+    if value in ["true", "false"]:
+        return value == "true"
+    return None
+
+
+def _clear_user_references(users):
+    user_ids = [user.id for user in users if user and user.id]
+    if not user_ids:
+        return
+    m.AssignmentAttempt.objects.filter(created_by_id__in=user_ids).update(
+        created_by=None
+    )
+    m.AssignmentHandoff.objects.filter(created_by_id__in=user_ids).update(
+        created_by=None
+    )
+
+
+def _delete_users(users):
+    users = [user for user in users if user and user.id]
+    if not users:
+        return
+    _clear_user_references(users)
+    user_ids = [user.id for user in users]
+    Token.objects.filter(user_id__in=user_ids).delete()
+    for user in users:
+        user.groups.clear()
+        user.user_permissions.clear()
+        user.delete()
+
+
+def _clear_contact_references(contact):
+    if not contact or not contact.id:
+        return
+    m.AssignmentAttempt.objects.filter(contact=contact).update(contact=None)
+    m.AssignmentAttempt.objects.filter(sub_contact=contact).update(sub_contact=None)
+    m.AssignmentHandoff.objects.filter(from_contact=contact).update(from_contact=None)
+    m.AssignmentHandoff.objects.filter(to_contact=contact).update(to_contact=None)
+    m.AgentDispatchDecision.objects.filter(recommended_contact=contact).update(
+        recommended_contact=None
+    )
+
+
+def delete_contact_and_bound_users(contact):
+    with transaction.atomic():
+        locked_contact = m.Contact.objects.select_for_update().get(pk=contact.pk)
+        users = list(User.objects.select_for_update().filter(contact=locked_contact))
+        _clear_contact_references(locked_contact)
+        User.objects.filter(contact=locked_contact).update(contact=None)
+        _delete_users(users)
+        locked_contact.delete()
+
+
+def delete_user_and_bound_contact(user):
+    with transaction.atomic():
+        locked_user = User.objects.select_for_update().get(pk=user.pk)
+        contact = locked_user.contact
+        if contact:
+            delete_contact_and_bound_users(contact)
+            return
+        _delete_users([locked_user])
+
+
+def _resume_file_info(resume):
+    fname = os.path.basename(resume.resume_file or "")
+    path = os.path.join(settings.MEDIA_ROOT, RESUME_SUBDIR, fname) if fname else ""
+    if path and os.path.exists(path):
+        return fname, path
+    return "", ""
+
+
+def _attachment_response(path, filename):
+    content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    with open(path, "rb") as file_obj:
+        response = HttpResponse(file_obj.read(), content_type=content_type)
+    response["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(filename)}"
+    response["X-Resume-Filename"] = quote(filename)
+    return response
+
+
+def resume_export_response(resumes):
+    available, missing = [], []
+    for resume in resumes:
+        fname, path = _resume_file_info(resume)
+        if path:
+            available.append((resume, fname, path))
+        else:
+            missing.append(f"{resume.candidate.name}（{resume.apply_id}）")
+
+    if len(available) == 1 and not missing:
+        _, fname, path = available[0]
+        response = _attachment_response(path, fname)
+        response["X-Export-Count"] = "1"
+        response["X-Export-Missing"] = "0"
+        return response
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for _, fname, path in available:
+            zf.write(path, arcname=fname)
+        if missing:
+            zf.writestr(
+                "缺失简历文件清单.txt",
+                "以下候选人暂无简历文件（未上传简历包或未匹配）：\n"
+                + "\n".join(missing),
+            )
+
+    buf.seek(0)
+    resp = HttpResponse(buf.getvalue(), content_type="application/zip")
+    resp["Content-Disposition"] = 'attachment; filename="resumes_export.zip"'
+    resp["X-Export-Count"] = str(len(available))
+    resp["X-Export-Missing"] = str(len(missing))
+    return resp
+
+
+def resume_zip_response(resumes):
+    return resume_export_response(resumes)
+
+
+def resume_preview_response(resume):
+    if not resume.resume_file:
+        return Response({"detail": "该投递暂无简历文件"}, status=status.HTTP_404_NOT_FOUND)
+    fname = os.path.basename(resume.resume_file)
+    path = os.path.join(settings.MEDIA_ROOT, RESUME_SUBDIR, fname)
+    if not os.path.exists(path):
+        return Response({"detail": "简历文件不存在"}, status=status.HTTP_404_NOT_FOUND)
+    content_type = mimetypes.guess_type(fname)[0] or "application/octet-stream"
+    with open(path, "rb") as file_obj:
+        response = HttpResponse(file_obj.read(), content_type=content_type)
+    response["Content-Disposition"] = f"inline; filename*=UTF-8''{quote(fname)}"
+    response["X-Resume-Filename"] = quote(fname)
+    return response
 
 
 class PermissionedModelViewSet(viewsets.ModelViewSet):
@@ -104,6 +248,9 @@ class ImportView(APIView):
                 {"detail": "未上传任何文件"}, status=status.HTTP_400_BAD_REQUEST
             )
         mode = request.data.get("mode", "incremental")
+        processing_mode = request.data.get("processing_mode", "rule")
+        if processing_mode not in {"rule", "ai"}:
+            return Response({"detail": "未知分配模式"}, status=status.HTTP_400_BAD_REQUEST)
         # 含简历数据的上传：先存撤销快照（上传前状态），再导入
         takes_resume = bool(files.get("resume_list") or files.get("resume_package"))
         if takes_resume:
@@ -114,12 +261,34 @@ class ImportView(APIView):
             return Response(
                 {"detail": f"导入失败: {exc}"}, status=status.HTTP_400_BAD_REQUEST
             )
+        candidate_ids = counts.pop("_candidate_ids", [])
+        processing_run = None
+        if takes_resume and candidate_ids:
+            processing_run = runner.create_run(
+                "resume_process",
+                mode=processing_mode,
+                scope={"candidate_ids": candidate_ids, "source": "resume_import"},
+                created_by=request.user,
+            )
+            # import_files 的原子事务已结束；生产环境立即入队，本地 eager 仍保留开发便利。
+            execute_run_task.delay(processing_run.id)
+            processing_run.refresh_from_db()
         return Response(
             {
                 "detail": "导入完成",
                 "counts": counts,
                 "undo_available": takes_resume,
-            }
+                "processing_run": (
+                    serializers.ProcessingRunSerializer(processing_run).data
+                    if processing_run
+                    else None
+                ),
+            },
+            status=(
+                status.HTTP_202_ACCEPTED
+                if processing_run and processing_run.status in ["pending", "running"]
+                else status.HTTP_200_OK
+            ),
         )
 
 
@@ -166,6 +335,11 @@ class ResumeViewSet(PermissionedReadOnlyModelViewSet):
             qs = qs.filter(imported_at__date__lte=p["imported_before"])
         return qs.distinct()
 
+    @action(detail=True, methods=["get"], url_path="preview")
+    def preview(self, request, pk=None):
+        resume = self.get_object()
+        return resume_preview_response(resume)
+
     @action(detail=True, methods=["post"], url_path="manual-assign")
     def manual_assign(self, request, pk=None):
         if not has_permission_code(request.user, "resume.manual_assign"):
@@ -182,11 +356,21 @@ class ResumeViewSet(PermissionedReadOnlyModelViewSet):
                 {"detail": "目标接口人不存在"}, status=status.HTTP_400_BAD_REQUEST
             )
         try:
+            secondary_contact = None
+            secondary_contact_id = request.data.get("secondary_contact_id")
+            if secondary_contact_id:
+                secondary_contact = m.Contact.objects.filter(pk=secondary_contact_id).first()
+                if not secondary_contact:
+                    return Response(
+                        {"detail": "指定二级接口人不存在"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
             attempt = allocate_service.manual_assign(
                 resume,
                 contact,
                 user=request.user,
                 manual_reason=request.data.get("manual_reason", ""),
+                secondary_contact=secondary_contact,
             )
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -202,44 +386,55 @@ class CandidateViewSet(PermissionedModelViewSet):
         "update": "resume.import",
         "partial_update": "resume.import",
         "destroy": "resume.import",
+        "export_resumes": "resume.view",
+        "filter_options": "resume.view",
     }
 
-    def get_queryset(self):
-        qs = (
+    def _base_queryset(self):
+        return (
             m.Candidate.objects.prefetch_related(
                 "resumes",
+                "resumes__job__department__parent",
                 "workflow__attempts__resume",
                 "workflow__attempts__contact",
                 "workflow__attempts__sub_contact",
                 "workflow__attempts__department",
                 "workflow__attempts__sub_department",
             )
-            .select_related("workflow__current_resume")
+            .select_related(
+                "first_degree_tag",
+                "highest_degree_tag",
+                "workflow__current_resume",
+                "workflow__current_resume__job",
+                "workflow__current_resume__job__department",
+                "workflow__current_resume__job__department__parent",
+            )
             .order_by("-updated_at")
         )
-        p = self.request.query_params
-        search = p.get("search")
-        if search:
-            qs = qs.filter(
-                Q(name__icontains=search)
-                | Q(phone__icontains=search)
-                | Q(resumes__apply_id__icontains=search)
-                | Q(resumes__position_name__icontains=search)
-            )
-        status_filter = p.get("status")
-        if status_filter:
-            if status_filter == m.CandidateWorkflow.STATUS_PENDING:
-                qs = qs.filter(
-                    Q(workflow__status=m.CandidateWorkflow.STATUS_PENDING)
-                    | Q(workflow__isnull=True)
-                )
-            else:
-                qs = qs.filter(workflow__status=status_filter)
-        if p.get("imported_after"):
-            qs = qs.filter(imported_at__date__gte=p["imported_after"])
-        if p.get("imported_before"):
-            qs = qs.filter(imported_at__date__lte=p["imported_before"])
-        return qs.distinct()
+
+    def get_queryset(self):
+        return system_status.apply_candidate_filters(
+            self._base_queryset(), self.request.query_params
+        )
+
+    @action(detail=False, methods=["get"], url_path="filter-options")
+    def filter_options(self, request):
+        """返回简历库表头选择器的当前可选值。"""
+        return Response(system_status.candidate_filter_options(self._base_queryset()))
+
+    @action(detail=False, methods=["get"], url_path="export")
+    def export_resumes(self, request):
+        ids = request.query_params.get("ids")
+        qs = self.get_queryset()
+        if ids:
+            id_list = [int(x) for x in ids.split(",") if x.strip().isdigit()]
+            qs = qs.filter(id__in=id_list)
+        resumes = (
+            m.Resume.objects.select_related("candidate")
+            .filter(candidate__in=qs)
+            .order_by("candidate_id", "volunteer_rank", "id")
+        )
+        return resume_zip_response(resumes)
 
 
 class JobViewSet(PermissionedModelViewSet):
@@ -256,11 +451,39 @@ class JobViewSet(PermissionedModelViewSet):
     def get_queryset(self):
         qs = m.Job.objects.select_related("department").all().order_by("id")
         p = self.request.query_params
+        is_active = bool_query_value(p.get("is_active"))
+        if is_active is None:
+            qs = qs.filter(is_active=True)
+        else:
+            qs = qs.filter(is_active=is_active)
+        if p.get("entity"):
+            qs = qs.filter(entity__icontains=p["entity"])
         if p.get("public_name"):
             qs = qs.filter(public_name__icontains=p["public_name"])
+        if p.get("position_name"):
+            qs = qs.filter(position_name__icontains=p["position_name"])
         if p.get("category"):
             qs = qs.filter(category__icontains=p["category"])
+        if p.get("job_family"):
+            qs = qs.filter(job_family__icontains=p["job_family"])
+        if p.get("department_name"):
+            qs = qs.filter(department__name__icontains=p["department_name"])
+        if p.get("location"):
+            qs = qs.filter(location__icontains=p["location"])
+        if p.get("education"):
+            qs = qs.filter(education__icontains=p["education"])
+        if p.get("headcount"):
+            qs = qs.filter(headcount=p["headcount"])
+        is_public = bool_query_value(p.get("is_public"))
+        if is_public is not None:
+            qs = qs.filter(is_public=is_public)
         return qs
+
+    def destroy(self, request, *args, **kwargs):
+        job = self.get_object()
+        job.is_active = False
+        job.save(update_fields=["is_active"])
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class SchoolViewSet(PermissionedModelViewSet):
@@ -275,12 +498,92 @@ class SchoolViewSet(PermissionedModelViewSet):
     }
 
     def get_queryset(self):
-        qs = m.School.objects.all().order_by("name")
+        qs = m.School.objects.select_related("school_tag").order_by("name")
         p = self.request.query_params
         if p.get("name"):
             qs = qs.filter(name__icontains=p["name"])
         if p.get("platform"):
-            qs = qs.filter(platform__icontains=p["platform"])
+            qs = qs.filter(
+                Q(platform__icontains=p["platform"])
+                | Q(school_tag__name__icontains=p["platform"])
+                | Q(school_tag__code__icontains=p["platform"])
+            )
+        if p.get("region"):
+            qs = qs.filter(region=p["region"])
+        if p.get("province"):
+            qs = qs.filter(province__icontains=p["province"])
+        return qs
+
+
+class SchoolTagViewSet(PermissionedModelViewSet):
+    serializer_class = serializers.SchoolTagSerializer
+    permission_code = "settings.manage_config"
+
+    def get_queryset(self):
+        qs = m.SchoolTag.objects.all().order_by("code", "id")
+        p = self.request.query_params
+        if p.get("code"):
+            qs = qs.filter(code__icontains=p["code"])
+        if p.get("name"):
+            qs = qs.filter(name__icontains=p["name"])
+        is_active = bool_query_value(p.get("is_active"))
+        if is_active is not None:
+            qs = qs.filter(is_active=is_active)
+        return qs
+
+
+class MajorCategoryViewSet(PermissionedModelViewSet):
+    serializer_class = serializers.MajorCategorySerializer
+    permission_code = "settings.manage_config"
+
+    def get_queryset(self):
+        qs = m.MajorCategory.objects.annotate(alias_count=Count("aliases")).order_by(
+            "sort_order", "code", "id"
+        )
+        p = self.request.query_params
+        if p.get("code"):
+            qs = qs.filter(code__icontains=p["code"])
+        if p.get("name"):
+            qs = qs.filter(name__icontains=p["name"])
+        is_active = bool_query_value(p.get("is_active"))
+        if is_active is not None:
+            qs = qs.filter(is_active=is_active)
+        return qs
+
+    def destroy(self, request, *args, **kwargs):
+        category = self.get_object()
+        try:
+            self.perform_destroy(category)
+        except ProtectedError:
+            return Response(
+                {"detail": "该专业大类仍有关联别名，需先删除或迁移别名后再删除。"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class MajorAliasViewSet(PermissionedModelViewSet):
+    serializer_class = serializers.MajorAliasSerializer
+    permission_code = "settings.manage_config"
+
+    def get_queryset(self):
+        qs = m.MajorAlias.objects.select_related("category").order_by(
+            "category__sort_order", "category__code", "name", "id"
+        )
+        p = self.request.query_params
+        if p.get("category"):
+            qs = qs.filter(category_id=p["category"])
+        if p.get("name"):
+            qs = qs.filter(name__icontains=p["name"])
+        if p.get("normalized_name"):
+            qs = qs.filter(normalized_name__icontains=p["normalized_name"])
+        if p.get("source"):
+            qs = qs.filter(source=p["source"])
+        if p.get("match_type"):
+            qs = qs.filter(match_type=p["match_type"])
+        is_active = bool_query_value(p.get("is_active"))
+        if is_active is not None:
+            qs = qs.filter(is_active=is_active)
         return qs
 
 
@@ -317,21 +620,36 @@ class ContactViewSet(PermissionedModelViewSet):
     def get_queryset(self):
         qs = m.Contact.objects.select_related("department").order_by("id")
         p = self.request.query_params
+        is_active = bool_query_value(p.get("is_active"))
+        if is_active is None:
+            qs = qs.filter(is_active=True)
+        else:
+            qs = qs.filter(is_active=is_active)
         if p.get("name"):
             qs = qs.filter(name__icontains=p["name"])
         if p.get("employee_no"):
             qs = qs.filter(employee_no__icontains=p["employee_no"])
         if p.get("department_name"):
             qs = qs.filter(department__name__icontains=p["department_name"])
+        if p.get("department_level"):
+            qs = qs.filter(department__level=p["department_level"])
         if p.get("contact_level"):
             qs = qs.filter(contact_level=p["contact_level"])
         if p.get("department"):
             qs = qs.filter(department_id=p["department"])
         if p.get("parent_department"):
             qs = qs.filter(department__parent_id=p["parent_department"])
-        if p.get("is_active") in ["true", "false"]:
-            qs = qs.filter(is_active=p["is_active"] == "true")
+        can_delegate = bool_query_value(p.get("can_delegate"))
+        if can_delegate is not None:
+            qs = qs.filter(can_delegate=can_delegate)
+        if p.get("entity"):
+            qs = qs.filter(department__entity__icontains=p["entity"])
         return qs
+
+    def destroy(self, request, *args, **kwargs):
+        contact = self.get_object()
+        delete_contact_and_bound_users(contact)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class SchoolTagRuleViewSet(PermissionedModelViewSet):
@@ -339,7 +657,9 @@ class SchoolTagRuleViewSet(PermissionedModelViewSet):
     permission_code = "settings.manage_config"
 
     def get_queryset(self):
-        qs = m.SchoolTagRule.objects.all().order_by("priority", "id")
+        qs = m.SchoolTagRule.objects.prefetch_related(
+            "tag_links__school_tag"
+        ).order_by("priority", "id")
         p = self.request.query_params
         if p.get("is_active") in ["true", "false"]:
             qs = qs.filter(is_active=p["is_active"] == "true")
@@ -352,14 +672,22 @@ class CandidateWorkflowViewSet(PermissionedReadOnlyModelViewSet):
 
     def get_queryset(self):
         qs = m.CandidateWorkflow.objects.select_related(
-            "candidate", "current_resume", "passed_attempt"
+            "candidate", "current_resume", "passed_attempt__resume"
         ).order_by("-updated_at")
         p = self.request.query_params
         if p.get("status"):
             qs = qs.filter(status=p["status"])
         if p.get("search"):
-            qs = qs.filter(candidate__name__icontains=p["search"]) | qs.filter(
-                candidate__phone__icontains=p["search"]
+            qs = qs.filter(
+                Q(candidate__name__icontains=p["search"])
+                | Q(candidate__phone__icontains=p["search"])
+            )
+        if p.get("current_position_name"):
+            qs = qs.filter(current_resume__position_name__icontains=p["current_position_name"])
+        if p.get("archive_reason"):
+            qs = qs.filter(
+                Q(archive_reason__icontains=p["archive_reason"])
+                | Q(archive_detail__icontains=p["archive_reason"])
             )
         return qs.distinct()
 
@@ -373,8 +701,12 @@ class AssignmentAttemptViewSet(PermissionedReadOnlyModelViewSet):
         "bulk_dispatch": "attempt.dispatch",
         "assign_sub_contact": "attempt.assign_sub_contact",
         "confirm_review": "attempt.dispatch",
+        "cancel_attempt": "attempt.dispatch",
+        "cancel_review": "attempt.dispatch",
+        "transfer_to_manual": "resume.manual_assign",
         "feedback": "attempt.feedback",
         "export_resumes": "attempt.export",
+        "resume_preview": "attempt.export",
     }
 
     def get_queryset(self):
@@ -393,7 +725,15 @@ class AssignmentAttemptViewSet(PermissionedReadOnlyModelViewSet):
         if "attempt.view_all" not in permissions:
             scope = Q(pk__in=[])
             if contact_id and "attempt.view_received" in permissions:
-                scope |= Q(contact_id=contact_id)
+                scope |= Q(
+                    contact_id=contact_id,
+                    status__in=[
+                        m.AssignmentAttempt.STATUS_DISPATCHED_L2,
+                        m.AssignmentAttempt.STATUS_ASSIGNED_L3,
+                        m.AssignmentAttempt.STATUS_PASSED,
+                        m.AssignmentAttempt.STATUS_REJECTED,
+                    ],
+                )
             if contact_id and "attempt.view_assigned" in permissions:
                 scope |= Q(sub_contact_id=contact_id)
             qs = qs.filter(scope)
@@ -496,6 +836,62 @@ class AssignmentAttemptViewSet(PermissionedReadOnlyModelViewSet):
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(serializers.AssignmentAttemptSerializer(attempt).data)
 
+    @action(detail=True, methods=["post"], url_path="cancel")
+    def cancel_attempt(self, request, pk=None):
+        attempt = self.get_object()
+        if attempt.status != m.AssignmentAttempt.STATUS_PENDING_DISPATCH:
+            return Response(
+                {"detail": "仅待下发尝试可以通过该接口取消"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            attempt = allocate_service.cancel_attempt(
+                attempt, request.data.get("reason") or "hr_cancelled"
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(serializers.AssignmentAttemptSerializer(attempt).data)
+
+    @action(detail=True, methods=["post"], url_path="cancel-review")
+    def cancel_review(self, request, pk=None):
+        attempt = self.get_object()
+        if attempt.status != m.AssignmentAttempt.STATUS_PENDING_REVIEW:
+            return Response(
+                {"detail": "仅待复核 AI 尝试可以取消复核"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            attempt = allocate_service.cancel_attempt(
+                attempt, request.data.get("reason") or "hr_cancelled_review"
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(serializers.AssignmentAttemptSerializer(attempt).data)
+
+    @action(detail=True, methods=["post"], url_path="transfer-to-manual")
+    def transfer_to_manual(self, request, pk=None):
+        attempt = self.get_object()
+        contact_id = request.data.get("contact_id")
+        contact = m.Contact.objects.filter(pk=contact_id, is_active=True).first()
+        if not contact:
+            return Response({"detail": "目标接口人不存在或未启用"}, status=status.HTTP_400_BAD_REQUEST)
+        secondary_contact = None
+        if request.data.get("secondary_contact_id"):
+            secondary_contact = m.Contact.objects.filter(
+                pk=request.data["secondary_contact_id"], is_active=True
+            ).first()
+        try:
+            manual_attempt = allocate_service.manual_assign(
+                attempt.resume,
+                contact,
+                user=request.user,
+                manual_reason=request.data.get("manual_reason") or "AI 复核转人工分配",
+                secondary_contact=secondary_contact,
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(serializers.AssignmentAttemptSerializer(manual_attempt).data)
+
     @action(detail=True, methods=["post"], url_path="feedback")
     def feedback(self, request, pk=None):
         attempt = self.get_object()
@@ -520,32 +916,15 @@ class AssignmentAttemptViewSet(PermissionedReadOnlyModelViewSet):
             id_list = [int(x) for x in ids.split(",") if x.strip().isdigit()]
             qs = qs.filter(id__in=id_list)
 
-        resume_dir = os.path.join(settings.MEDIA_ROOT, RESUME_SUBDIR)
-        buf = io.BytesIO()
-        added, missing = 0, []
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for attempt in qs.select_related("resume__candidate"):
-                resume = attempt.resume
-                fname = resume.resume_file
-                path = os.path.join(resume_dir, fname) if fname else ""
-                if path and os.path.exists(path):
-                    zf.write(path, arcname=fname)
-                    added += 1
-                else:
-                    missing.append(f"{resume.candidate.name}（{resume.apply_id}）")
-            if missing:
-                zf.writestr(
-                    "缺失简历文件清单.txt",
-                    "以下候选人暂无简历文件（未上传简历包或未匹配）：\n"
-                    + "\n".join(missing),
-                )
+        resumes = [
+            attempt.resume for attempt in qs.select_related("resume__candidate")
+        ]
+        return resume_zip_response(resumes)
 
-        buf.seek(0)
-        resp = HttpResponse(buf.getvalue(), content_type="application/zip")
-        resp["Content-Disposition"] = 'attachment; filename="resumes_export.zip"'
-        resp["X-Export-Count"] = str(added)
-        resp["X-Export-Missing"] = str(len(missing))
-        return resp
+    @action(detail=True, methods=["get"], url_path="resume-preview")
+    def resume_preview(self, request, pk=None):
+        attempt = self.get_object()
+        return resume_preview_response(attempt.resume)
 
 
 class AgentDispatchDecisionViewSet(PermissionedReadOnlyModelViewSet):
@@ -594,13 +973,18 @@ class AgentDispatchDecisionViewSet(PermissionedReadOnlyModelViewSet):
 
 
 class ProcessingRunViewSet(PermissionedReadOnlyModelViewSet):
-    queryset = m.ProcessingRun.objects.all()
     serializer_class = serializers.ProcessingRunSerializer
     permission_code = "pipeline.view"
 
+    def get_queryset(self):
+        qs = m.ProcessingRun.objects.select_related("created_by", "undone_by").prefetch_related("stages")
+        if self.request.query_params.get("active") == "true":
+            qs = qs.filter(status__in=["pending", "running", "waiting_conflict"])
+        return qs
+
 
 class PipelineRunView(APIView):
-    """触发流水线：单步或一键全流程（demo 同步执行）。"""
+    """创建 ProcessingRun 并交给 Celery；eager 本地模式仍会立即完成。"""
 
     permission_classes = [HasPermissionCode]
     permission_code = "pipeline.run"
@@ -608,7 +992,16 @@ class PipelineRunView(APIView):
     def post(self, request):
         step = request.data.get("step", "all")
         mode = request.data.get("mode", "rule")
-        run = runner.run_step(step, mode=mode)
+        scope = request.data.get("scope") or {}
+        try:
+            run = runner.create_run(step, mode=mode, scope=scope, created_by=request.user)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        task = execute_run_task.delay(run.id)
+        run.refresh_from_db()
+        if not run.celery_task_id:
+            run.celery_task_id = task.id or ""
+            run.save(update_fields=["celery_task_id"])
         return Response(
             {
                 "id": run.id,
@@ -616,7 +1009,15 @@ class PipelineRunView(APIView):
                 "mode": run.mode,
                 "status": run.status,
                 "message": run.message,
-            }
+                "total_count": run.total_count,
+                "processed_count": run.processed_count,
+                "failed_count": run.failed_count,
+            },
+            status=(
+                status.HTTP_202_ACCEPTED
+                if run.status in ["pending", "running"]
+                else status.HTTP_200_OK
+            ),
         )
 
 
@@ -634,6 +1035,11 @@ class UserViewSet(PermissionedModelViewSet):
         if p.get("is_active") in ["true", "false"]:
             qs = qs.filter(is_active=p["is_active"] == "true")
         return qs
+
+    def destroy(self, request, *args, **kwargs):
+        user = self.get_object()
+        delete_user_and_bound_contact(user)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class RoleViewSet(PermissionedModelViewSet):
@@ -681,7 +1087,32 @@ class ConfigViewSet(viewsets.ViewSet):
             data={**self._item_data(pk), "value": request.data.get("value")}
         )
         serializer.is_valid(raise_exception=True)
+        value = serializer.validated_data["value"]
+        meta = CONFIG_REGISTRY[pk]
+        if meta.get("value_type") in ["number", "integer"]:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return Response({"detail": "配置值类型不正确"}, status=status.HTTP_400_BAD_REQUEST)
+            if meta.get("value_type") == "integer" and not isinstance(value, int):
+                return Response({"detail": "配置值必须是整数"}, status=status.HTTP_400_BAD_REQUEST)
+            if (
+                "min" in meta
+                and value < meta["min"]
+                or "max" in meta
+                and value > meta["max"]
+            ):
+                return Response(
+                    {"detail": f"配置值必须在 {meta.get('min')} 到 {meta.get('max')} 之间"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        if pk == "ai_review_threshold":
+            dispatch = ai_config._config_float("ai_dispatch_threshold")
+            if float(value) > dispatch:
+                return Response({"detail": "人工复核阈值不能高于自动下发阈值"}, status=status.HTTP_400_BAD_REQUEST)
+        if pk == "ai_dispatch_threshold":
+            review = ai_config._config_float("ai_review_threshold")
+            if float(value) < review:
+                return Response({"detail": "自动下发阈值不能低于人工复核阈值"}, status=status.HTTP_400_BAD_REQUEST)
         m.Config.objects.update_or_create(
-            key=pk, defaults={"value": serializer.validated_data["value"]}
+            key=pk, defaults={"value": value}
         )
         return Response(self._item_data(pk))

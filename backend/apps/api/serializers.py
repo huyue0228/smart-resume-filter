@@ -9,7 +9,9 @@ from apps.accounts.permissions import (
     user_permission_codes,
     user_role_names,
 )
+from apps.core import candidate_summary
 from apps.core import models as m
+from apps.core import system_status
 
 
 class CurrentUserSerializer(serializers.ModelSerializer):
@@ -74,8 +76,6 @@ class UserSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "username",
-            "first_name",
-            "last_name",
             "email",
             "role",
             "contact",
@@ -196,7 +196,13 @@ class ResumeListSerializer(serializers.ModelSerializer):
 
     def get_school_tag(self, obj):
         c = obj.candidate
-        return c.highest_degree_platform or c.first_degree_platform or ""
+        return (
+            getattr(c.highest_degree_tag, "name", "")
+            or getattr(c.first_degree_tag, "name", "")
+            or c.highest_degree_platform
+            or c.first_degree_platform
+            or ""
+        )
 
 
 class ResumeBriefSerializer(serializers.ModelSerializer):
@@ -221,10 +227,17 @@ class ResumeBriefSerializer(serializers.ModelSerializer):
 
 class CandidateSerializer(serializers.ModelSerializer):
     school_tag = serializers.SerializerMethodField()
+    system_status = serializers.SerializerMethodField()
+    system_status_label = serializers.SerializerMethodField()
     workflow_id = serializers.SerializerMethodField()
     workflow_status = serializers.SerializerMethodField()
     current_resume = serializers.SerializerMethodField()
+    preview_resume = serializers.SerializerMethodField()
     current_rank = serializers.SerializerMethodField()
+    current_apply_id = serializers.SerializerMethodField()
+    job_department_name = serializers.SerializerMethodField()
+    reason_type = serializers.SerializerMethodField()
+    reason_text = serializers.SerializerMethodField()
     archive_reason = serializers.SerializerMethodField()
     archive_detail = serializers.SerializerMethodField()
     resumes = serializers.SerializerMethodField()
@@ -242,13 +255,22 @@ class CandidateSerializer(serializers.ModelSerializer):
             "first_degree_school",
             "highest_degree_school",
             "highest_major",
+            "first_degree_tag",
+            "highest_degree_tag",
             "first_degree_platform",
             "highest_degree_platform",
             "school_tag",
+            "system_status",
+            "system_status_label",
             "workflow_id",
             "workflow_status",
             "current_resume",
+            "preview_resume",
             "current_rank",
+            "current_apply_id",
+            "job_department_name",
+            "reason_type",
+            "reason_text",
             "archive_reason",
             "archive_detail",
             "resumes",
@@ -258,29 +280,25 @@ class CandidateSerializer(serializers.ModelSerializer):
         ]
 
     def _workflow(self, obj):
-        try:
-            return obj.workflow
-        except (m.CandidateWorkflow.DoesNotExist, AttributeError):
-            return None
+        return candidate_summary.workflow_or_none(obj)
 
     def _current_resume(self, obj):
-        workflow = self._workflow(obj)
-        if workflow and workflow.current_resume:
-            return workflow.current_resume
-        resumes = list(obj.resumes.all())
-        if not resumes:
-            return None
-        return sorted(
-            resumes,
-            key=lambda resume: (
-                resume.volunteer_rank if resume.volunteer_rank is not None else 999,
-                resume.apply_date.toordinal() if resume.apply_date else 0,
-                resume.id,
-            ),
-        )[0]
+        return candidate_summary.current_resume(obj)
 
     def get_school_tag(self, obj):
-        return obj.highest_degree_platform or obj.first_degree_platform or ""
+        return (
+            getattr(obj.highest_degree_tag, "name", "")
+            or getattr(obj.first_degree_tag, "name", "")
+            or obj.highest_degree_platform
+            or obj.first_degree_platform
+            or ""
+        )
+
+    def get_system_status(self, obj):
+        return system_status.candidate_system_status(obj)
+
+    def get_system_status_label(self, obj):
+        return system_status.system_status_label(self.get_system_status(obj))
 
     def get_workflow_id(self, obj):
         workflow = self._workflow(obj)
@@ -294,12 +312,24 @@ class CandidateSerializer(serializers.ModelSerializer):
         resume = self._current_resume(obj)
         return ResumeBriefSerializer(resume).data if resume else None
 
+    def get_preview_resume(self, obj):
+        resume = candidate_summary.preview_resume(obj)
+        return ResumeBriefSerializer(resume).data if resume else None
+
     def get_current_rank(self, obj):
-        workflow = self._workflow(obj)
-        if workflow and workflow.current_rank:
-            return workflow.current_rank
-        resume = self._current_resume(obj)
-        return resume.volunteer_rank if resume else None
+        return candidate_summary.current_rank(obj)
+
+    def get_current_apply_id(self, obj):
+        return candidate_summary.current_apply_id(obj)
+
+    def get_job_department_name(self, obj):
+        return candidate_summary.job_department_name(obj)
+
+    def get_reason_type(self, obj):
+        return candidate_summary.reason(obj)[0]
+
+    def get_reason_text(self, obj):
+        return candidate_summary.reason(obj)[1]
 
     def get_archive_reason(self, obj):
         workflow = self._workflow(obj)
@@ -348,6 +378,8 @@ class CandidateSerializer(serializers.ModelSerializer):
                 "feedback_result": attempt.feedback_result,
                 "feedback_note": attempt.feedback_note,
                 "feedback_at": attempt.feedback_at,
+                "match_reason": attempt.match_reason,
+                "manual_reason": attempt.manual_reason,
                 "created_at": attempt.created_at,
             }
             for attempt in attempts
@@ -356,6 +388,12 @@ class CandidateSerializer(serializers.ModelSerializer):
 
 class JobSerializer(serializers.ModelSerializer):
     department_name = serializers.CharField(source="department.name", read_only=True)
+    majors = serializers.SerializerMethodField()
+    major_names = serializers.ListField(
+        child=serializers.CharField(allow_blank=False),
+        write_only=True,
+        required=False,
+    )
 
     class Meta:
         model = m.Job
@@ -372,13 +410,66 @@ class JobSerializer(serializers.ModelSerializer):
             "location",
             "education",
             "headcount",
+            "is_active",
+            "majors",
+            "major_names",
         ]
+
+    def get_majors(self, obj):
+        return list(obj.majors.order_by("id").values_list("major", flat=True))
+
+    def validate_department(self, department):
+        if department and department.level != 2:
+            raise serializers.ValidationError("岗位必须绑定二级部门")
+        return department
+
+    def _clean_major_names(self, values):
+        seen = set()
+        result = []
+        for value in values:
+            text = str(value).strip()
+            if text and text not in seen:
+                seen.add(text)
+                result.append(text)
+        return result
+
+    def _replace_majors(self, job, major_names):
+        m.JobMajor.objects.filter(job=job).delete()
+        m.JobMajor.objects.bulk_create(
+            [m.JobMajor(job=job, major=major) for major in major_names]
+        )
+
+    def create(self, validated_data):
+        major_names = self._clean_major_names(validated_data.pop("major_names", []))
+        job = super().create(validated_data)
+        self._replace_majors(job, major_names)
+        return job
+
+    def update(self, instance, validated_data):
+        has_major_names = "major_names" in validated_data
+        major_names = self._clean_major_names(validated_data.pop("major_names", []))
+        job = super().update(instance, validated_data)
+        if has_major_names:
+            self._replace_majors(job, major_names)
+        return job
 
 
 class SchoolSerializer(serializers.ModelSerializer):
+    school_tag_name = serializers.CharField(
+        source="school_tag.name", read_only=True, default=""
+    )
+
     class Meta:
         model = m.School
-        fields = "__all__"
+        fields = [
+            "id",
+            "name",
+            "platform",
+            "region",
+            "province",
+            "school_tag",
+            "school_tag_name",
+        ]
 
 
 class DepartmentSerializer(serializers.ModelSerializer):
@@ -412,21 +503,285 @@ class ContactSerializer(serializers.ModelSerializer):
         ]
 
 
+class SchoolTagSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = m.SchoolTag
+        fields = ["id", "code", "name", "is_default", "is_active"]
+
+
+def normalize_major_name(value):
+    """专业词表统一规范化口径：忽略大小写和空白。"""
+    return "".join((value or "").lower().split())
+
+
+class MajorCategorySerializer(serializers.ModelSerializer):
+    alias_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = m.MajorCategory
+        fields = [
+            "id",
+            "code",
+            "name",
+            "description",
+            "is_active",
+            "sort_order",
+            "alias_count",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["created_at", "updated_at"]
+
+    def get_alias_count(self, obj):
+        if hasattr(obj, "alias_count"):
+            return obj.alias_count
+        return obj.aliases.count()
+
+
+class MajorAliasSerializer(serializers.ModelSerializer):
+    category_name = serializers.CharField(source="category.name", read_only=True)
+    normalized_name = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = m.MajorAlias
+        fields = [
+            "id",
+            "category",
+            "category_name",
+            "name",
+            "normalized_name",
+            "match_type",
+            "source",
+            "note",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["created_at", "updated_at"]
+
+    def validate_name(self, value):
+        if not value or not str(value).strip():
+            raise serializers.ValidationError("请输入专业名称或关键词")
+        return str(value).strip()
+
+    def validate(self, attrs):
+        category = attrs.get("category") or (
+            self.instance.category if self.instance else None
+        )
+        name = attrs.get("name") or (self.instance.name if self.instance else "")
+        match_type = attrs.get("match_type") or (
+            self.instance.match_type if self.instance else m.MajorAlias.MATCH_CONTAINS
+        )
+        normalized_name = normalize_major_name(name)
+        qs = m.MajorAlias.objects.filter(
+            category=category,
+            normalized_name=normalized_name,
+            match_type=match_type,
+        )
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if category and normalized_name and qs.exists():
+            raise serializers.ValidationError(
+                {"name": "同一专业大类下已存在相同专业名称和匹配方式的别名"}
+            )
+        return attrs
+
+    def create(self, validated_data):
+        validated_data["normalized_name"] = normalize_major_name(
+            validated_data.get("name")
+        )
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        if "name" in validated_data:
+            validated_data["normalized_name"] = normalize_major_name(
+                validated_data.get("name")
+            )
+        return super().update(instance, validated_data)
+
+
 class SchoolTagRuleSerializer(serializers.ModelSerializer):
+    first_degree_tags = serializers.SerializerMethodField()
+    highest_degree_tags = serializers.SerializerMethodField()
+    first_degree_tag_ids = serializers.ListField(
+        child=serializers.IntegerField(), write_only=True, required=False
+    )
+    highest_degree_tag_ids = serializers.ListField(
+        child=serializers.IntegerField(), write_only=True, required=False
+    )
+
     class Meta:
         model = m.SchoolTagRule
-        fields = "__all__"
+        fields = [
+            "id",
+            "name",
+            "first_degree_tags",
+            "highest_degree_tags",
+            "first_degree_tag_ids",
+            "highest_degree_tag_ids",
+            "is_active",
+            "priority",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["created_at", "updated_at"]
+
+    def _tag_payload(self, obj, degree_type):
+        links = sorted(
+            [
+                link
+                for link in obj.tag_links.all()
+                if link.degree_type == degree_type
+            ],
+            key=lambda link: (link.school_tag.code, link.school_tag_id),
+        )
+        return [
+            {
+                "id": link.school_tag_id,
+                "code": link.school_tag.code,
+                "name": link.school_tag.name,
+            }
+            for link in links
+        ]
+
+    def get_first_degree_tags(self, obj):
+        return self._tag_payload(obj, m.SchoolTagRuleTag.DEGREE_FIRST)
+
+    def get_highest_degree_tags(self, obj):
+        return self._tag_payload(obj, m.SchoolTagRuleTag.DEGREE_HIGHEST)
+
+    def _tags_for_ids(self, tag_ids, field_name):
+        unique_ids = list(dict.fromkeys(tag_ids or []))
+        tags_by_id = {
+            tag.id: tag for tag in m.SchoolTag.objects.filter(id__in=unique_ids)
+        }
+        tags = [tags_by_id[tag_id] for tag_id in unique_ids if tag_id in tags_by_id]
+        found_ids = {tag.id for tag in tags}
+        missing = set(unique_ids) - found_ids
+        if missing:
+            raise serializers.ValidationError({field_name: "存在无效院校标签"})
+        return tags
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        is_active = attrs.get(
+            "is_active",
+            self.instance.is_active if self.instance else True,
+        )
+        if not is_active:
+            return attrs
+
+        first_ids = attrs.get("first_degree_tag_ids")
+        highest_ids = attrs.get("highest_degree_tag_ids")
+        if self.instance:
+            if first_ids is None:
+                first_ids = list(
+                    self.instance.tag_links.filter(
+                        degree_type=m.SchoolTagRuleTag.DEGREE_FIRST
+                    ).values_list("school_tag_id", flat=True)
+                )
+            if highest_ids is None:
+                highest_ids = list(
+                    self.instance.tag_links.filter(
+                        degree_type=m.SchoolTagRuleTag.DEGREE_HIGHEST
+                    ).values_list("school_tag_id", flat=True)
+                )
+
+        errors = {}
+        if not first_ids:
+            errors["first_degree_tag_ids"] = "启用规则至少需要一个第一学历标签"
+        if not highest_ids:
+            errors["highest_degree_tag_ids"] = "启用规则至少需要一个最高学历标签"
+        if errors:
+            raise serializers.ValidationError(errors)
+        return attrs
+
+    def _sync_tag_links(self, rule, degree_type, tags):
+        if tags is None:
+            return
+        rule.tag_links.filter(degree_type=degree_type).delete()
+        m.SchoolTagRuleTag.objects.bulk_create(
+            [
+                m.SchoolTagRuleTag(
+                    rule=rule,
+                    school_tag=tag,
+                    degree_type=degree_type,
+                )
+                for tag in tags
+            ]
+        )
+
+    def create(self, validated_data):
+        first_ids = validated_data.pop("first_degree_tag_ids", [])
+        highest_ids = validated_data.pop("highest_degree_tag_ids", [])
+        first_tags = self._tags_for_ids(first_ids, "first_degree_tag_ids")
+        highest_tags = self._tags_for_ids(highest_ids, "highest_degree_tag_ids")
+        rule = super().create(validated_data)
+        self._sync_tag_links(rule, m.SchoolTagRuleTag.DEGREE_FIRST, first_tags)
+        self._sync_tag_links(rule, m.SchoolTagRuleTag.DEGREE_HIGHEST, highest_tags)
+        return rule
+
+    def update(self, instance, validated_data):
+        first_ids = validated_data.pop("first_degree_tag_ids", None)
+        highest_ids = validated_data.pop("highest_degree_tag_ids", None)
+        first_tags = (
+            self._tags_for_ids(first_ids, "first_degree_tag_ids")
+            if first_ids is not None
+            else None
+        )
+        highest_tags = (
+            self._tags_for_ids(highest_ids, "highest_degree_tag_ids")
+            if highest_ids is not None
+            else None
+        )
+        rule = super().update(instance, validated_data)
+        self._sync_tag_links(rule, m.SchoolTagRuleTag.DEGREE_FIRST, first_tags)
+        self._sync_tag_links(rule, m.SchoolTagRuleTag.DEGREE_HIGHEST, highest_tags)
+        return rule
 
 
 class CandidateWorkflowSerializer(serializers.ModelSerializer):
     candidate_name = serializers.CharField(source="candidate.name", read_only=True)
     phone = serializers.CharField(source="candidate.phone", read_only=True)
-    current_apply_id = serializers.CharField(
-        source="current_resume.apply_id", read_only=True, default=""
-    )
-    current_position_name = serializers.CharField(
-        source="current_resume.position_name", read_only=True, default=""
-    )
+    current_resume = serializers.SerializerMethodField()
+    current_apply_id = serializers.SerializerMethodField()
+    current_position_name = serializers.SerializerMethodField()
+    current_rank = serializers.SerializerMethodField()
+
+    def _display_resume(self, obj):
+        if hasattr(obj, "_display_resume_cache"):
+            return obj._display_resume_cache
+        if obj.current_resume_id:
+            resume = obj.current_resume
+        elif obj.passed_attempt_id and obj.passed_attempt:
+            resume = obj.passed_attempt.resume
+        else:
+            latest_attempt = (
+                obj.attempts.select_related("resume")
+                .order_by("-attempt_no", "-created_at", "-id")
+                .first()
+            )
+            resume = latest_attempt.resume if latest_attempt else None
+        obj._display_resume_cache = resume
+        return resume
+
+    def get_current_resume(self, obj):
+        resume = self._display_resume(obj)
+        return resume.id if resume else None
+
+    def get_current_apply_id(self, obj):
+        resume = self._display_resume(obj)
+        return resume.apply_id if resume else ""
+
+    def get_current_position_name(self, obj):
+        resume = self._display_resume(obj)
+        return resume.position_name if resume else ""
+
+    def get_current_rank(self, obj):
+        if obj.current_rank:
+            return obj.current_rank
+        resume = self._display_resume(obj)
+        return resume.volunteer_rank if resume else None
 
     class Meta:
         model = m.CandidateWorkflow
@@ -457,6 +812,9 @@ class AssignmentAttemptSerializer(serializers.ModelSerializer):
     )
     apply_id = serializers.CharField(source="resume.apply_id", read_only=True)
     position_name = serializers.CharField(source="resume.position_name", read_only=True)
+    volunteer_rank = serializers.IntegerField(
+        source="resume.volunteer_rank", read_only=True
+    )
     department_name = serializers.CharField(
         source="department.name", read_only=True, default=""
     )
@@ -501,6 +859,7 @@ class AssignmentAttemptSerializer(serializers.ModelSerializer):
             "candidate_name",
             "apply_id",
             "position_name",
+            "volunteer_rank",
             "attempt_no",
             "source",
             "status",
@@ -537,6 +896,7 @@ class AssignmentAttemptSerializer(serializers.ModelSerializer):
             "sub_contact_employee_no_snapshot",
             "resume_apply_id_snapshot",
             "position_name_snapshot",
+            "created_by_username_snapshot",
             "created_by",
             "created_at",
             "updated_at",
@@ -562,13 +922,49 @@ class AssignmentAttemptSerializer(serializers.ModelSerializer):
             "cancelled_at",
             "cancel_reason",
             "created_by",
+            "created_by_username_snapshot",
         ]
 
 
 class ProcessingRunSerializer(serializers.ModelSerializer):
+    stages = serializers.SerializerMethodField()
+    scope_summary = serializers.JSONField(read_only=True)
+
     class Meta:
         model = m.ProcessingRun
-        fields = ["id", "step", "mode", "status", "message", "created_at", "finished_at"]
+        fields = [
+            "id", "step", "mode", "status", "message", "scope_summary",
+            "current_stage", "last_heartbeat_at",
+            "created_by", "created_by_username_snapshot",
+            "celery_task_id", "celery_group_id", "params",
+            "total_count", "processed_count", "success_count", "failed_count",
+            "review_count", "dispatch_count", "archive_count",
+            "chunk_size", "chunk_total", "chunk_done", "chunk_failed", "chunk_errors",
+            "model_name", "prompt_version", "decision_version",
+            "created_at", "started_at", "finished_at", "undone_at", "undone_by", "error",
+            "stages",
+        ]
+
+    def get_stages(self, obj):
+        return [
+            {
+                "step": stage.step,
+                "label": stage.label,
+                "status": stage.status,
+                "total_count": stage.total_count,
+                "processed_count": stage.processed_count,
+                "success_count": stage.success_count,
+                "failed_count": stage.failed_count,
+                "review_count": stage.review_count,
+                "dispatch_count": stage.dispatch_count,
+                "archive_count": stage.archive_count,
+                "message": stage.message,
+                "error": stage.error,
+                "started_at": stage.started_at,
+                "finished_at": stage.finished_at,
+            }
+            for stage in obj.stages.all()
+        ]
 
 
 class AgentDispatchDecisionSerializer(serializers.ModelSerializer):
@@ -618,6 +1014,8 @@ class AgentDispatchDecisionSerializer(serializers.ModelSerializer):
             "recommended_department_name",
             "recommended_contact",
             "recommended_contact_name",
+            "recommended_contact_name_snapshot",
+            "recommended_contact_employee_no_snapshot",
             "confidence_score",
             "score_breakdown",
             "summary",

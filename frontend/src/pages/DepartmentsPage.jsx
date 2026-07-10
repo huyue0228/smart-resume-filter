@@ -1,41 +1,69 @@
 import { useRef } from 'react'
 import { PageContainer, ProTable } from '@ant-design/pro-components'
-import { Tag } from 'antd'
-import { fetchContacts } from '../api/services'
+import { message, Popconfirm, Space, Tag } from 'antd'
+import { deleteContact, fetchContacts } from '../api/services'
 import ImportButton from '../components/ImportButton'
+import {
+  normalizeTableFilters,
+  selectColumnFilter,
+  textColumnFilter,
+  useResizableColumns,
+} from '../components/DataTableControls'
 
 const IMPORT_FIELDS = [
-  { key: 'contacts', label: '部门接口人信息 (.xlsx)', accept: '.xlsx,.xls' },
+  { key: 'contacts', label: '部门接口人信息 (.xlsx/.xls/.csv)', accept: '.xlsx,.xls,.csv' },
 ]
 
 export default function DepartmentsPage() {
   const actionRef = useRef()
 
-  const columns = [
-    { title: '姓名', dataIndex: 'name', fixed: 'left', width: 120 },
-    { title: '工号', dataIndex: 'employee_no', width: 140 },
-    { title: '所属部门', dataIndex: 'department_name', ellipsis: true, search: false },
+  const handleDelete = async (record) => {
+    try {
+      await deleteContact(record.id)
+      message.success('已删除')
+      actionRef.current?.reload()
+    } catch (error) {
+      message.error(error?.response?.data?.detail || '删除失败')
+    }
+  }
+
+  const baseColumns = [
+    { title: '姓名', dataIndex: 'name', fixed: 'left', width: 120, ...textColumnFilter('筛选姓名') },
+    { title: '工号', dataIndex: 'employee_no', width: 140, ...textColumnFilter('筛选工号') },
+    {
+      title: '所属部门',
+      dataIndex: 'department_name',
+      width: 160,
+      ellipsis: true,
+      ...textColumnFilter('筛选部门'),
+    },
     {
       title: '部门层级',
       dataIndex: 'department_level',
       width: 100,
-      search: false,
+      ...selectColumnFilter([
+        { text: '二级部门', value: '2' },
+        { text: '三级部门', value: '3' },
+      ]),
       render: (value) => (value === 3 ? '三级部门' : value === 2 ? '二级部门' : '-'),
     },
     {
       title: '接口人层级',
       dataIndex: 'contact_level',
       width: 120,
-      valueEnum: {
-        secondary: { text: '二级接口人' },
-        tertiary: { text: '三级接口人' },
-      },
+      ...selectColumnFilter([
+        { text: '二级接口人', value: 'secondary' },
+        { text: '三级接口人', value: 'tertiary' },
+      ]),
     },
     {
       title: '可转派',
       dataIndex: 'can_delegate',
       width: 90,
-      search: false,
+      ...selectColumnFilter([
+        { text: '是', value: 'true' },
+        { text: '否', value: 'false' },
+      ]),
       render: (_, record) =>
         record.contact_level === 'secondary' && record.can_delegate ? (
           <Tag color="green">是</Tag>
@@ -47,7 +75,10 @@ export default function DepartmentsPage() {
       title: '状态',
       dataIndex: 'is_active',
       width: 90,
-      search: false,
+      ...selectColumnFilter([
+        { text: '启用', value: 'true' },
+        { text: '停用', value: 'false' },
+      ]),
       render: (value) =>
         value ? <Tag color="green">启用</Tag> : <Tag color="default">停用</Tag>,
     },
@@ -55,10 +86,31 @@ export default function DepartmentsPage() {
       title: '招聘主体',
       dataIndex: 'entity',
       width: 140,
-      search: false,
+      ...textColumnFilter('筛选主体'),
       render: (_, r) => (r.entity ? <Tag color="blue">{r.entity}</Tag> : '-'),
     },
+    {
+      title: '操作',
+      valueType: 'option',
+      fixed: 'right',
+      width: 90,
+      render: (_, record) => (
+        <Space>
+          <Popconfirm
+            title="删除接口人"
+            description="将删除该接口人及绑定用户，历史分配记录仅保留快照。"
+            okText="删除"
+            cancelText="取消"
+            okButtonProps={{ danger: true }}
+            onConfirm={() => handleDelete(record)}
+          >
+            <a style={{ color: '#cf1322' }}>删除</a>
+          </Popconfirm>
+        </Space>
+      ),
+    },
   ]
+  const { columns, components, scrollX } = useResizableColumns(baseColumns)
 
   return (
     <PageContainer
@@ -69,7 +121,9 @@ export default function DepartmentsPage() {
         actionRef={actionRef}
         rowKey="id"
         columns={columns}
-        search={{ labelWidth: 'auto' }}
+        components={components}
+        scroll={{ x: scrollX }}
+        search={false}
         pagination={{ defaultPageSize: 10, showSizeChanger: true }}
         toolBarRender={() => [
           <ImportButton
@@ -80,14 +134,26 @@ export default function DepartmentsPage() {
             onDone={() => actionRef.current?.reload()}
           />,
         ]}
-        request={async (params) => {
-          const { current, pageSize, name, employee_no } = params
+        request={async (params, _sort, filters) => {
+          const {
+            current,
+            pageSize,
+          } = params
+          const tableFilters = normalizeTableFilters(filters, [
+            'name',
+            'employee_no',
+            'department_name',
+            'department_level',
+            'contact_level',
+            'can_delegate',
+            'is_active',
+            'entity',
+          ])
           try {
             const { data } = await fetchContacts({
               page: current,
               page_size: pageSize,
-              name,
-              employee_no,
+              ...tableFilters,
             })
             return { data: data?.results || [], total: data?.count || 0, success: true }
           } catch {

@@ -1,4 +1,4 @@
-"""数据源适配器：Excel 解析 + 身份归并入库。
+"""数据源适配器：表格解析 + 身份归并入库。
 
 Excel 仅是一种数据源实现；下游业务只依赖 core 模型。
 """
@@ -8,15 +8,21 @@ import re
 import zipfile
 
 import pandas as pd
+from django.contrib.auth.models import Group
 from django.conf import settings
 from django.db import transaction
 
+from apps.accounts.models import User
+from apps.accounts.permissions import ensure_rbac_defaults
 from apps.core import models as m
 
 from .identity import identity_hash, normalize_phone
 
 # 简历文件落盘子目录（相对 MEDIA_ROOT），导出接口复用
 RESUME_SUBDIR = "resumes"
+XLS_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+XLSX_MAGIC = b"PK\x03\x04"
+CSV_ENCODINGS = ("utf-8-sig", "utf-8", "gb18030")
 
 
 def _val(row, key):
@@ -52,9 +58,77 @@ def _to_date(s):
         return None
 
 
-def _read_excel(file_obj):
+def _excel_name(file_obj):
+    return os.path.basename(str(getattr(file_obj, "name", "") or "")).lower()
+
+
+def _file_bytes(file_obj):
     file_obj.seek(0)
-    return pd.read_excel(file_obj, dtype=object)
+    data = file_obj.read()
+    file_obj.seek(0)
+    return data
+
+
+def _csv_encoding(data):
+    if not data:
+        return None
+    for encoding in CSV_ENCODINGS:
+        try:
+            text = data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+        if "\x00" in text:
+            return None
+        if any(sep in text for sep in (",", "\t", ";", "，")) or "\n" in text:
+            return encoding
+    return None
+
+
+def _table_format(file_obj):
+    data = _file_bytes(file_obj)
+    header = data[:8]
+    name = _excel_name(file_obj)
+    if header.startswith(XLSX_MAGIC):
+        return "excel", "openpyxl", None, data
+    if header.startswith(XLS_MAGIC):
+        return "excel", "xlrd", None, data
+    if name.endswith(".csv"):
+        encoding = _csv_encoding(data)
+        if encoding:
+            return "csv", None, encoding, data
+        raise ValueError("CSV 文件编码无法识别，请使用 UTF-8 或 GB18030 编码")
+    encoding = _csv_encoding(data)
+    if encoding:
+        return "csv", None, encoding, data
+    if name.endswith((".xlsx", ".xlsm")):
+        return "excel", "openpyxl", None, data
+    if name.endswith(".xls"):
+        return "excel", "xlrd", None, data
+    raise ValueError("无法识别表格文件格式，请上传 .xlsx、.xls 或 .csv 文件")
+
+
+def _read_excel(file_obj):
+    kind, engine, encoding, data = _table_format(file_obj)
+    try:
+        if kind == "csv":
+            return pd.read_csv(
+                io.BytesIO(data),
+                dtype=object,
+                encoding=encoding,
+                sep=None,
+                engine="python",
+            )
+        return pd.read_excel(io.BytesIO(data), dtype=object, engine=engine)
+    except zipfile.BadZipFile as exc:
+        raise ValueError("Excel 文件不是有效的 .xlsx 文件，请检查文件内容或另存后重新上传") from exc
+    except ImportError as exc:
+        if engine == "xlrd":
+            raise ValueError("服务端缺少 .xls 读取依赖 xlrd，请先安装后再导入") from exc
+        raise
+    except ValueError as exc:
+        if "Excel file format cannot be determined" in str(exc):
+            raise ValueError("无法识别表格文件格式，请上传 .xlsx、.xls 或 .csv 文件") from exc
+        raise
 
 
 def _get_department(level1_name, level2_name, entity="", level3_name=""):
@@ -98,6 +172,53 @@ def _contact_level(row, dept):
     )
 
 
+def _contact_user_role(contact):
+    if contact.contact_level == m.Contact.LEVEL_TERTIARY:
+        return User.ROLE_TERTIARY_CONTACT, "三级接口人"
+    return User.ROLE_SECONDARY_CONTACT, "二级接口人"
+
+
+def _sync_contact_user(contact):
+    role, group_name = _contact_user_role(contact)
+    user, created = User.objects.update_or_create(
+        username=contact.employee_no,
+        defaults={
+            "role": role,
+            "contact": contact,
+            "is_active": contact.is_active,
+        },
+    )
+    if created or not user.has_usable_password():
+        user.set_password("pass1234")
+        user.save(update_fields=["password"])
+    contact_groups = Group.objects.filter(name__in=["二级接口人", "三级接口人"])
+    user.groups.remove(*contact_groups.exclude(name=group_name))
+    user.groups.add(Group.objects.get(name=group_name))
+    return user
+
+
+def _contact_has_history(contact):
+    return (
+        contact.assignment_attempts.exists()
+        or contact.sub_assignment_attempts.exists()
+        or contact.handoffs_from.exists()
+        or contact.handoffs_to.exists()
+        or contact.agent_decisions.exists()
+    )
+
+
+def _disable_contact_users(contact):
+    User.objects.filter(contact=contact).update(is_active=False)
+
+
+def _deactivate_contact(contact):
+    _disable_contact_users(contact)
+    if contact.is_active:
+        contact.is_active = False
+        contact.save(update_fields=["is_active"])
+    return contact
+
+
 def _split_majors(text):
     if not text:
         return []
@@ -127,8 +248,9 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
         "contacts": 0,
         "candidates_skipped": 0,
     }
+    affected_candidate_ids = set()
 
-    if mode == "replace":
+    if mode == "replace" and (files.get("resume_list") or files.get("resume_package")):
         m.AssignmentHandoff.objects.all().delete()
         m.AssignmentAttempt.objects.all().delete()
         m.AgentDispatchDecision.objects.all().delete()
@@ -136,13 +258,12 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
         m.CandidateWorkflow.objects.all().delete()
         m.Resume.objects.all().delete()
         m.Candidate.objects.all().delete()
+    if mode == "replace":
         if files.get("jobs"):
             m.JobMajor.objects.all().delete()
             m.Job.objects.all().delete()
         if files.get("schools"):
             m.School.objects.all().delete()
-        if files.get("contacts"):
-            m.Contact.objects.all().delete()
 
     # 院校清单
     if files.get("schools"):
@@ -151,14 +272,35 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
             name = _val(row, "学校")
             if not name:
                 continue
+            tag_text = _val(row, "院校标签") or _val(row, "平台")
+            school_tag = None
+            if tag_text:
+                school_tag, _ = m.SchoolTag.objects.update_or_create(
+                    code=tag_text,
+                    defaults={"name": tag_text, "is_active": True},
+                )
             m.School.objects.update_or_create(
-                name=name, defaults={"platform": _val(row, "平台")}
+                name=name,
+                defaults={
+                    "platform": tag_text,
+                    "province": _val(row, "所在省份") or _val(row, "省份"),
+                    "school_tag": school_tag,
+                },
             )
             counts["schools"] += 1
 
     # 部门接口人
     if files.get("contacts"):
+        ensure_rbac_defaults()
         df = _read_excel(files["contacts"])
+        imported_employee_nos = {
+            _val(row, "工号") for _, row in df.iterrows() if _val(row, "工号")
+        }
+        if mode == "replace":
+            for contact in m.Contact.objects.exclude(
+                employee_no__in=imported_employee_nos
+            ):
+                _deactivate_contact(contact)
         for _, row in df.iterrows():
             no = _val(row, "工号")
             name = _val(row, "姓名")
@@ -170,7 +312,7 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
                 _val(row, "主体"),
                 _val(row, "三级部门"),
             )
-            m.Contact.objects.update_or_create(
+            contact, _ = m.Contact.objects.update_or_create(
                 employee_no=no,
                 defaults={
                     "name": name,
@@ -184,6 +326,7 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
                     ),
                 },
             )
+            _sync_contact_user(contact)
             counts["contacts"] += 1
 
     # 岗位需求
@@ -239,6 +382,7 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
                 },
             )
             counts["candidates_created" if created else "candidates_updated"] += 1
+            affected_candidate_ids.add(cand.id)
 
             resume, r_created = m.Resume.objects.update_or_create(
                 apply_id=apply_id,
@@ -276,7 +420,10 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
                             out.write(zf.read(fname))
                         resume.resume_file = base
                         resume.save(update_fields=["resume_file"])
+                        affected_candidate_ids.add(resume.candidate_id)
         except zipfile.BadZipFile:
             pass
 
+    # 仅供 API 在创建后台 ProcessingRun 时冻结处理范围，不作为导入统计直接返回。
+    counts["_candidate_ids"] = sorted(affected_candidate_ids)
     return counts

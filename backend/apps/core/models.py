@@ -45,12 +45,39 @@ class Contact(models.Model):
         return f"{self.name}({self.employee_no})"
 
 
+class SchoolTag(models.Model):
+    """院校标签字典。"""
+
+    code = models.CharField(max_length=64, unique=True)
+    name = models.CharField(max_length=64)
+    is_default = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["code", "id"]
+        indexes = [
+            models.Index(fields=["code", "is_active"]),
+            models.Index(fields=["is_default"]),
+        ]
+
+    def __str__(self):
+        return self.name
+
+
 class School(models.Model):
     """院校清单。"""
 
     name = models.CharField(max_length=128, unique=True, help_text="学校")
     platform = models.CharField(max_length=64, blank=True, help_text="平台标签")
     region = models.CharField(max_length=16, blank=True, help_text="南/北（户籍缺失兜底）")
+    province = models.CharField(max_length=32, blank=True)
+    school_tag = models.ForeignKey(
+        SchoolTag,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="schools",
+    )
 
     def __str__(self):
         return self.name
@@ -71,6 +98,13 @@ class Job(models.Model):
     location = models.CharField(max_length=64, blank=True, help_text="工作地点")
     education = models.CharField(max_length=32, blank=True, help_text="学历要求")
     headcount = models.PositiveIntegerField(default=0, help_text="需求数量(HC)")
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["is_active", "entity"]),
+            models.Index(fields=["is_active", "category"]),
+        ]
 
     def __str__(self):
         return self.public_name or self.position_name or f"Job#{self.pk}"
@@ -86,12 +120,93 @@ class JobMajor(models.Model):
         return self.major
 
 
+class MajorCategory(models.Model):
+    """专业大类词表的一级分类。
+
+    这个模型只保存可维护主数据，不直接挂到候选人或岗位上。分配时会按
+    当前启用词表即时解析专业文本，历史分配结果则通过 match_reason 保留
+    当时命中的大类名称，避免后续维护词表时影响历史审计。
+    """
+
+    code = models.CharField(max_length=64, unique=True)
+    name = models.CharField(max_length=64)
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    sort_order = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["sort_order", "code", "id"]
+        indexes = [
+            models.Index(fields=["is_active", "sort_order"]),
+            models.Index(fields=["code", "is_active"]),
+        ]
+
+    def __str__(self):
+        return self.name
+
+
+class MajorAlias(models.Model):
+    """专业大类的别名、关键词或原始专业名。
+
+    `normalized_name` 由序列化器 / seed 命令按统一规则写入，分配时直接复用；
+    内置项也允许用户编辑和停用。`category` 使用 PROTECT，确保一个大类仍有
+    别名时不会被误删，符合“先删除或迁移别名，再删大类”的维护口径。
+    """
+
+    MATCH_EXACT = "exact"
+    MATCH_CONTAINS = "contains"
+    MATCH_TYPE_CHOICES = [
+        (MATCH_EXACT, "精确匹配"),
+        (MATCH_CONTAINS, "包含匹配"),
+    ]
+
+    SOURCE_BUILTIN = "builtin"
+    SOURCE_USER = "user"
+    SOURCE_IMPORT = "import"
+    SOURCE_CHOICES = [
+        (SOURCE_BUILTIN, "内置"),
+        (SOURCE_USER, "人工维护"),
+        (SOURCE_IMPORT, "导入"),
+    ]
+
+    category = models.ForeignKey(
+        MajorCategory,
+        on_delete=models.PROTECT,
+        related_name="aliases",
+    )
+    name = models.CharField(max_length=128)
+    normalized_name = models.CharField(max_length=128)
+    match_type = models.CharField(
+        max_length=16, choices=MATCH_TYPE_CHOICES, default=MATCH_CONTAINS
+    )
+    source = models.CharField(max_length=16, choices=SOURCE_CHOICES, default=SOURCE_USER)
+    note = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["category__sort_order", "category__code", "name", "id"]
+        indexes = [
+            models.Index(fields=["normalized_name", "is_active"]),
+            models.Index(fields=["match_type", "is_active"]),
+            models.Index(fields=["source"]),
+        ]
+
+    def __str__(self):
+        return self.name
+
+
 class Candidate(models.Model):
     """同学 / 人。以 identity_hash(规范化姓名+手机号) 全局唯一标识。"""
 
     identity_hash = models.CharField(max_length=64, unique=True)
     name = models.CharField(max_length=64)
     phone = models.CharField(max_length=32, blank=True)
+    name_pinyin = models.CharField(max_length=128, blank=True)
+    name_pinyin_initials = models.CharField(max_length=32, blank=True)
     gender = models.CharField(max_length=8, blank=True)
     household_province = models.CharField(max_length=32, blank=True, help_text="户口所在地")
     first_degree_school = models.CharField(max_length=128, blank=True)
@@ -100,12 +215,45 @@ class Candidate(models.Model):
     # Step3 院校分类结果
     first_degree_platform = models.CharField(max_length=64, blank=True)
     highest_degree_platform = models.CharField(max_length=64, blank=True)
+    first_degree_tag = models.ForeignKey(
+        SchoolTag,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="first_degree_candidates",
+    )
+    highest_degree_tag = models.ForeignKey(
+        SchoolTag,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="highest_degree_candidates",
+    )
 
     imported_at = models.DateTimeField(auto_now_add=True, help_text="导入时间（时间标签）")
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return self.name
+
+    def save(self, *args, **kwargs):
+        from .name_pinyin import name_to_pinyin
+
+        self.name_pinyin, self.name_pinyin_initials = name_to_pinyin(self.name)
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None and "name" in update_fields:
+            kwargs["update_fields"] = set(update_fields) | {
+                "name_pinyin",
+                "name_pinyin_initials",
+            }
+        super().save(*args, **kwargs)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["name"]),
+            models.Index(fields=["name_pinyin"]),
+            models.Index(fields=["name_pinyin_initials"]),
+        ]
 
 
 class Resume(models.Model):
@@ -138,15 +286,21 @@ class Resume(models.Model):
 
 
 class ResumeProfile(models.Model):
-    """AI 策略读取简历后的结构化画像（demo 版可由元数据生成）。"""
+    """AI 策略读取 PDF 后形成的、可按文件和版本复用的结构化画像。"""
 
     resume = models.OneToOneField(Resume, on_delete=models.CASCADE, related_name="profile")
-    parsed_text = models.TextField(blank=True)
-    projects = models.JSONField(default=list, blank=True)
-    internships = models.JSONField(default=list, blank=True)
+    file_checksum = models.CharField(max_length=64, blank=True, db_index=True)
+    parse_model = models.CharField(max_length=32, blank=True)
+    profile_version = models.CharField(max_length=32, blank=True)
+    raw_text = models.TextField(blank=True)
+    education_experiences = models.JSONField(default=list, blank=True)
+    project_experiences = models.JSONField(default=list, blank=True)
+    internship_experiences = models.JSONField(default=list, blank=True)
     skills = models.JSONField(default=list, blank=True)
     certificates = models.JSONField(default=list, blank=True)
     major_direction = models.CharField(max_length=128, blank=True)
+    summary = models.TextField(blank=True)
+    profile_risk_flags = models.JSONField(default=list, blank=True)
     parse_status = models.CharField(max_length=32, default="pending")
     parse_error = models.TextField(blank=True)
     parsed_at = models.DateTimeField(null=True, blank=True)
@@ -158,8 +312,6 @@ class SchoolTagRule(models.Model):
     """院校标签准入规则。"""
 
     name = models.CharField(max_length=128)
-    first_degree_tags = models.JSONField(default=list, blank=True)
-    highest_degree_tags = models.JSONField(default=list, blank=True)
     is_active = models.BooleanField(default=True)
     priority = models.IntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -173,6 +325,35 @@ class SchoolTagRule(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class SchoolTagRuleTag(models.Model):
+    """院校准入规则标签明细。"""
+
+    DEGREE_FIRST = "first"
+    DEGREE_HIGHEST = "highest"
+    DEGREE_CHOICES = [
+        (DEGREE_FIRST, "第一学历"),
+        (DEGREE_HIGHEST, "最高学历"),
+    ]
+
+    rule = models.ForeignKey(
+        SchoolTagRule, on_delete=models.CASCADE, related_name="tag_links"
+    )
+    school_tag = models.ForeignKey(
+        SchoolTag, on_delete=models.PROTECT, related_name="rule_links"
+    )
+    degree_type = models.CharField(max_length=16, choices=DEGREE_CHOICES)
+
+    class Meta:
+        unique_together = ("rule", "school_tag", "degree_type")
+        indexes = [
+            models.Index(fields=["rule", "degree_type"]),
+            models.Index(fields=["school_tag", "degree_type"]),
+        ]
+
+    def __str__(self):
+        return f"{self.rule}-{self.school_tag}-{self.degree_type}"
 
 
 class CandidateWorkflow(models.Model):
@@ -197,6 +378,7 @@ class CandidateWorkflow(models.Model):
     ARCHIVE_CONTACT_NOT_FOUND = "contact_not_found"
     ARCHIVE_SUB_CONTACT_NOT_FOUND = "sub_contact_not_found"
     ARCHIVE_AGENT_NO_RECOMMENDATION = "agent_no_recommendation"
+    ARCHIVE_HR_CANCELLED = "hr_cancelled"
     ARCHIVE_ALL_REJECTED = "all_rejected"
     ARCHIVE_RERUN_PRESERVED = "rerun_preserved"
     ARCHIVE_REASON_CHOICES = [
@@ -208,8 +390,14 @@ class CandidateWorkflow(models.Model):
         (ARCHIVE_CONTACT_NOT_FOUND, "无可用接口人"),
         (ARCHIVE_SUB_CONTACT_NOT_FOUND, "二级部门下没有可用三级接口人"),
         (ARCHIVE_AGENT_NO_RECOMMENDATION, "AI 无有效建议"),
+        (ARCHIVE_HR_CANCELLED, "HR 取消当前分配"),
         (ARCHIVE_ALL_REJECTED, "全部志愿未通过"),
         (ARCHIVE_RERUN_PRESERVED, "重跑时保留归档"),
+    ]
+
+    BLOCK_CONTACT_NOT_FOUND = "contact_not_found"
+    BLOCK_REASON_CHOICES = [
+        (BLOCK_CONTACT_NOT_FOUND, "当前志愿无可用二级接口人"),
     ]
 
     candidate = models.OneToOneField(
@@ -231,6 +419,10 @@ class CandidateWorkflow(models.Model):
         max_length=64, choices=ARCHIVE_REASON_CHOICES, blank=True
     )
     archive_detail = models.TextField(blank=True)
+    block_reason = models.CharField(
+        max_length=64, choices=BLOCK_REASON_CHOICES, blank=True
+    )
+    block_detail = models.TextField(blank=True)
     passed_attempt = models.ForeignKey(
         "AssignmentAttempt",
         null=True,
@@ -242,12 +434,21 @@ class CandidateWorkflow(models.Model):
     completed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    revision = models.PositiveIntegerField(default=0)
 
     class Meta:
         indexes = [
             models.Index(fields=["status"]),
             models.Index(fields=["updated_at"]),
         ]
+
+    def save(self, *args, **kwargs):
+        """把候选人流程的每次写入变成可供后台任务校验的单调版本。"""
+        self.revision = (self.revision or 0) + 1
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None:
+            kwargs["update_fields"] = set(update_fields) | {"revision"}
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.candidate.name}-{self.status}"
@@ -312,7 +513,11 @@ class AssignmentAttempt(models.Model):
         related_name="assignment_attempts",
     )
     contact = models.ForeignKey(
-        Contact, on_delete=models.PROTECT, related_name="assignment_attempts"
+        Contact,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="assignment_attempts",
     )
     sub_department = models.ForeignKey(
         Department,
@@ -325,7 +530,7 @@ class AssignmentAttempt(models.Model):
         Contact,
         null=True,
         blank=True,
-        on_delete=models.PROTECT,
+        on_delete=models.SET_NULL,
         related_name="sub_assignment_attempts",
     )
     matched_rule = models.ForeignKey(
@@ -365,6 +570,7 @@ class AssignmentAttempt(models.Model):
     sub_contact_employee_no_snapshot = models.CharField(max_length=32, blank=True)
     resume_apply_id_snapshot = models.CharField(max_length=64, blank=True)
     position_name_snapshot = models.CharField(max_length=128, blank=True)
+    created_by_username_snapshot = models.CharField(max_length=150, blank=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,
@@ -420,9 +626,19 @@ class AssignmentHandoff(models.Model):
         related_name="handoffs_to",
     )
     to_contact = models.ForeignKey(
-        Contact, on_delete=models.PROTECT, related_name="handoffs_to"
+        Contact,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="handoffs_to",
     )
+    from_contact_name_snapshot = models.CharField(max_length=64, blank=True)
+    from_contact_employee_no_snapshot = models.CharField(max_length=32, blank=True)
+    to_department_name_snapshot = models.CharField(max_length=128, blank=True)
+    to_contact_name_snapshot = models.CharField(max_length=64, blank=True)
+    to_contact_employee_no_snapshot = models.CharField(max_length=32, blank=True)
     note = models.TextField(blank=True)
+    created_by_username_snapshot = models.CharField(max_length=150, blank=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,
@@ -500,6 +716,8 @@ class AgentDispatchDecision(models.Model):
         on_delete=models.SET_NULL,
         related_name="agent_decisions",
     )
+    recommended_contact_name_snapshot = models.CharField(max_length=64, blank=True)
+    recommended_contact_employee_no_snapshot = models.CharField(max_length=32, blank=True)
     confidence_score = models.FloatField(null=True, blank=True)
     score_breakdown = models.JSONField(default=dict, blank=True)
     summary = models.TextField(blank=True)
@@ -525,18 +743,105 @@ class ProcessingRun(models.Model):
     """流水线处理任务记录（Celery 跟踪）。"""
 
     scope = models.JSONField(default=dict, blank=True, help_text="处理范围/筛选条件")
+    scope_summary = models.JSONField(default=dict, blank=True, help_text="可对外展示的处理范围摘要")
     step = models.CharField(max_length=16)
     mode = models.CharField(max_length=8, default="rule")
-    status = models.CharField(max_length=16, default="pending")
+    status = models.CharField(max_length=24, default="pending")
+    current_stage = models.CharField(max_length=32, blank=True)
     celery_task_id = models.CharField(max_length=64, blank=True)
+    celery_group_id = models.CharField(max_length=64, blank=True)
     params = models.JSONField(default=dict, blank=True)
     message = models.TextField(blank=True)
+    total_count = models.PositiveIntegerField(default=0)
+    processed_count = models.PositiveIntegerField(default=0)
+    success_count = models.PositiveIntegerField(default=0)
+    failed_count = models.PositiveIntegerField(default=0)
+    review_count = models.PositiveIntegerField(default=0)
+    dispatch_count = models.PositiveIntegerField(default=0)
+    archive_count = models.PositiveIntegerField(default=0)
+    chunk_size = models.PositiveIntegerField(null=True, blank=True)
+    chunk_total = models.PositiveIntegerField(null=True, blank=True)
+    chunk_done = models.PositiveIntegerField(null=True, blank=True)
+    chunk_failed = models.PositiveIntegerField(null=True, blank=True)
+    chunk_errors = models.JSONField(default=list, blank=True)
+    model_name = models.CharField(max_length=64, blank=True)
+    prompt_version = models.CharField(max_length=32, blank=True)
+    decision_version = models.CharField(max_length=32, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    last_heartbeat_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    undone_at = models.DateTimeField(null=True, blank=True)
+    undone_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="processing_runs_undone",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="processing_runs_created",
+    )
+    created_by_username_snapshot = models.CharField(max_length=150, blank=True)
+    error = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["status", "created_at"]),
+            models.Index(fields=["created_by", "status"]),
+        ]
+
+
+class ProcessingRunStage(models.Model):
+    """一个处理任务中的可观测阶段，支持上传后 Step1 → Step2 的连续展示。"""
+
+    run = models.ForeignKey(
+        ProcessingRun, on_delete=models.CASCADE, related_name="stages"
+    )
+    sequence = models.PositiveSmallIntegerField()
+    step = models.CharField(max_length=16)
+    label = models.CharField(max_length=64)
+    status = models.CharField(max_length=24, default="pending")
+    total_count = models.PositiveIntegerField(default=0)
+    processed_count = models.PositiveIntegerField(default=0)
+    success_count = models.PositiveIntegerField(default=0)
+    failed_count = models.PositiveIntegerField(default=0)
+    review_count = models.PositiveIntegerField(default=0)
+    dispatch_count = models.PositiveIntegerField(default=0)
+    archive_count = models.PositiveIntegerField(default=0)
+    message = models.TextField(blank=True)
+    error = models.TextField(blank=True)
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
-        ordering = ["-created_at"]
+        ordering = ["sequence", "id"]
+        unique_together = ("run", "sequence")
+        indexes = [models.Index(fields=["run", "status"])]
+
+
+class ProcessingRunScopeItem(models.Model):
+    """提交任务时冻结的候选人范围，避免运行中重新解释页面筛选条件。"""
+
+    run = models.ForeignKey(
+        ProcessingRun, on_delete=models.CASCADE, related_name="scope_items"
+    )
+    candidate = models.ForeignKey(
+        Candidate, on_delete=models.CASCADE, related_name="processing_scope_items"
+    )
+    workflow_revision_at_submit = models.PositiveIntegerField(null=True, blank=True)
+    status = models.CharField(max_length=32, default="pending")
+    skip_reason = models.CharField(max_length=64, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("run", "candidate")
+        indexes = [models.Index(fields=["run", "candidate"])]
 
 
 class Config(models.Model):

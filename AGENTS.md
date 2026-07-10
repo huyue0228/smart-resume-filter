@@ -54,8 +54,12 @@ npm run build
 Full stack, optional:
 
 ```bash
+docker compose build
+docker compose --profile init run --rm init
 docker compose up
 ```
+
+Compose uses project Dockerfiles now: backend/worker share `smart-resume-filter-backend:${APP_VERSION:-latest}` based on Python 3.12.3, frontend uses a built React bundle served by Nginx, and db/redis are wrapped as project images for offline deployment. See README for server deployment details.
 
 ## Verification
 
@@ -77,9 +81,9 @@ Use focused verification for the files changed:
 ## Pipeline Notes
 
 - Entry point: `backend/apps/pipeline/runner.py`, `run_step(step, mode, scope)`.
-- The `all` order is intentionally `step1`, `step3`, `step2`, `step4`; do not assume numeric order. `step5` is only a legacy allocation alias, and new frontend/backend work should prefer the Step2 allocation flow. Step3 must run before allocation so school tags are ready.
+- The `all` order is intentionally `step3`, `step4`, `step1`, `step2`; do not assume numeric order. Step3/Step4 prepare or verify prerequisite data before the candidate flow. A normal resume upload should run `step1`, then `step2`. `step5` is only a legacy allocation alias, and new frontend/backend work should prefer the Step2 allocation flow.
 - Step implementations live in `backend/apps/pipeline/services/`.
-- `strategies.py` exposes `RuleStrategy` and `AIStrategy`; existing code may still contain AI placeholder or rule-fallback behavior, but new development must follow the AI Agent screening design in the four docs.
+- `strategies.py` owns deterministic Rule matching. Formal AI screening lives under `backend/apps/pipeline/ai/`; `AIStrategy` is only a legacy fail-fast guard and must never fall back to Rule. Model profiles live in `backend/config/ai_models.json`; switch with `AI_PROFILE` and keep real keys only in ignored/deployment environment files. AI mode requires a text-extractable PDF.
 - AI Agent screening is a hard-rule-constrained recommendation flow: it only evaluates the candidate's current effective volunteer, never skips volunteer order or school admission rules, and never automatically falls back to Rule after AI failure.
 - AI failures, timeouts, parse failures, invalid output, missing references, and guardrail blocks should be recorded for HR handling. HR chooses retry AI, switch to Rule, manual assignment, or archive handling.
 - Frontend drives processing by calling `/api/pipeline/run/` step by step via `frontend/src/components/useProcessRunner.jsx`.
@@ -87,11 +91,14 @@ Use focused verification for the files changed:
 ## API Notes
 
 - Main API code is under `backend/apps/api/`.
+- Standard pagination lives in `backend/apps/api/pagination.py`; list APIs support `page_size` with a max of 500.
 - Routes use DRF `DefaultRouter` for resumes, candidates, jobs, schools, departments, contacts, workflow attempts, agent decisions, and runs.
 - Explicit endpoints include `auth/login/`, `auth/logout/`, `me/`, `permissions/`, `import/`, `import/undo/`, and `pipeline/run/`.
 - `AssignmentAttemptViewSet` has a `dispatch_welink` method with `url_path="dispatch"`. Do not rename it to `dispatch`, because that would override DRF ViewSet dispatch.
-- `AssignmentAttemptViewSet.export_resumes` returns a zip `HttpResponse`, not a DRF `Response`.
+- Resume export and preview helpers return Django `HttpResponse`, not DRF `Response`. Keep zip headers such as `X-Export-Count` / `X-Export-Missing` and preview header `X-Resume-Filename` stable for the frontend.
+- Candidate export, resume direct preview, assignment-attempt scoped preview, and visible-column list filters are covered in `backend/apps/api/tests.py`; keep those tests aligned when changing table columns or query params.
 - API defaults to authenticated access. Local formal development uses DRF Token login seeded by `seed_base`; W3 authentication is a future adapter around the same `User`/RBAC/`Contact` mapping.
+- Contact imports automatically create/update interface-user accounts with `username = Contact.employee_no`, default password `pass1234` for new users, and the matching second/third-level contact role. W3 login will also map by employee number.
 
 ## Frontend Notes
 
@@ -101,6 +108,9 @@ Use focused verification for the files changed:
 - `RoleContext.jsx` holds the current token-backed user, `/api/me/` permissions, roles, contact binding, and data-scope helpers. Do not reintroduce demo role switching.
 - `ModeContext.jsx` stores `rule` / `ai` in localStorage. The allocation page owns the mode switch; switching mode reruns the Step2 allocation flow.
 - Import UI is decentralized through `frontend/src/components/ImportButton.jsx`; there is no standalone import page.
+- Shared table header filters and resizable column wiring live in `frontend/src/components/DataTableControls.jsx` and `frontend/src/components/ResizableHeaderCell.jsx`; reuse them for dense data tables instead of rebuilding per page.
+- PDF preview UI lives in `frontend/src/components/ResumePreview.jsx` and supports direct resume previews and assignment-attempt scoped previews.
+- `SchoolsPage.jsx` no longer exposes the legacy `region` filter. The remaining drift is in backend `School.region` / `ProvinceRegion` models and APIs; migrate backend behavior to runtime province-based judgment rather than reintroducing region configuration in the frontend.
 
 ## Migration Gotchas
 

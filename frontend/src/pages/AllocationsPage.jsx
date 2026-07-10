@@ -11,12 +11,19 @@ import {
   Select,
   Radio,
   Input,
+  Drawer,
+  Descriptions,
+  Typography,
 } from 'antd'
 import { DownloadOutlined } from '@ant-design/icons'
 import {
   fetchAllocations,
   dispatchAllocation,
   confirmReviewAllocation,
+  cancelAllocation,
+  cancelReviewAllocation,
+  transferAllocationToManual,
+  retryAgentDecision,
   bulkDispatchAllocations,
   assignSubContact,
   submitAllocationFeedback,
@@ -26,6 +33,9 @@ import {
 import { useRole } from '../contexts/RoleContext'
 import { useMode } from '../contexts/ModeContext'
 import { useProcessRunner } from '../components/useProcessRunner'
+import ResumePreview from '../components/ResumePreview'
+import { AgentDecisionsTable } from './AgentDecisionsPage'
+import { downloadBlobFromResponse } from '../utils/download'
 
 const REPROCESS_STEPS = [
   { step: 'step2', label: '简历分类、分配与下发' },
@@ -47,27 +57,18 @@ const SOURCE_TEXT = {
   manual: '手动',
 }
 
-function triggerDownload(data, filename) {
-  const url = URL.createObjectURL(new Blob([data]))
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  URL.revokeObjectURL(url)
-}
-
 export default function AllocationsPage() {
   const actionRef = useRef()
   const { hasPermission, isContact, isSecondaryContact, isTertiaryContact } = useRole()
   const { mode, setMode } = useMode()
-  const { run, modal } = useProcessRunner()
+  const { run } = useProcessRunner()
   const [dispatchingId, setDispatchingId] = useState(null)
   const [bulkDispatching, setBulkDispatching] = useState(false)
   const [selectedRowKeys, setSelectedRowKeys] = useState([])
   const [exporting, setExporting] = useState(false)
   const [lastQuery, setLastQuery] = useState({})
+  const [allocationView, setAllocationView] = useState('attempts')
+  const [detailRecord, setDetailRecord] = useState(null)
   const [assignModal, setAssignModal] = useState({
     open: false,
     record: null,
@@ -80,6 +81,15 @@ export default function AllocationsPage() {
     record: null,
     result: 'passed',
     note: '',
+    loading: false,
+  })
+  const [manualModal, setManualModal] = useState({
+    open: false,
+    record: null,
+    contacts: [],
+    contactId: undefined,
+    secondaryId: undefined,
+    reason: '',
     loading: false,
   })
 
@@ -96,8 +106,7 @@ export default function AllocationsPage() {
           next,
           `正在按${next === 'ai' ? 'AI' : '规则'}模式重算`,
         )
-        if (r.success) message.success('已按新模式重新分配')
-        actionRef.current?.reload()
+        if (r.success) message.success('已提交重新分配任务，可继续操作并在任务中心查看进度')
       },
     })
   }
@@ -125,6 +134,62 @@ export default function AllocationsPage() {
       // toasted by interceptor
     } finally {
       setDispatchingId(null)
+    }
+  }
+
+  const handleCancelAttempt = async (record) => {
+    setDispatchingId(record.id)
+    try {
+      const cancel = record.status === 'pending_review' ? cancelReviewAllocation : cancelAllocation
+      await cancel(record.id, {
+        reason: record.status === 'pending_review' ? 'hr_cancelled_review' : 'hr_cancelled_dispatch',
+      })
+      message.success(record.status === 'pending_review' ? '已取消 AI 复核建议' : '已取消待下发尝试')
+      actionRef.current?.reload()
+    } finally {
+      setDispatchingId(null)
+    }
+  }
+
+  const handleRetryAI = async (record) => {
+    if (!record.agent_decision) return
+    setDispatchingId(record.id)
+    try {
+      await retryAgentDecision(record.agent_decision)
+      message.success('已重新发起 AI 筛选')
+      actionRef.current?.reload()
+    } finally {
+      setDispatchingId(null)
+    }
+  }
+
+  const openManualModal = async (record) => {
+    setManualModal((prev) => ({ ...prev, open: true, record, loading: true }))
+    try {
+      const { data } = await fetchContacts({ is_active: 'true', page_size: 500 })
+      setManualModal((prev) => ({ ...prev, contacts: data?.results || [], loading: false }))
+    } catch {
+      setManualModal((prev) => ({ ...prev, loading: false }))
+    }
+  }
+
+  const handleTransferToManual = async () => {
+    if (!manualModal.contactId) {
+      message.warning('请选择目标接口人')
+      return
+    }
+    setManualModal((prev) => ({ ...prev, loading: true }))
+    try {
+      await transferAllocationToManual(manualModal.record.id, {
+        contact_id: manualModal.contactId,
+        secondary_contact_id: manualModal.secondaryId,
+        manual_reason: manualModal.reason || 'AI 复核转人工分配',
+      })
+      message.success('已转为人工分配')
+      setManualModal({ open: false, record: null, contacts: [], contactId: undefined, secondaryId: undefined, reason: '', loading: false })
+      actionRef.current?.reload()
+    } catch {
+      setManualModal((prev) => ({ ...prev, loading: false }))
     }
   }
 
@@ -241,10 +306,10 @@ export default function AllocationsPage() {
       const resp = await exportAllocations(ids, lastQuery)
       const count = Number(resp.headers?.['x-export-count'] ?? 0)
       const missing = Number(resp.headers?.['x-export-missing'] ?? 0)
-      if (count === 0) {
+      if (count === 0 && missing === 0) {
         message.warning('所选记录暂无可导出的简历文件')
       } else {
-        triggerDownload(resp.data, 'resumes_export.zip')
+        downloadBlobFromResponse(resp, 'resumes_export.zip')
         message.success(
           `已导出 ${count} 份简历${missing ? `，${missing} 份缺文件（见压缩包内清单）` : ''}`,
         )
@@ -256,9 +321,27 @@ export default function AllocationsPage() {
     }
   }
 
+  const statusValueEnum = isContact
+    ? {
+        dispatched_l2: STATUS_ENUM.dispatched_l2,
+        assigned_l3: STATUS_ENUM.assigned_l3,
+        passed: STATUS_ENUM.passed,
+        rejected: STATUS_ENUM.rejected,
+      }
+    : STATUS_ENUM
+  const canViewAgentDecisions = hasPermission('attempt.view_all')
+
   const columns = [
     { title: '候选人', dataIndex: 'candidate_name', width: 120, fixed: 'left' },
-    { title: '投递岗位', dataIndex: 'position_name', ellipsis: true },
+    {
+      title: '当前志愿',
+      dataIndex: 'volunteer_rank',
+      width: 90,
+      search: false,
+      render: (_, record) => record.volunteer_rank || '-',
+    },
+    { title: '应聘ID', dataIndex: 'apply_id', width: 120, search: false },
+    { title: '当前投递', dataIndex: 'position_name', ellipsis: true },
     {
       title: '来源',
       dataIndex: 'source',
@@ -267,7 +350,7 @@ export default function AllocationsPage() {
       render: (value) => SOURCE_TEXT[value] || value || '-',
     },
     { title: '分配部门', dataIndex: 'department_name', width: 160 },
-    { title: '二级接口人', dataIndex: 'contact_name', width: 120 },
+    !isSecondaryContact && { title: '二级接口人', dataIndex: 'contact_name', width: 120 },
     { title: '三级接口人', dataIndex: 'sub_contact_name', width: 120 },
     { title: '分配理由', dataIndex: 'match_reason', ellipsis: true, search: false },
     {
@@ -275,12 +358,12 @@ export default function AllocationsPage() {
       dataIndex: 'status',
       width: 120,
       valueType: 'select',
-      valueEnum: STATUS_ENUM,
+      valueEnum: statusValueEnum,
     },
     {
       title: '操作',
       valueType: 'option',
-      width: isContact ? 150 : 170,
+      width: isContact ? 190 : 210,
       fixed: 'right',
       render: (_, record) => {
         const canDispatch =
@@ -296,6 +379,7 @@ export default function AllocationsPage() {
           isTertiaryContact && record.status === 'assigned_l3' && !record.feedback_at
         return (
           <Space>
+            <a onClick={() => setDetailRecord(record)}>详情</a>
             {canExport && <a onClick={() => handleExport([record.id])}>导出</a>}
             {canDispatch && (
               <Popconfirm
@@ -327,6 +411,24 @@ export default function AllocationsPage() {
                 </Button>
               </Popconfirm>
             )}
+            {canConfirmReview && hasPermission('resume.manual_assign') && (
+              <Button type="link" size="small" style={{ padding: 0 }} onClick={() => openManualModal(record)}>
+                转人工
+              </Button>
+            )}
+            {canConfirmReview && record.agent_decision && (
+              <Button type="link" size="small" style={{ padding: 0 }} onClick={() => handleRetryAI(record)}>
+                重试 AI
+              </Button>
+            )}
+            {(canConfirmReview || canDispatch) && (
+              <Popconfirm
+                title={canConfirmReview ? '取消该 AI 复核建议并归档？' : '取消该待下发尝试？'}
+                onConfirm={() => handleCancelAttempt(record)}
+              >
+                <Button type="link" danger size="small" style={{ padding: 0 }}>取消</Button>
+              </Popconfirm>
+            )}
             {canAssign && (
               <Button
                 type="link"
@@ -356,7 +458,7 @@ export default function AllocationsPage() {
         )
       },
     },
-  ]
+  ].filter(Boolean)
 
   return (
     <PageContainer
@@ -386,6 +488,20 @@ export default function AllocationsPage() {
             ]
       }
     >
+      {canViewAgentDecisions && (
+        <Segmented
+          value={allocationView}
+          onChange={setAllocationView}
+          options={[
+            { label: '规则分配', value: 'attempts' },
+            { label: 'AI分配', value: 'agent-decisions' },
+          ]}
+          style={{ marginBottom: 16 }}
+        />
+      )}
+      {allocationView === 'agent-decisions' ? (
+        <AgentDecisionsTable />
+      ) : (
       <ProTable
         actionRef={actionRef}
         rowKey="id"
@@ -471,6 +587,135 @@ export default function AllocationsPage() {
           }
         }}
       />
+      )}
+      <Drawer
+        title={
+          detailRecord ? `${detailRecord.candidate_name || '-'} 的分配详情` : '分配详情'
+        }
+        width={1000}
+        open={!!detailRecord}
+        onClose={() => setDetailRecord(null)}
+      >
+        {detailRecord && (
+          <Space direction="vertical" size={16} style={{ width: '100%' }}>
+            <Descriptions column={2} size="small" bordered>
+              <Descriptions.Item label="候选人">
+                {detailRecord.candidate_name || '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="应聘ID">
+                {detailRecord.apply_id || detailRecord.resume_apply_id_snapshot || '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="投递岗位">
+                {detailRecord.position_name || detailRecord.position_name_snapshot || '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="来源">
+                {SOURCE_TEXT[detailRecord.source] || detailRecord.source || '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="状态">
+                {STATUS_ENUM[detailRecord.status]?.text || detailRecord.status || '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="分配部门">
+                {detailRecord.department_name ||
+                  detailRecord.department_name_snapshot ||
+                  '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="二级接口人">
+                {detailRecord.contact_name || detailRecord.contact_name_snapshot || '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="三级接口人">
+                {detailRecord.sub_contact_name ||
+                  detailRecord.sub_contact_name_snapshot ||
+                  '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="分配理由" span={2}>
+                {detailRecord.match_reason || '-'}
+              </Descriptions.Item>
+              {detailRecord.agent_decision_summary?.summary && (
+                <Descriptions.Item label="AI 摘要" span={2}>
+                  {detailRecord.agent_decision_summary.summary}
+                </Descriptions.Item>
+              )}
+              {detailRecord.feedback_result && (
+                <Descriptions.Item label="反馈结果">
+                  {detailRecord.feedback_result === 'passed' ? '通过' : '未通过'}
+                </Descriptions.Item>
+              )}
+              {detailRecord.feedback_at && (
+                <Descriptions.Item label="反馈时间">
+                  {detailRecord.feedback_at}
+                </Descriptions.Item>
+              )}
+              {detailRecord.feedback_note && (
+                <Descriptions.Item label="反馈备注" span={2}>
+                  {detailRecord.feedback_note}
+                </Descriptions.Item>
+              )}
+            </Descriptions>
+
+            <div>
+              <Typography.Title level={5} style={{ marginTop: 0 }}>
+                简历预览
+              </Typography.Title>
+              <ResumePreview
+                attemptId={detailRecord.id}
+                resume={{
+                  id: detailRecord.resume,
+                  apply_id:
+                    detailRecord.apply_id || detailRecord.resume_apply_id_snapshot,
+                  position_name:
+                    detailRecord.position_name || detailRecord.position_name_snapshot,
+                }}
+              />
+            </div>
+          </Space>
+        )}
+      </Drawer>
+      <Modal
+        title="AI 复核转人工分配"
+        open={manualModal.open}
+        confirmLoading={manualModal.loading}
+        onOk={handleTransferToManual}
+        onCancel={() => setManualModal({ open: false, record: null, contacts: [], contactId: undefined, secondaryId: undefined, reason: '', loading: false })}
+        okText="确认分配"
+      >
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <Select
+            showSearch
+            optionFilterProp="label"
+            style={{ width: '100%' }}
+            placeholder="选择二级或三级接口人"
+            value={manualModal.contactId}
+            options={manualModal.contacts.map((contact) => ({
+              value: contact.id,
+              label: `${contact.name}（${contact.contact_level === 'secondary' ? '二级' : '三级'} / ${contact.department_name || '未绑定部门'}）`,
+            }))}
+            onChange={(value) => setManualModal((prev) => ({ ...prev, contactId: value, secondaryId: undefined }))}
+          />
+          {(() => {
+            const target = manualModal.contacts.find((item) => item.id === manualModal.contactId)
+            if (target?.contact_level !== 'tertiary') return null
+            const parents = manualModal.contacts.filter(
+              (item) => item.contact_level === 'secondary' && item.department === target.parent_department,
+            )
+            if (parents.length <= 1) return null
+            return (
+              <Select
+                style={{ width: '100%' }}
+                placeholder="该三级部门有多个上级二级接口人，请明确选择"
+                value={manualModal.secondaryId}
+                options={parents.map((item) => ({ value: item.id, label: `${item.name}（${item.employee_no}）` }))}
+                onChange={(value) => setManualModal((prev) => ({ ...prev, secondaryId: value }))}
+              />
+            )
+          })()}
+          <Input.TextArea
+            rows={3}
+            placeholder="人工分配原因"
+            value={manualModal.reason}
+            onChange={(event) => setManualModal((prev) => ({ ...prev, reason: event.target.value }))}
+          />
+        </Space>
+      </Modal>
       <Modal
         title="转派三级接口人"
         open={assignModal.open}
@@ -543,7 +788,6 @@ export default function AllocationsPage() {
           />
         </Space>
       </Modal>
-      {modal}
     </PageContainer>
   )
 }

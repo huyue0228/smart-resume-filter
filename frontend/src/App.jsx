@@ -10,6 +10,7 @@ import SchoolsPage from './pages/SchoolsPage'
 import DepartmentsPage from './pages/DepartmentsPage'
 import ConfigPage from './pages/ConfigPage'
 import UsersPage from './pages/UsersPage'
+import WorkflowsPage from './pages/WorkflowsPage'
 
 function AppRoutes() {
   const { loading, isAuthenticated, hasPermission, isContact } = useRole()
@@ -49,11 +50,20 @@ function AppRoutes() {
           element={guarded('department.view', <DepartmentsPage />)}
         />
         <Route
+          path="/workflows"
+          element={guarded('attempt.view_all', <WorkflowsPage />)}
+        />
+        <Route
           path="/allocations"
           element={guarded(
             ['attempt.view_all', 'attempt.view_received', 'attempt.view_assigned'],
             <AllocationsPage />,
           )}
+        />
+        <Route path="/agent-decisions" element={<Navigate to="/allocations" replace />} />
+        <Route
+          path="/archives"
+          element={guarded('attempt.view_all', <WorkflowsPage archivedOnly />)}
         />
         <Route
           path="/config"

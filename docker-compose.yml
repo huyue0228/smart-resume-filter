@@ -1,24 +1,63 @@
-# 完整栈（PostgreSQL + Redis + Django + Celery worker + Vite frontend）。
+# 完整镜像 + Compose 编排（PostgreSQL + Redis + Django + Celery worker + Nginx frontend）。
 # 服务器部署手册见 README 的「Docker Compose 部署手册」。
+
+x-backend-env: &backend-env
+  DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?Set DJANGO_SECRET_KEY in .env}
+  DJANGO_DEBUG: ${DJANGO_DEBUG:-False}
+  DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:?Set DJANGO_ALLOWED_HOSTS in .env}
+  POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+  POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+  POSTGRES_HOST: db
+  POSTGRES_PORT: 5432
+  CELERY_BROKER_URL: redis://redis:6379/0
+  CELERY_RESULT_BACKEND: redis://redis:6379/1
+  CELERY_TASK_ALWAYS_EAGER: "False"
+  AI_PROFILE: ${AI_PROFILE:-}
+  AI_PROVIDER: ${AI_PROVIDER:-}
+  AI_API_STYLE: ${AI_API_STYLE:-}
+  AI_MODEL_NAME: ${AI_MODEL_NAME:-}
+  AI_API_KEY_ENV: ${AI_API_KEY_ENV:-}
+  AI_BASE_URL_ENV: ${AI_BASE_URL_ENV:-}
+  AI_PROMPT_VERSION: ${AI_PROMPT_VERSION:-resume-screening-v1}
+  AI_DECISION_VERSION: ${AI_DECISION_VERSION:-decision-v1}
+  AI_PROFILE_VERSION: ${AI_PROFILE_VERSION:-profile-v1}
+  AI_PARSER_VERSION: ${AI_PARSER_VERSION:-pypdf-v1}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+  DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+  DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+  FILE_UPLOAD_TEMP_DIR: ${FILE_UPLOAD_TEMP_DIR:-/app/media/tmp_uploads}
+
 services:
   db:
-    image: postgres:16
+    build:
+      context: ./docker/postgres
+      args:
+        POSTGRES_IMAGE: ${POSTGRES_IMAGE:-postgres:16}
+    image: smart-resume-filter-postgres:${POSTGRES_VERSION:-16}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-srf}
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     ports:
       - "${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-srf}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:?Set POSTGRES_USER in .env} -d ${POSTGRES_DB:?Set POSTGRES_DB in .env}"]
       interval: 5s
       timeout: 5s
       retries: 20
 
   redis:
-    image: redis:7
+    build:
+      context: ./docker/redis
+      args:
+        REDIS_IMAGE: ${REDIS_IMAGE:-redis:7}
+    image: smart-resume-filter-redis:${REDIS_VERSION:-7}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
     ports:
       - "${REDIS_BIND:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
     healthcheck:
@@ -28,65 +67,59 @@ services:
       retries: 20
 
   backend:
-    image: python:3.11-slim
-    working_dir: /app
-    volumes:
-      - ./backend:/app
-    command: bash -c "pip install -r requirements.txt && python manage.py migrate && python manage.py seed_base && python manage.py runserver 0.0.0.0:8000"
+    build:
+      context: ./backend
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.12.3-slim}
+    image: smart-resume-filter-backend:${APP_VERSION:-latest}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
     environment:
-      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-demo-insecure-secret-key-change-me}
-      DJANGO_DEBUG: ${DJANGO_DEBUG:-False}
-      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-*}
-      POSTGRES_DB: ${POSTGRES_DB:-srf}
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_HOST: db
-      POSTGRES_PORT: 5432
-      CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/1
-      CELERY_TASK_ALWAYS_EAGER: "False"
-      AI_PROVIDER: ${AI_PROVIDER:-openai}
-      AI_MODEL_NAME: ${AI_MODEL_NAME:-demo-agent}
-      AI_API_KEY_ENV: ${AI_API_KEY_ENV:-OPENAI_API_KEY}
-      AI_BASE_URL_ENV: ${AI_BASE_URL_ENV:-OPENAI_BASE_URL}
-      AI_PROMPT_VERSION: ${AI_PROMPT_VERSION:-demo-v1}
-      AI_DECISION_VERSION: ${AI_DECISION_VERSION:-demo-v1}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      <<: *backend-env
+      RUN_MIGRATIONS: ${RUN_MIGRATIONS:-1}
+      RUN_SEED_BASE: ${RUN_SEED_BASE:-0}
+    command: gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers ${GUNICORN_WORKERS:-3} --timeout ${GUNICORN_TIMEOUT:-1800}
     ports:
-      - "${BACKEND_PORT:-8000}:8000"
+      - "${BACKEND_BIND:-127.0.0.1}:${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - media_data:/app/media
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket; s=socket.create_connection(('127.0.0.1', 8000), 3); s.close()\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   worker:
-    image: python:3.11-slim
-    working_dir: /app
-    volumes:
-      - ./backend:/app
-    command: bash -c "pip install -r requirements.txt && celery -A config worker -l info"
+    image: smart-resume-filter-backend:${APP_VERSION:-latest}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
     environment:
-      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-demo-insecure-secret-key-change-me}
-      DJANGO_DEBUG: ${DJANGO_DEBUG:-False}
-      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-*}
-      POSTGRES_DB: ${POSTGRES_DB:-srf}
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_HOST: db
-      POSTGRES_PORT: 5432
-      CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/1
-      CELERY_TASK_ALWAYS_EAGER: "False"
-      AI_PROVIDER: ${AI_PROVIDER:-openai}
-      AI_MODEL_NAME: ${AI_MODEL_NAME:-demo-agent}
-      AI_API_KEY_ENV: ${AI_API_KEY_ENV:-OPENAI_API_KEY}
-      AI_BASE_URL_ENV: ${AI_BASE_URL_ENV:-OPENAI_BASE_URL}
-      AI_PROMPT_VERSION: ${AI_PROMPT_VERSION:-demo-v1}
-      AI_DECISION_VERSION: ${AI_DECISION_VERSION:-demo-v1}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      <<: *backend-env
+      RUN_MIGRATIONS: "0"
+      RUN_SEED_BASE: "0"
+    command: celery -A config worker -l info
+    volumes:
+      - media_data:/app/media
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  init:
+    profiles: ["init"]
+    image: smart-resume-filter-backend:${APP_VERSION:-latest}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    environment:
+      <<: *backend-env
+      RUN_MIGRATIONS: "1"
+      RUN_SEED_BASE: "1"
+    command: python manage.py check
+    volumes:
+      - media_data:/app/media
     depends_on:
       db:
         condition: service_healthy
@@ -94,17 +127,21 @@ services:
         condition: service_healthy
 
   frontend:
-    image: node:22-alpine
-    working_dir: /app
-    volumes:
-      - ./frontend:/app
-    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
-    environment:
-      VITE_API_PROXY_TARGET: http://backend:8000
+    build:
+      context: ./frontend
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:22-alpine}
+        NGINX_IMAGE: ${NGINX_IMAGE:-nginx:1.27-alpine}
+    image: smart-resume-filter-frontend:${APP_VERSION:-latest}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
     ports:
-      - "${FRONTEND_PORT:-5173}:5173"
+      - "${FRONTEND_BIND:-0.0.0.0}:${FRONTEND_PORT:-5173}:80"
+    volumes:
+      - media_data:/usr/share/nginx/media:ro
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
 volumes:
   pgdata:
+  media_data:

@@ -19,6 +19,9 @@ export function createUser(body) {
 export function updateUser(id, body) {
   return client.patch(`/users/${id}/`, body)
 }
+export function deleteUser(id) {
+  return client.delete(`/users/${id}/`)
+}
 export function fetchRoles(params) {
   return client.get('/roles/', { params })
 }
@@ -36,6 +39,54 @@ export function fetchConfigs() {
 }
 export function updateConfig(key, value) {
   return client.patch(`/configs/${key}/`, { value })
+}
+export function fetchSchoolTagRules(params) {
+  return client.get('/school-tag-rules/', { params })
+}
+export function createSchoolTagRule(body) {
+  return client.post('/school-tag-rules/', body)
+}
+export function updateSchoolTagRule(id, body) {
+  return client.patch(`/school-tag-rules/${id}/`, body)
+}
+export function deleteSchoolTagRule(id) {
+  return client.delete(`/school-tag-rules/${id}/`)
+}
+export function fetchSchoolTags(params) {
+  return client.get('/school-tags/', { params })
+}
+export function createSchoolTag(body) {
+  return client.post('/school-tags/', body)
+}
+export function updateSchoolTag(id, body) {
+  return client.patch(`/school-tags/${id}/`, body)
+}
+export function deleteSchoolTag(id) {
+  return client.delete(`/school-tags/${id}/`)
+}
+export function fetchMajorCategories(params) {
+  return client.get('/major-categories/', { params })
+}
+export function createMajorCategory(body) {
+  return client.post('/major-categories/', body)
+}
+export function updateMajorCategory(id, body) {
+  return client.patch(`/major-categories/${id}/`, body)
+}
+export function deleteMajorCategory(id) {
+  return client.delete(`/major-categories/${id}/`)
+}
+export function fetchMajorAliases(params) {
+  return client.get('/major-aliases/', { params })
+}
+export function createMajorAlias(body) {
+  return client.post('/major-aliases/', body)
+}
+export function updateMajorAlias(id, body) {
+  return client.patch(`/major-aliases/${id}/`, body)
+}
+export function deleteMajorAlias(id) {
+  return client.delete(`/major-aliases/${id}/`)
 }
 
 // ---- Data import ----
@@ -62,13 +113,43 @@ export function undoLastImport() {
 export function fetchResumes(params) {
   return client.get('/resumes/', { params })
 }
+export function previewResume(id) {
+  return client.get(`/resumes/${id}/preview/`, { responseType: 'blob' })
+}
+export function previewAllocationResume(id) {
+  return client.get(`/workflow-attempts/${id}/resume-preview/`, { responseType: 'blob' })
+}
+export function manualAssignResume(id, body) {
+  return client.post(`/resumes/${id}/manual-assign/`, body)
+}
 
 // ---- Generic list endpoints (placeholder pages / dropdowns) ----
 export function fetchCandidates(params) {
   return client.get('/candidates/', { params })
 }
+export function fetchCandidateFilterOptions() {
+  return client.get('/candidates/filter-options/')
+}
+export function deleteCandidate(id) {
+  return client.delete(`/candidates/${id}/`)
+}
+export function exportCandidates(ids, params) {
+  return client.get('/candidates/export/', {
+    params: { ...(ids && ids.length ? { ids: ids.join(',') } : {}), ...params },
+    responseType: 'blob',
+  })
+}
 export function fetchJobs(params) {
   return client.get('/jobs/', { params })
+}
+export function createJob(body) {
+  return client.post('/jobs/', body)
+}
+export function updateJob(id, body) {
+  return client.patch(`/jobs/${id}/`, body)
+}
+export function deleteJob(id) {
+  return client.delete(`/jobs/${id}/`)
 }
 export function fetchSchools(params) {
   return client.get('/schools/', { params })
@@ -78,6 +159,9 @@ export function fetchDepartments(params) {
 }
 export function fetchContacts(params) {
   return client.get('/contacts/', { params })
+}
+export function deleteContact(id) {
+  return client.delete(`/contacts/${id}/`)
 }
 
 // ---- Pipeline ----
@@ -90,6 +174,14 @@ export function runPipeline(body) {
 export function fetchPipelineRuns(params) {
   return client.get('/pipeline/runs/', { params })
 }
+export function fetchPipelineRun(id) {
+  return client.get(`/pipeline/runs/${id}/`)
+}
+
+// ---- Candidate workflows ----
+export function fetchWorkflows(params) {
+  return client.get('/workflows/', { params })
+}
 
 // ---- Workflow attempts ----
 export function fetchAllocations(params) {
@@ -100,6 +192,15 @@ export function dispatchAllocation(id) {
 }
 export function confirmReviewAllocation(id) {
   return client.post(`/workflow-attempts/${id}/confirm-review/`)
+}
+export function cancelAllocation(id, body) {
+  return client.post(`/workflow-attempts/${id}/cancel/`, body)
+}
+export function cancelReviewAllocation(id, body) {
+  return client.post(`/workflow-attempts/${id}/cancel-review/`, body)
+}
+export function transferAllocationToManual(id, body) {
+  return client.post(`/workflow-attempts/${id}/transfer-to-manual/`, body)
 }
 export function bulkDispatchAllocations(body, params) {
   return client.post('/workflow-attempts/bulk-dispatch/', body, { params })
@@ -115,4 +216,12 @@ export function exportAllocations(ids, params) {
     params: { ...(ids && ids.length ? { ids: ids.join(',') } : {}), ...params },
     responseType: 'blob',
   })
+}
+
+// ---- AI decisions ----
+export function fetchAgentDecisions(params) {
+  return client.get('/agent-decisions/', { params })
+}
+export function retryAgentDecision(id) {
+  return client.post(`/agent-decisions/${id}/retry/`)
 }
