@@ -1,12 +1,12 @@
 # 智能简历筛选系统
 
-校招智能简历筛选系统。候选人主流程为「Step1 查重与志愿排序 → Step2 简历分类、分配与下发」；院校分类 Step3 和需求数据准备核对 Step4 是分配前置步骤，显式全流程按 `Step3 → Step4 → Step1 → Step2` 执行。系统按正式项目方式建设：后端启用登录与 RBAC 权限校验，前端菜单和按钮由后端权限码驱动；正式 AI Agent、W3 认证、WeLink 真实下发等能力尚待接入。
+校招智能简历筛选系统。候选人主流程为「Step1 查重与志愿排序 → Step2 简历分类、分配与下发」；院校分类 Step3 和需求数据准备核对 Step4 是分配前置步骤，显式全流程按 `Step3 → Step4 → Step1 → Step2` 执行。系统按正式项目方式建设：后端启用登录与 RBAC 权限校验，前端菜单和按钮由后端权限码驱动；AI Agent 已接入，W3 认证和 WeLink 真实下发仍待外部接口确认。
 
 设计文档以 [`docs/需求描述.md`](docs/需求描述.md)、[`docs/后端设计.md`](docs/后端设计.md)、[`docs/数据库设计.md`](docs/数据库设计.md)、[`docs/前端设计.md`](docs/前端设计.md) 为准。
 
-当前实现已包含：候选人聚合简历库、表头筛选、可拖拽列宽、候选人/分配尝试 PDF 预览、按当前筛选导出单个原文件或 zip、Token 登录、RBAC 权限控制、部门接口人导入自动创建账号。当前 AI 路径仅为 demo 占位，不属于生产可用能力。
+当前实现已包含：候选人聚合简历库、表头筛选、可拖拽列宽、候选人/分配尝试 PDF 预览、按当前筛选导出单个原文件或 zip、Token 登录、RBAC 权限控制、部门接口人导入自动创建账号，以及真实 PDF 解析、OpenAI 结构化输出、后端评分护栏、AI 决策审计和 HR 处置闭环。
 
-> 当前生产阻断项：现有 Compose/Nginx 仍需移除 `/media/` 静态暴露，流水线 API 仍需真正接入 Celery 异步提交，正式 AI Agent 也尚未实现。在这些问题修复并验收前，不应把当前版本作为公网或真实 AI 生产版本交付。
+> 上生产前仍需完成真实数据隐私评审、模型评测、容量压测和外部系统联调；扫描件 PDF 当前不含 OCR，需要先转为可提取文本的 PDF。
 
 关键实现落点：
 
@@ -127,7 +127,7 @@ cp .env.example .env
 - `APP_VERSION`：建议发布时改成明确版本号，如 `2026-07-03-1`，方便回滚和排查。
 - `DOCKER_PLATFORM`：内网服务器是常见 x86_64 Linux 时保持 `linux/amd64`；如果是 ARM 服务器，改成 `linux/arm64` 后重新构建镜像包。
 
-正式 AI Agent 尚未实现，`OPENAI_API_KEY` 当前应留空。环境变量只预留连接配置；仅修改 `.env` 并重启不会把 demo 占位升级成真实 AI，必须等待 Agent 调用、结构化输出、守卫、重试和批处理链路完成并通过验收。
+启用 AI 模式前必须在服务器 `.env` 配置 `OPENAI_API_KEY`；密钥只注入 backend/worker，不落库、不返回前端。未配置密钥时 AI 会写入 `ai_not_configured` 失败决策，不会回退 Rule。
 
 `RUN_SEED_BASE` 默认保持 `0`。不要在长期运行环境里把它改成 `1`，否则每次 backend 重启都可能把配置页中的参数重置为种子默认值。首次初始化请使用下一节的一次性 `init` 命令。
 
@@ -306,9 +306,9 @@ docker compose cp backend:/app/media "backups/$MEDIA_BACKUP"
 tar -czf "backups/$MEDIA_BACKUP.tar.gz" -C backups "$MEDIA_BACKUP"
 ```
 
-### 10. AI 配置预留（正式 Agent 未实现）
+### 10. AI Agent 配置
 
-以下 AI 运行阈值、超时、并发、重试参数已预留在系统配置页，但当前 demo 不等于正式 Agent；这些参数需要在正式链路完成后才具备生产含义：
+以下 AI 运行阈值、超时、并发、重试参数在系统配置页维护：
 
 - `ai_dispatch_threshold`
 - `ai_review_threshold`
@@ -320,17 +320,24 @@ tar -czf "backups/$MEDIA_BACKUP.tar.gz" -C backups "$MEDIA_BACKUP"
 大模型连接配置只在服务器 `.env` 中维护，不在前端展示，也不进入普通配置表：
 
 ```bash
-AI_PROVIDER=openai
-AI_MODEL_NAME=gpt-4.1
-AI_API_KEY_ENV=OPENAI_API_KEY
-AI_BASE_URL_ENV=OPENAI_BASE_URL
+AI_PROFILE=openai
 AI_PROMPT_VERSION=resume-dispatch-v1
 AI_DECISION_VERSION=dispatch-schema-v1
+AI_PROFILE_VERSION=profile-v1
+AI_PARSER_VERSION=pypdf-v1
 OPENAI_API_KEY=sk-...
 OPENAI_BASE_URL=
 ```
 
-正式 Agent 完成后，修改 `.env` 需要重启 backend 和 worker：
+DeepSeek V4 使用兼容的 Chat Completions + JSON Output 链路，可改为：
+
+```bash
+AI_PROFILE=deepseek
+DEEPSEEK_API_KEY=sk-...
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+```
+
+修改 `.env` 后需要重启 backend 和 worker：
 
 ```bash
 docker compose up -d backend worker
@@ -420,22 +427,31 @@ docker compose up -d
 - `welink_enabled`
 
 大模型连接配置不放在前端，也不进入普通配置表；后端统一由
-`backend/apps/pipeline/ai_config.py` 抽象。当前支持的环境变量：
+`backend/config/ai_models.json` 声明模型 profile，由
+`backend/apps/pipeline/ai_config.py` 加载。切换已有供应商通常只需修改
+`AI_PROFILE` 和对应密钥；新增兼容供应商时增加 profile，不需要修改业务流程代码。
+
+当前支持的环境变量：
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `AI_PROVIDER` | `openai` | 大模型供应商标识 |
-| `AI_MODEL_NAME` | `OPENAI_MODEL` 或 `demo-agent` | AI 决策记录写入的模型名，后续真实调用也从这里取 |
-| `AI_API_KEY_ENV` | `OPENAI_API_KEY` | 指向真实 API Key 所在环境变量名 |
-| `AI_BASE_URL_ENV` | `OPENAI_BASE_URL` | 指向自定义 base URL 所在环境变量名 |
-| `AI_PROMPT_VERSION` | `demo-v1` | 提示词版本 |
-| `AI_DECISION_VERSION` | `demo-v1` | 决策 schema / 评分规则版本 |
+| `AI_PROFILE` | 配置文件的 `default_profile` | 选择 `ai_models.json` 中的模型 profile |
+| `AI_MODEL_CONFIG_FILE` | `backend/config/ai_models.json` | 可选的自定义模型注册表路径 |
+| `AI_PROVIDER` | `openai` | 旧版兼容项；未设置 `AI_PROFILE` 时作为 profile 名 |
+| `AI_API_STYLE` | profile 配置 | 可选覆盖：`responses` / `chat_json` |
+| `AI_MODEL_NAME` | profile 的 `default_model` | 可选覆盖具体模型 ID，并写入决策审计 |
+| `AI_API_KEY_ENV` | profile 配置 | 可选覆盖密钥所在环境变量名 |
+| `AI_BASE_URL_ENV` | profile 配置 | 可选覆盖 Base URL 所在环境变量名 |
+| `AI_PROMPT_VERSION` | `resume-screening-v1` | 提示词版本 |
+| `AI_DECISION_VERSION` | `decision-v1` | 决策 schema / 评分规则版本 |
+| `AI_PROFILE_VERSION` | `profile-v1` | 简历画像 schema 版本 |
+| `AI_PARSER_VERSION` | `pypdf-v1` | PDF 文本解析器版本 |
 
 例如：
 
 ```bash
 export OPENAI_API_KEY="sk-..."
-export AI_MODEL_NAME="gpt-4.1"
+export AI_MODEL_NAME="gpt-5.4-mini"
 export AI_PROMPT_VERSION="resume-dispatch-v1"
 export AI_DECISION_VERSION="dispatch-schema-v1"
 ```
@@ -444,7 +460,7 @@ export AI_DECISION_VERSION="dispatch-schema-v1"
 
 1. 使用 `admin` 或 `hr` 登录。
 2. 在简历库、岗位需求、院校清单、部门接口人页面导入对应 Excel/简历包；也可先执行 `gen_sample` 和 `load_sample`。
-3. 简历导入后自动触发 Step1→Step2；正式 AI Agent 未落地前只使用 Rule 模式。
+3. 简历导入后自动触发 Step1→Step2；使用 AI 模式前先配置模型密钥并用少量真实脱敏样本验收评分与护栏。
 4. HR 在「简历分配」查看待下发、待复核、已下发等分配尝试。
 5. HR 单条、批量或一键全部下发给二级接口人。
 6. 二级接口人登录后仅看到自己的分配，可导出简历并转派本部门三级接口人。

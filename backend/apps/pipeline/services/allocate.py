@@ -6,6 +6,7 @@ from django.utils import timezone
 from apps.core import models as m
 from apps.core import system_status
 from apps.pipeline import ai_config
+from apps.pipeline.ai import service as ai_service
 
 from ..strategies import get_strategy
 from . import classify_school, school_admission
@@ -384,35 +385,6 @@ def _rule_match_reason(admission, resume, job, contact, classify_reason):
     )
 
 
-def _ensure_resume_profile(resume):
-    profile, _ = m.ResumeProfile.objects.get_or_create(resume=resume)
-    profile.parsed_text = "\n".join(
-        part
-        for part in [
-            resume.position_name,
-            resume.candidate.highest_major,
-            resume.candidate.first_degree_school,
-            resume.candidate.highest_degree_school,
-        ]
-        if part
-    )
-    profile.major_direction = resume.candidate.highest_major
-    profile.parse_status = "parsed_demo"
-    profile.parse_error = ""
-    profile.parsed_at = timezone.now()
-    profile.save(
-        update_fields=[
-            "parsed_text",
-            "major_direction",
-            "parse_status",
-            "parse_error",
-            "parsed_at",
-            "updated_at",
-        ]
-    )
-    return profile
-
-
 def _retry_allowed(decision):
     if decision.error_code:
         return True
@@ -427,49 +399,39 @@ def _retry_allowed(decision):
     return False
 
 
-def _create_agent_decision(workflow, resume, profile, job, contact, reason):
+def _create_agent_decision(workflow, resume, result):
     runtime_config = ai_config.get_ai_runtime_config()
     model_config = ai_config.get_ai_model_config()
-    confidence = 0.78 if job and contact else 0.35
-    if confidence >= runtime_config.dispatch_threshold:
+    proposed = result.output.decision.recommendation
+    confidence = result.confidence
+    if proposed == m.AgentDispatchDecision.RECOMMEND_DISPATCH and confidence >= runtime_config.dispatch_threshold:
         recommendation = m.AgentDispatchDecision.RECOMMEND_DISPATCH
-    elif confidence >= runtime_config.review_threshold:
+    elif proposed != m.AgentDispatchDecision.RECOMMEND_ARCHIVE and confidence >= runtime_config.review_threshold:
         recommendation = m.AgentDispatchDecision.RECOMMEND_REVIEW
     else:
         recommendation = m.AgentDispatchDecision.RECOMMEND_ARCHIVE
-    risks = [] if recommendation == m.AgentDispatchDecision.RECOMMEND_DISPATCH else ["岗位或接口人匹配不足"]
+    output = result.output.decision
+    risks = list(dict.fromkeys([*output.risks, *result.output.profile.risk_flags]))
     return m.AgentDispatchDecision.objects.create(
         workflow=workflow,
         resume=resume,
-        profile=profile,
+        profile=result.profile,
         processing_run=getattr(workflow, "_processing_run", None),
         recommendation=recommendation,
-        evaluated_job=job,
-        recommended_job=job,
-        matched_job_category=job.category if job else "",
-        recommended_department=contact.department if contact else None,
-        recommended_contact=contact,
-        recommended_contact_name_snapshot=contact.name if contact else "",
+        evaluated_job=result.job,
+        recommended_job=result.job,
+        matched_job_category=result.job.category if result.job else "",
+        recommended_department=result.department,
+        recommended_contact=result.contact,
+        recommended_contact_name_snapshot=result.contact.name if result.contact else "",
         recommended_contact_employee_no_snapshot=(
-            contact.employee_no if contact else ""
+            result.contact.employee_no if result.contact else ""
         ),
         confidence_score=confidence,
-        score_breakdown={
-            "major_match": 0.75 if resume.candidate.highest_major else 0.45,
-            "job_requirement": 0.8 if job else 0.2,
-            "department_certainty": 0.8 if contact else 0.2,
-            "resume_quality": 0.6 if profile.parsed_text else 0.3,
-        },
-        summary="AI(demo) 生成候选人当前志愿分流建议",
-        reason=reason or "AI(demo)：基于岗位名称、专业方向与需求表生成分流建议",
-        evidence=[
-            item
-            for item in [
-                f"投递岗位：{resume.position_name}" if resume.position_name else "",
-                f"最高学历专业：{resume.candidate.highest_major}" if resume.candidate.highest_major else "",
-            ]
-            if item
-        ],
+        score_breakdown=result.score_breakdown,
+        summary=output.summary,
+        reason=output.reason,
+        evidence=output.evidence,
         risks=risks,
         risk_flags=risks,
         model_name=model_config.model_name,
@@ -518,41 +480,47 @@ def _process_ai_recommendation(
     resume,
     *,
     matched_rule,
-    job,
-    contact,
-    classify_reason="",
+    jobs,
+    force=False,
 ):
     _touch_workflow(workflow, resume, "ai")
-    if not resume.resume_file:
+    try:
+        result = ai_service.screen_resume(resume, jobs, force=force)
+    except ai_service.AIServiceError as exc:
         _create_agent_failure_decision(
             workflow,
             resume,
-            error_code="pdf_missing",
-            error_message="缺少 PDF 简历文件，AI 无法读取简历正文",
+            error_code=exc.code,
+            error_message=exc.message,
+            profile=exc.profile,
         )
         _archive(
             workflow,
             m.CandidateWorkflow.ARCHIVE_AGENT_NO_RECOMMENDATION,
-            "AI 缺少 PDF 简历文件，建议归档或人工处理",
+            f"AI 未形成有效建议：{exc.message}",
         )
         return None
 
-    profile = _ensure_resume_profile(resume)
-    decision = _create_agent_decision(
-        workflow, resume, profile, job, contact, classify_reason
+    decision = _create_agent_decision(workflow, resume, result)
+    resume.job = result.job
+    resume.job_category = result.job.category if result.job else "未匹配"
+    resume.category_mode = "ai"
+    resume.category_reason = decision.reason
+    resume.save(
+        update_fields=["job", "job_category", "category_mode", "category_reason"]
     )
     if decision.recommendation == m.AgentDispatchDecision.RECOMMEND_ARCHIVE:
         _archive(
             workflow,
             m.CandidateWorkflow.ARCHIVE_AGENT_NO_RECOMMENDATION,
-            "AI(demo) 低于复核置信度，建议归档或人工处理",
+            "AI 建议归档或置信度低于人工复核阈值",
         )
         return None
     if decision.recommendation == m.AgentDispatchDecision.RECOMMEND_REVIEW:
         return _create_attempt(
             workflow=workflow,
             resume=resume,
-            contact=contact,
+            contact=result.contact,
             source=m.AssignmentAttempt.SOURCE_AI,
             mode="ai",
             matched_rule=matched_rule,
@@ -565,7 +533,7 @@ def _process_ai_recommendation(
     return _create_attempt(
         workflow=workflow,
         resume=resume,
-        contact=contact,
+        contact=result.contact,
         source=m.AssignmentAttempt.SOURCE_AI,
         mode="ai",
         matched_rule=matched_rule,
@@ -583,7 +551,7 @@ def _create_next_auto_attempt(workflow, rules, mode="rule", processing_run=None)
     2. 按当前 workflow.current_rank 后续志愿顺序逐条尝试。
     3. 当前志愿必须能匹配岗位、二级部门和启用的二级接口人，才生成尝试。
 
-    AI 目前仍复用同一条硬规则链路；本轮只加固 Rule 策略，不扩展 AI 能力。
+    AI 只评估当前有效志愿；任何 AI 失败都不会跳志愿或回退 Rule。
     """
     workflow._processing_run = processing_run
     candidate = workflow.candidate
@@ -596,12 +564,50 @@ def _create_next_auto_attempt(workflow, rules, mode="rule", processing_run=None)
         )
         return None
 
-    strategy = get_strategy(mode)
     jobs = list(
         m.Job.objects.select_related("department")
         .prefetch_related("majors")
         .filter(is_active=True)
     )
+    if mode == "ai":
+        resume = _candidate_resumes(candidate, after_rank=workflow.current_rank).first()
+        if not resume:
+            _archive(
+                workflow,
+                m.CandidateWorkflow.ARCHIVE_NO_NEXT_RESUME,
+                "没有下一条可尝试志愿",
+            )
+            return None
+        _touch_workflow(workflow, resume, "ai")
+        resume_entity = "".join((resume.entity or "").lower().split())
+        eligible_jobs = [
+            job
+            for job in jobs
+            if not resume_entity
+            or not "".join((job.entity or "").lower().split())
+            or resume_entity == "".join((job.entity or "").lower().split())
+        ]
+        if not eligible_jobs:
+            _create_agent_failure_decision(
+                workflow,
+                resume,
+                error_code="guardrail_blocked",
+                error_message="当前志愿招聘主体下没有有效岗位需求",
+            )
+            _archive(
+                workflow,
+                m.CandidateWorkflow.ARCHIVE_AGENT_NO_RECOMMENDATION,
+                "当前志愿招聘主体下没有有效岗位需求",
+            )
+            return None
+        return _process_ai_recommendation(
+            workflow,
+            resume,
+            matched_rule=admission.matched_rule,
+            jobs=eligible_jobs,
+        )
+
+    strategy = get_strategy("rule")
     had_resume = False
     # 下面三个 gap 标记用于在所有后续志愿都失败时给出更接近真实原因的归档说明。
     saw_job_gap = False
@@ -611,9 +617,7 @@ def _create_next_auto_attempt(workflow, rules, mode="rule", processing_run=None)
     for resume in _candidate_resumes(candidate, after_rank=after_rank):
         had_resume = True
         _touch_workflow(workflow, resume, mode)
-        # strategy.classify 内部负责 Rule/AI 的岗位选择口径；Rule 会校验主体、
-        # 岗位名优先级和需求专业，AI 当前仍是 demo 占位策略。
-        job, _category, classify_reason = _classify_resume(resume, strategy, jobs, mode)
+        job, _category, classify_reason = _classify_resume(resume, strategy, jobs, "rule")
         if not job:
             saw_job_gap = True
             continue
@@ -633,23 +637,12 @@ def _create_next_auto_attempt(workflow, rules, mode="rule", processing_run=None)
             saw_contact_gap = True
             return None
 
-        # AI 分支保留既有接口和状态机，避免 Rule 加固时改变 AI 的失败边界。
-        if mode == "ai":
-            return _process_ai_recommendation(
-                workflow,
-                resume,
-                matched_rule=admission.matched_rule,
-                job=job,
-                contact=contact,
-                classify_reason=classify_reason,
-            )
-
         return _create_attempt(
             workflow=workflow,
             resume=resume,
             contact=contact,
             source=m.AssignmentAttempt.SOURCE_RULE,
-            mode=mode,
+            mode="rule",
             matched_rule=admission.matched_rule,
             match_reason=_rule_match_reason(
                 admission, resume, job, contact, classify_reason
@@ -677,7 +670,6 @@ def _create_next_auto_attempt(workflow, rules, mode="rule", processing_run=None)
     return None
 
 
-@transaction.atomic
 def run(scope=None, mode="rule", processing_run=None):
     scope = scope or {}
     rules = school_admission.active_rules()
@@ -690,6 +682,20 @@ def run(scope=None, mode="rule", processing_run=None):
     ).count()
 
     candidates = list(_candidate_queryset(scope))
+    if processing_run:
+        processing_run.total_count = len(candidates)
+        processing_run.processed_count = 0
+        processing_run.success_count = 0
+        processing_run.failed_count = 0
+        processing_run.review_count = 0
+        processing_run.dispatch_count = 0
+        processing_run.archive_count = 0
+        processing_run.save(
+            update_fields=[
+                "total_count", "processed_count", "success_count", "failed_count",
+                "review_count", "dispatch_count", "archive_count",
+            ]
+        )
     classify_school.classify_candidates(candidates, overwrite=False)
 
     for candidate in candidates:
@@ -698,6 +704,10 @@ def run(scope=None, mode="rule", processing_run=None):
             m.CandidateWorkflow.STATUS_PASSED,
             m.CandidateWorkflow.STATUS_ARCHIVED,
         ]:
+            if processing_run:
+                processing_run.processed_count += 1
+                processing_run.success_count += 1
+                processing_run.save(update_fields=["processed_count", "success_count"])
             continue
         if scoped_reprocess:
             _reopen_workflow(workflow, mode)
@@ -737,13 +747,40 @@ def run(scope=None, mode="rule", processing_run=None):
         ):
             created += 1
 
+        if processing_run:
+            has_failure = m.AgentDispatchDecision.objects.filter(
+                processing_run=processing_run,
+                workflow=workflow,
+            ).exclude(error_code="").exists()
+            processing_run.processed_count += 1
+            if has_failure:
+                processing_run.failed_count += 1
+            else:
+                processing_run.success_count += 1
+            latest_decision = m.AgentDispatchDecision.objects.filter(
+                processing_run=processing_run, workflow=workflow
+            ).order_by("-created_at", "-id").first()
+            if latest_decision:
+                if latest_decision.recommendation == m.AgentDispatchDecision.RECOMMEND_REVIEW:
+                    processing_run.review_count += 1
+                elif latest_decision.recommendation == m.AgentDispatchDecision.RECOMMEND_DISPATCH:
+                    processing_run.dispatch_count += 1
+                elif latest_decision.recommendation == m.AgentDispatchDecision.RECOMMEND_ARCHIVE:
+                    processing_run.archive_count += 1
+            processing_run.save(
+                update_fields=[
+                    "processed_count", "success_count", "failed_count",
+                    "review_count", "dispatch_count", "archive_count",
+                ]
+            )
+
     return (
         f"已生成 {created} 条候选人分配尝试，取消 {cancelled} 条未反馈自动尝试，"
         f"保留 {archived_before} 个已归档流程（策略：{mode}）"
     )
 
 
-def _manual_target(contact):
+def _manual_target(contact, secondary_contact=None):
     if contact.contact_level == m.Contact.LEVEL_SECONDARY:
         if not contact.department or contact.department.level != 2:
             raise ValueError("二级接口人必须绑定二级部门")
@@ -751,22 +788,40 @@ def _manual_target(contact):
     if contact.contact_level == m.Contact.LEVEL_TERTIARY:
         if not contact.department or contact.department.level != 3 or not contact.department.parent:
             raise ValueError("三级接口人必须绑定三级部门")
-        secondary_contact = _first_secondary_contact(contact.department.parent)
-        if not secondary_contact:
+        candidates = list(
+            m.Contact.objects.filter(
+                department=contact.department.parent,
+                contact_level=m.Contact.LEVEL_SECONDARY,
+                is_active=True,
+            ).order_by("id")
+        )
+        if not candidates:
             raise ValueError("三级接口人所属二级部门没有可用二级接口人")
+        if len(candidates) == 1:
+            secondary_contact = candidates[0]
+        elif not secondary_contact:
+            raise ValueError("该三级部门存在多个二级接口人，请明确 secondary_contact_id")
+        elif secondary_contact.id not in {item.id for item in candidates}:
+            raise ValueError("指定二级接口人不属于三级接口人的上级二级部门")
         return secondary_contact, contact
     raise ValueError("目标接口人层级无效")
 
 
 @transaction.atomic
-def manual_assign(resume, contact, user=None, manual_reason=""):
+def manual_assign(
+    resume,
+    contact,
+    user=None,
+    manual_reason="",
+    secondary_contact=None,
+):
     workflow, _ = m.CandidateWorkflow.objects.get_or_create(candidate=resume.candidate)
     if workflow.status == m.CandidateWorkflow.STATUS_PASSED:
         raise ValueError("已通过候选人不可再强制分配")
     if not contact.is_active:
         raise ValueError("目标接口人未启用")
 
-    secondary_contact, sub_contact = _manual_target(contact)
+    secondary_contact, sub_contact = _manual_target(contact, secondary_contact)
     _cancel_unfeedbacked_attempts(workflow, m.AssignmentAttempt.CANCEL_MANUAL_REPLACED)
     return _create_attempt(
         workflow=workflow,
@@ -939,6 +994,35 @@ def confirm_review(attempt):
 
 
 @transaction.atomic
+def cancel_attempt(attempt, reason="hr_cancelled"):
+    if attempt.status not in [
+        m.AssignmentAttempt.STATUS_PENDING_REVIEW,
+        m.AssignmentAttempt.STATUS_PENDING_DISPATCH,
+    ]:
+        raise ValueError("仅待复核或待下发尝试可以取消")
+    attempt.status = m.AssignmentAttempt.STATUS_CANCELLED
+    attempt.cancelled_at = timezone.now()
+    attempt.cancel_reason = reason
+    attempt.save(update_fields=["status", "cancelled_at", "cancel_reason", "updated_at"])
+    workflow = attempt.workflow
+    if not workflow.attempts.filter(status__in=UNFEEDBACKED_STATUSES).exists():
+        _archive(
+            workflow,
+            (
+                m.CandidateWorkflow.ARCHIVE_AGENT_NO_RECOMMENDATION
+                if attempt.source == m.AssignmentAttempt.SOURCE_AI
+                else m.CandidateWorkflow.ARCHIVE_HR_CANCELLED
+            ),
+            (
+                "HR 已取消 AI 复核/下发建议，可重试 AI、切换 Rule 或手动分配"
+                if attempt.source == m.AssignmentAttempt.SOURCE_AI
+                else "HR 已取消当前待下发尝试，可重新处理或手动分配"
+            ),
+        )
+    return attempt
+
+
+@transaction.atomic
 def retry_agent_decision(decision):
     if not _retry_allowed(decision):
         raise ValueError("仅失败、建议归档或低于自动下发阈值的 AI 决策可以重试")
@@ -962,37 +1046,25 @@ def retry_agent_decision(decision):
         )
         return new_decision, None
 
-    strategy = get_strategy("ai")
     jobs = list(
         m.Job.objects.select_related("department")
         .prefetch_related("majors")
         .filter(is_active=True)
     )
-    job, _category, classify_reason = _classify_resume(resume, strategy, jobs, "ai")
-    if not job:
+    resume_entity = "".join((resume.entity or "").lower().split())
+    jobs = [
+        job
+        for job in jobs
+        if not resume_entity
+        or not "".join((job.entity or "").lower().split())
+        or resume_entity == "".join((job.entity or "").lower().split())
+    ]
+    if not jobs:
         new_decision = _create_agent_failure_decision(
             workflow,
             resume,
             error_code="reference_not_found",
-            error_message="AI 重试时未找到可匹配岗位",
-        )
-        return new_decision, None
-    department = _secondary_department(job.department)
-    if not department:
-        new_decision = _create_agent_failure_decision(
-            workflow,
-            resume,
-            error_code="reference_not_found",
-            error_message="AI 重试时未找到可用二级部门",
-        )
-        return new_decision, None
-    contact = _first_secondary_contact(department)
-    if not contact:
-        new_decision = _create_agent_failure_decision(
-            workflow,
-            resume,
-            error_code="reference_not_found",
-            error_message="AI 重试时未找到可用二级接口人",
+            error_message="AI 重试时当前志愿招聘主体下没有有效岗位需求",
         )
         return new_decision, None
 
@@ -1000,9 +1072,8 @@ def retry_agent_decision(decision):
         workflow,
         resume,
         matched_rule=admission.matched_rule,
-        job=job,
-        contact=contact,
-        classify_reason=classify_reason,
+        jobs=jobs,
+        force=True,
     )
     new_decision = (
         attempt.agent_decision

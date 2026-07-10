@@ -1,42 +1,11 @@
 import { useMemo, useState } from 'react'
-import { Button, Checkbox, Input, Space } from 'antd'
 import { FilterOutlined, SearchOutlined } from '@ant-design/icons'
+import { SelectFilterDropdown, TextFilterDropdown } from './DataTableFilterDropdowns'
 import ResizableHeaderCell from './ResizableHeaderCell'
 
 export function textColumnFilter(placeholder) {
   return {
-    filterDropdown: ({ selectedKeys, setSelectedKeys, confirm, clearFilters, close }) => (
-      <div style={{ padding: 8, width: 220 }} onKeyDown={(event) => event.stopPropagation()}>
-        <Input
-          autoFocus
-          allowClear
-          placeholder={placeholder}
-          value={selectedKeys[0]}
-          onChange={(event) =>
-            setSelectedKeys(event.target.value ? [event.target.value] : [])
-          }
-          onPressEnter={() => confirm()}
-          style={{ marginBottom: 8 }}
-        />
-        <Space>
-          <Button type="primary" size="small" icon={<SearchOutlined />} onClick={() => confirm()}>
-            确认
-          </Button>
-          <Button
-            size="small"
-            onClick={() => {
-              clearFilters?.()
-              confirm()
-            }}
-          >
-            重置
-          </Button>
-          <Button size="small" onClick={() => close?.()}>
-            取消
-          </Button>
-        </Space>
-      </div>
-    ),
+    filterDropdown: (props) => <TextFilterDropdown {...props} placeholder={placeholder} />,
     filterIcon: (filtered) => (
       <SearchOutlined style={{ color: filtered ? '#1677ff' : undefined }} />
     ),
@@ -46,51 +15,17 @@ export function textColumnFilter(placeholder) {
 export function selectColumnFilter(options, multiple = false) {
   return {
     filterMultiple: multiple,
-    filterDropdown: ({ selectedKeys, setSelectedKeys, confirm, clearFilters, close }) => (
-      <div style={{ padding: 8, width: 220 }} onKeyDown={(event) => event.stopPropagation()}>
-        <Space direction="vertical" size={4} style={{ width: '100%', marginBottom: 8 }}>
-          {options.map((option) => {
-            const checked = selectedKeys.includes(option.value)
-            return (
-              <Checkbox
-                key={option.value}
-                checked={checked}
-                onChange={(event) => {
-                  if (multiple) {
-                    setSelectedKeys(
-                      event.target.checked
-                        ? [...selectedKeys, option.value]
-                        : selectedKeys.filter((value) => value !== option.value),
-                    )
-                    return
-                  }
-                  setSelectedKeys(event.target.checked ? [option.value] : [])
-                }}
-              >
-                {option.text}
-              </Checkbox>
-            )
-          })}
-        </Space>
-        <Space>
-          <Button type="primary" size="small" icon={<FilterOutlined />} onClick={() => confirm()}>
-            确认
-          </Button>
-          <Button
-            size="small"
-            onClick={() => {
-              clearFilters?.()
-              confirm()
-            }}
-          >
-            重置
-          </Button>
-          <Button size="small" onClick={() => close?.()}>
-            取消
-          </Button>
-        </Space>
-      </div>
-    ),
+    filterDropdown: (props) => {
+      const filterKey = (props.selectedKeys || []).join('\u0001')
+      return (
+        <SelectFilterDropdown
+          key={filterKey}
+          {...props}
+          options={options}
+          multiple={multiple}
+        />
+      )
+    },
     filterIcon: (filtered) => (
       <FilterOutlined style={{ color: filtered ? '#1677ff' : undefined }} />
     ),

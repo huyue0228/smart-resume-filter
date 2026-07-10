@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Modal, Progress } from 'antd'
-import { runPipeline } from '../api/services'
+import { fetchPipelineRun, runPipeline } from '../api/services'
 
 // 命令式：parent 调 run(steps, mode) 顺序执行各步并推进进度条；返回 {success}。
 // steps: [{ step: 'step1', label: '查重与志愿排序' }, ...]
@@ -17,6 +17,23 @@ export function useProcessRunner() {
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
+  const waitForRun = async (initial) => {
+    let current = initial
+    while (['pending', 'running'].includes(current?.status)) {
+      await sleep(800)
+      const { data } = await fetchPipelineRun(current.id)
+      current = data
+      const total = Number(current.total_count || 0)
+      if (total > 0) {
+        setS((p) => ({
+          ...p,
+          percent: Math.min(99, Math.round((Number(current.processed_count || 0) / total) * 100)),
+        }))
+      }
+    }
+    return current
+  }
+
   const run = async (steps, mode, title, options = {}) => {
     setS({ open: true, percent: 0, idx: 0, total: steps.length, label: steps[0]?.label || '', error: '', title })
     for (let i = 0; i < steps.length; i++) {
@@ -28,7 +45,13 @@ export function useProcessRunner() {
           mode,
           ...(scope ? { scope } : {}),
         })
-        if (data?.status === 'failed') throw new Error(data?.message || '处理失败')
+        const result = await waitForRun(data)
+        if (result?.status === 'failed') throw new Error(result?.message || '处理失败')
+        if (result?.status === 'partial_failed') {
+          throw new Error(
+            `${result?.message || '部分处理失败'}；失败 ${result?.failed_count || 0} 条，请到 AI 决策页处理`,
+          )
+        }
       } catch (error) {
         const detail = error?.message ? `：${error.message}` : ''
         setS((p) => ({ ...p, error: `「${steps[i].label}」处理失败${detail}` }))

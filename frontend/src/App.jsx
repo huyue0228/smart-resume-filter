@@ -11,6 +11,7 @@ import DepartmentsPage from './pages/DepartmentsPage'
 import ConfigPage from './pages/ConfigPage'
 import UsersPage from './pages/UsersPage'
 import WorkflowsPage from './pages/WorkflowsPage'
+import AgentDecisionsPage from './pages/AgentDecisionsPage'
 
 function AppRoutes() {
   const { loading, isAuthenticated, hasPermission, isContact } = useRole()
@@ -59,6 +60,10 @@ function AppRoutes() {
             ['attempt.view_all', 'attempt.view_received', 'attempt.view_assigned'],
             <AllocationsPage />,
           )}
+        />
+        <Route
+          path="/agent-decisions"
+          element={guarded('attempt.view_all', <AgentDecisionsPage />)}
         />
         <Route
           path="/archives"

@@ -35,7 +35,8 @@ from apps.ingestion.sources import (
     import_files,
 )
 from apps.pipeline.ai_config import PUBLIC_AI_CONFIG_REGISTRY
-from apps.pipeline import runner
+from apps.pipeline import ai_config, runner
+from apps.pipeline.tasks import execute_run_task
 from apps.pipeline.services import allocate as allocate_service
 
 from . import serializers
@@ -330,11 +331,21 @@ class ResumeViewSet(PermissionedReadOnlyModelViewSet):
                 {"detail": "目标接口人不存在"}, status=status.HTTP_400_BAD_REQUEST
             )
         try:
+            secondary_contact = None
+            secondary_contact_id = request.data.get("secondary_contact_id")
+            if secondary_contact_id:
+                secondary_contact = m.Contact.objects.filter(pk=secondary_contact_id).first()
+                if not secondary_contact:
+                    return Response(
+                        {"detail": "指定二级接口人不存在"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
             attempt = allocate_service.manual_assign(
                 resume,
                 contact,
                 user=request.user,
                 manual_reason=request.data.get("manual_reason", ""),
+                secondary_contact=secondary_contact,
             )
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -653,6 +664,9 @@ class AssignmentAttemptViewSet(PermissionedReadOnlyModelViewSet):
         "bulk_dispatch": "attempt.dispatch",
         "assign_sub_contact": "attempt.assign_sub_contact",
         "confirm_review": "attempt.dispatch",
+        "cancel_attempt": "attempt.dispatch",
+        "cancel_review": "attempt.dispatch",
+        "transfer_to_manual": "resume.manual_assign",
         "feedback": "attempt.feedback",
         "export_resumes": "attempt.export",
         "resume_preview": "attempt.export",
@@ -785,6 +799,62 @@ class AssignmentAttemptViewSet(PermissionedReadOnlyModelViewSet):
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(serializers.AssignmentAttemptSerializer(attempt).data)
 
+    @action(detail=True, methods=["post"], url_path="cancel")
+    def cancel_attempt(self, request, pk=None):
+        attempt = self.get_object()
+        if attempt.status != m.AssignmentAttempt.STATUS_PENDING_DISPATCH:
+            return Response(
+                {"detail": "仅待下发尝试可以通过该接口取消"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            attempt = allocate_service.cancel_attempt(
+                attempt, request.data.get("reason") or "hr_cancelled"
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(serializers.AssignmentAttemptSerializer(attempt).data)
+
+    @action(detail=True, methods=["post"], url_path="cancel-review")
+    def cancel_review(self, request, pk=None):
+        attempt = self.get_object()
+        if attempt.status != m.AssignmentAttempt.STATUS_PENDING_REVIEW:
+            return Response(
+                {"detail": "仅待复核 AI 尝试可以取消复核"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            attempt = allocate_service.cancel_attempt(
+                attempt, request.data.get("reason") or "hr_cancelled_review"
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(serializers.AssignmentAttemptSerializer(attempt).data)
+
+    @action(detail=True, methods=["post"], url_path="transfer-to-manual")
+    def transfer_to_manual(self, request, pk=None):
+        attempt = self.get_object()
+        contact_id = request.data.get("contact_id")
+        contact = m.Contact.objects.filter(pk=contact_id, is_active=True).first()
+        if not contact:
+            return Response({"detail": "目标接口人不存在或未启用"}, status=status.HTTP_400_BAD_REQUEST)
+        secondary_contact = None
+        if request.data.get("secondary_contact_id"):
+            secondary_contact = m.Contact.objects.filter(
+                pk=request.data["secondary_contact_id"], is_active=True
+            ).first()
+        try:
+            manual_attempt = allocate_service.manual_assign(
+                attempt.resume,
+                contact,
+                user=request.user,
+                manual_reason=request.data.get("manual_reason") or "AI 复核转人工分配",
+                secondary_contact=secondary_contact,
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(serializers.AssignmentAttemptSerializer(manual_attempt).data)
+
     @action(detail=True, methods=["post"], url_path="feedback")
     def feedback(self, request, pk=None):
         attempt = self.get_object()
@@ -872,7 +942,7 @@ class ProcessingRunViewSet(PermissionedReadOnlyModelViewSet):
 
 
 class PipelineRunView(APIView):
-    """触发流水线：单步或一键全流程（demo 同步执行）。"""
+    """创建 ProcessingRun 并交给 Celery；eager 本地模式仍会立即完成。"""
 
     permission_classes = [HasPermissionCode]
     permission_code = "pipeline.run"
@@ -881,7 +951,15 @@ class PipelineRunView(APIView):
         step = request.data.get("step", "all")
         mode = request.data.get("mode", "rule")
         scope = request.data.get("scope") or {}
-        run = runner.run_step(step, mode=mode, scope=scope)
+        try:
+            run = runner.create_run(step, mode=mode, scope=scope)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        task = execute_run_task.delay(run.id)
+        run.refresh_from_db()
+        if not run.celery_task_id:
+            run.celery_task_id = task.id or ""
+            run.save(update_fields=["celery_task_id"])
         return Response(
             {
                 "id": run.id,
@@ -889,7 +967,15 @@ class PipelineRunView(APIView):
                 "mode": run.mode,
                 "status": run.status,
                 "message": run.message,
-            }
+                "total_count": run.total_count,
+                "processed_count": run.processed_count,
+                "failed_count": run.failed_count,
+            },
+            status=(
+                status.HTTP_202_ACCEPTED
+                if run.status in ["pending", "running"]
+                else status.HTTP_200_OK
+            ),
         )
 
 
@@ -959,7 +1045,32 @@ class ConfigViewSet(viewsets.ViewSet):
             data={**self._item_data(pk), "value": request.data.get("value")}
         )
         serializer.is_valid(raise_exception=True)
+        value = serializer.validated_data["value"]
+        meta = CONFIG_REGISTRY[pk]
+        if meta.get("value_type") in ["number", "integer"]:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return Response({"detail": "配置值类型不正确"}, status=status.HTTP_400_BAD_REQUEST)
+            if meta.get("value_type") == "integer" and not isinstance(value, int):
+                return Response({"detail": "配置值必须是整数"}, status=status.HTTP_400_BAD_REQUEST)
+            if (
+                "min" in meta
+                and value < meta["min"]
+                or "max" in meta
+                and value > meta["max"]
+            ):
+                return Response(
+                    {"detail": f"配置值必须在 {meta.get('min')} 到 {meta.get('max')} 之间"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        if pk == "ai_review_threshold":
+            dispatch = ai_config._config_float("ai_dispatch_threshold")
+            if float(value) > dispatch:
+                return Response({"detail": "人工复核阈值不能高于自动下发阈值"}, status=status.HTTP_400_BAD_REQUEST)
+        if pk == "ai_dispatch_threshold":
+            review = ai_config._config_float("ai_review_threshold")
+            if float(value) < review:
+                return Response({"detail": "自动下发阈值不能低于人工复核阈值"}, status=status.HTTP_400_BAD_REQUEST)
         m.Config.objects.update_or_create(
-            key=pk, defaults={"value": serializer.validated_data["value"]}
+            key=pk, defaults={"value": value}
         )
         return Response(self._item_data(pk))

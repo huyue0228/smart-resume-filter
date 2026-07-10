@@ -2,6 +2,7 @@ from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
+from types import SimpleNamespace
 import zipfile
 from urllib.parse import quote
 
@@ -144,7 +145,35 @@ class AgentDispatchDecisionApiTests(TestCase):
             match_mode="ai",
         )
 
-        response = self.client.post(f"/api/agent-decisions/{self.decision.id}/retry/")
+        profile = m.ResumeProfile.objects.create(
+            resume=self.resume, parse_status="parsed", raw_text="简历正文"
+        )
+        job = m.Job.objects.get()
+        contact = m.Contact.objects.get(employee_no="L2001")
+        decision_output = SimpleNamespace(
+            recommendation="dispatch",
+            summary="结构化 AI 建议",
+            reason="证据充分",
+            evidence=["项目经历"],
+            risks=[],
+        )
+        result = SimpleNamespace(
+            profile=profile,
+            output=SimpleNamespace(
+                decision=decision_output,
+                profile=SimpleNamespace(risk_flags=[]),
+            ),
+            job=job,
+            department=contact.department,
+            contact=contact,
+            confidence=0.78,
+            score_breakdown={"major_match": 0.78},
+        )
+        with patch(
+            "apps.pipeline.services.allocate.ai_service.screen_resume",
+            return_value=result,
+        ):
+            response = self.client.post(f"/api/agent-decisions/{self.decision.id}/retry/")
 
         self.assertEqual(response.status_code, 200)
         old_attempt.refresh_from_db()
@@ -173,8 +202,7 @@ class PipelineRunApiTests(TestCase):
         self.client.force_authenticate(self.user)
 
     def test_pipeline_run_forwards_scope_to_runner(self):
-        run = m.ProcessingRun(
-            id=123,
+        run = m.ProcessingRun.objects.create(
             step="step2",
             mode="rule",
             status="success",
@@ -185,7 +213,10 @@ class PipelineRunApiTests(TestCase):
             "candidate_filters": {"system_status": "screening_passed,screening_rejected"},
         }
 
-        with patch("apps.api.views.runner.run_step", return_value=run) as mock_run:
+        with patch("apps.api.views.runner.create_run", return_value=run) as mock_create, patch(
+            "apps.api.views.execute_run_task.delay",
+            return_value=SimpleNamespace(id="task-123"),
+        ):
             response = self.client.post(
                 "/api/pipeline/run/",
                 {"step": "step2", "mode": "rule", "scope": scope},
@@ -193,7 +224,7 @@ class PipelineRunApiTests(TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        mock_run.assert_called_once_with("step2", mode="rule", scope=scope)
+        mock_create.assert_called_once_with("step2", mode="rule", scope=scope)
         self.assertEqual(response.data["message"], "ok")
 
 

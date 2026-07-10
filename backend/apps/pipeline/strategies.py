@@ -215,17 +215,12 @@ class RuleStrategy:
 
 
 class AIStrategy:
-    """AI 模式（demo 占位）：当前回退规则结果并附说明；后续接 OpenAI 语义分类。"""
+    """兼容旧调用的 fail-fast 策略；正式 AI 流程由 pipeline.ai 服务执行。"""
 
     mode = "ai"
 
-    def __init__(self):
-        self._rule = RuleStrategy()
-
     def classify(self, resume, jobs):
-        job, category, _ = self._rule.classify(resume, jobs)
-        reason = "AI(demo)：基于职位名称语义判断（当前回退规则匹配结果）"
-        return job, category, reason
+        raise RuntimeError("AI 模式必须通过正式 ResumeScreeningService 执行，禁止回退 Rule")
 
 
 def get_strategy(mode):

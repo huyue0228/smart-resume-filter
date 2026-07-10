@@ -20,6 +20,10 @@ import {
   fetchAllocations,
   dispatchAllocation,
   confirmReviewAllocation,
+  cancelAllocation,
+  cancelReviewAllocation,
+  transferAllocationToManual,
+  retryAgentDecision,
   bulkDispatchAllocations,
   assignSubContact,
   submitAllocationFeedback,
@@ -77,6 +81,15 @@ export default function AllocationsPage() {
     note: '',
     loading: false,
   })
+  const [manualModal, setManualModal] = useState({
+    open: false,
+    record: null,
+    contacts: [],
+    contactId: undefined,
+    secondaryId: undefined,
+    reason: '',
+    loading: false,
+  })
 
   const handleModeChange = (next) => {
     if (next === mode) return
@@ -120,6 +133,62 @@ export default function AllocationsPage() {
       // toasted by interceptor
     } finally {
       setDispatchingId(null)
+    }
+  }
+
+  const handleCancelAttempt = async (record) => {
+    setDispatchingId(record.id)
+    try {
+      const cancel = record.status === 'pending_review' ? cancelReviewAllocation : cancelAllocation
+      await cancel(record.id, {
+        reason: record.status === 'pending_review' ? 'hr_cancelled_review' : 'hr_cancelled_dispatch',
+      })
+      message.success(record.status === 'pending_review' ? '已取消 AI 复核建议' : '已取消待下发尝试')
+      actionRef.current?.reload()
+    } finally {
+      setDispatchingId(null)
+    }
+  }
+
+  const handleRetryAI = async (record) => {
+    if (!record.agent_decision) return
+    setDispatchingId(record.id)
+    try {
+      await retryAgentDecision(record.agent_decision)
+      message.success('已重新发起 AI 筛选')
+      actionRef.current?.reload()
+    } finally {
+      setDispatchingId(null)
+    }
+  }
+
+  const openManualModal = async (record) => {
+    setManualModal((prev) => ({ ...prev, open: true, record, loading: true }))
+    try {
+      const { data } = await fetchContacts({ is_active: 'true', page_size: 500 })
+      setManualModal((prev) => ({ ...prev, contacts: data?.results || [], loading: false }))
+    } catch {
+      setManualModal((prev) => ({ ...prev, loading: false }))
+    }
+  }
+
+  const handleTransferToManual = async () => {
+    if (!manualModal.contactId) {
+      message.warning('请选择目标接口人')
+      return
+    }
+    setManualModal((prev) => ({ ...prev, loading: true }))
+    try {
+      await transferAllocationToManual(manualModal.record.id, {
+        contact_id: manualModal.contactId,
+        secondary_contact_id: manualModal.secondaryId,
+        manual_reason: manualModal.reason || 'AI 复核转人工分配',
+      })
+      message.success('已转为人工分配')
+      setManualModal({ open: false, record: null, contacts: [], contactId: undefined, secondaryId: undefined, reason: '', loading: false })
+      actionRef.current?.reload()
+    } catch {
+      setManualModal((prev) => ({ ...prev, loading: false }))
     }
   }
 
@@ -338,6 +407,24 @@ export default function AllocationsPage() {
                 >
                   确认下发
                 </Button>
+              </Popconfirm>
+            )}
+            {canConfirmReview && hasPermission('resume.manual_assign') && (
+              <Button type="link" size="small" style={{ padding: 0 }} onClick={() => openManualModal(record)}>
+                转人工
+              </Button>
+            )}
+            {canConfirmReview && record.agent_decision && (
+              <Button type="link" size="small" style={{ padding: 0 }} onClick={() => handleRetryAI(record)}>
+                重试 AI
+              </Button>
+            )}
+            {(canConfirmReview || canDispatch) && (
+              <Popconfirm
+                title={canConfirmReview ? '取消该 AI 复核建议并归档？' : '取消该待下发尝试？'}
+                onConfirm={() => handleCancelAttempt(record)}
+              >
+                <Button type="link" danger size="small" style={{ padding: 0 }}>取消</Button>
               </Popconfirm>
             )}
             {canAssign && (
@@ -566,6 +653,52 @@ export default function AllocationsPage() {
           </Space>
         )}
       </Drawer>
+      <Modal
+        title="AI 复核转人工分配"
+        open={manualModal.open}
+        confirmLoading={manualModal.loading}
+        onOk={handleTransferToManual}
+        onCancel={() => setManualModal({ open: false, record: null, contacts: [], contactId: undefined, secondaryId: undefined, reason: '', loading: false })}
+        okText="确认分配"
+      >
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <Select
+            showSearch
+            optionFilterProp="label"
+            style={{ width: '100%' }}
+            placeholder="选择二级或三级接口人"
+            value={manualModal.contactId}
+            options={manualModal.contacts.map((contact) => ({
+              value: contact.id,
+              label: `${contact.name}（${contact.contact_level === 'secondary' ? '二级' : '三级'} / ${contact.department_name || '未绑定部门'}）`,
+            }))}
+            onChange={(value) => setManualModal((prev) => ({ ...prev, contactId: value, secondaryId: undefined }))}
+          />
+          {(() => {
+            const target = manualModal.contacts.find((item) => item.id === manualModal.contactId)
+            if (target?.contact_level !== 'tertiary') return null
+            const parents = manualModal.contacts.filter(
+              (item) => item.contact_level === 'secondary' && item.department === target.parent_department,
+            )
+            if (parents.length <= 1) return null
+            return (
+              <Select
+                style={{ width: '100%' }}
+                placeholder="该三级部门有多个上级二级接口人，请明确选择"
+                value={manualModal.secondaryId}
+                options={parents.map((item) => ({ value: item.id, label: `${item.name}（${item.employee_no}）` }))}
+                onChange={(value) => setManualModal((prev) => ({ ...prev, secondaryId: value }))}
+              />
+            )
+          })()}
+          <Input.TextArea
+            rows={3}
+            placeholder="人工分配原因"
+            value={manualModal.reason}
+            onChange={(event) => setManualModal((prev) => ({ ...prev, reason: event.target.value }))}
+          />
+        </Space>
+      </Modal>
       <Modal
         title="转派三级接口人"
         open={assignModal.open}

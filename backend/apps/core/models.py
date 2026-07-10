@@ -286,15 +286,21 @@ class Resume(models.Model):
 
 
 class ResumeProfile(models.Model):
-    """AI 策略读取简历后的结构化画像（demo 版可由元数据生成）。"""
+    """AI 策略读取 PDF 后形成的、可按文件和版本复用的结构化画像。"""
 
     resume = models.OneToOneField(Resume, on_delete=models.CASCADE, related_name="profile")
-    parsed_text = models.TextField(blank=True)
-    projects = models.JSONField(default=list, blank=True)
-    internships = models.JSONField(default=list, blank=True)
+    file_checksum = models.CharField(max_length=64, blank=True, db_index=True)
+    parse_model = models.CharField(max_length=32, blank=True)
+    profile_version = models.CharField(max_length=32, blank=True)
+    raw_text = models.TextField(blank=True)
+    education_experiences = models.JSONField(default=list, blank=True)
+    project_experiences = models.JSONField(default=list, blank=True)
+    internship_experiences = models.JSONField(default=list, blank=True)
     skills = models.JSONField(default=list, blank=True)
     certificates = models.JSONField(default=list, blank=True)
     major_direction = models.CharField(max_length=128, blank=True)
+    summary = models.TextField(blank=True)
+    profile_risk_flags = models.JSONField(default=list, blank=True)
     parse_status = models.CharField(max_length=32, default="pending")
     parse_error = models.TextField(blank=True)
     parsed_at = models.DateTimeField(null=True, blank=True)
@@ -372,6 +378,7 @@ class CandidateWorkflow(models.Model):
     ARCHIVE_CONTACT_NOT_FOUND = "contact_not_found"
     ARCHIVE_SUB_CONTACT_NOT_FOUND = "sub_contact_not_found"
     ARCHIVE_AGENT_NO_RECOMMENDATION = "agent_no_recommendation"
+    ARCHIVE_HR_CANCELLED = "hr_cancelled"
     ARCHIVE_ALL_REJECTED = "all_rejected"
     ARCHIVE_RERUN_PRESERVED = "rerun_preserved"
     ARCHIVE_REASON_CHOICES = [
@@ -383,6 +390,7 @@ class CandidateWorkflow(models.Model):
         (ARCHIVE_CONTACT_NOT_FOUND, "无可用接口人"),
         (ARCHIVE_SUB_CONTACT_NOT_FOUND, "二级部门下没有可用三级接口人"),
         (ARCHIVE_AGENT_NO_RECOMMENDATION, "AI 无有效建议"),
+        (ARCHIVE_HR_CANCELLED, "HR 取消当前分配"),
         (ARCHIVE_ALL_REJECTED, "全部志愿未通过"),
         (ARCHIVE_RERUN_PRESERVED, "重跑时保留归档"),
     ]
@@ -730,11 +738,36 @@ class ProcessingRun(models.Model):
     mode = models.CharField(max_length=8, default="rule")
     status = models.CharField(max_length=16, default="pending")
     celery_task_id = models.CharField(max_length=64, blank=True)
+    celery_group_id = models.CharField(max_length=64, blank=True)
     params = models.JSONField(default=dict, blank=True)
     message = models.TextField(blank=True)
+    total_count = models.PositiveIntegerField(default=0)
+    processed_count = models.PositiveIntegerField(default=0)
+    success_count = models.PositiveIntegerField(default=0)
+    failed_count = models.PositiveIntegerField(default=0)
+    review_count = models.PositiveIntegerField(default=0)
+    dispatch_count = models.PositiveIntegerField(default=0)
+    archive_count = models.PositiveIntegerField(default=0)
+    chunk_size = models.PositiveIntegerField(null=True, blank=True)
+    chunk_total = models.PositiveIntegerField(null=True, blank=True)
+    chunk_done = models.PositiveIntegerField(null=True, blank=True)
+    chunk_failed = models.PositiveIntegerField(null=True, blank=True)
+    chunk_errors = models.JSONField(default=list, blank=True)
+    model_name = models.CharField(max_length=64, blank=True)
+    prompt_version = models.CharField(max_length=32, blank=True)
+    decision_version = models.CharField(max_length=32, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
+    undone_at = models.DateTimeField(null=True, blank=True)
+    undone_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="processing_runs_undone",
+    )
+    error = models.TextField(blank=True)
 
     class Meta:
         ordering = ["-created_at"]

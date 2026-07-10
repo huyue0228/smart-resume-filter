@@ -35,6 +35,14 @@ def _tag_name(tag, fallback="非目标院校"):
     return tag.name if tag else fallback
 
 
+def _school_platform_name(tag, school):
+    if tag:
+        return _tag_name(tag)
+    if school and school.platform:
+        return school.platform
+    return "非目标院校"
+
+
 def classify_candidates(candidates, *, overwrite=True):
     """按院校清单给指定候选人集合补院校标签。
 
@@ -58,30 +66,33 @@ def classify_candidates(candidates, *, overwrite=True):
         highest_tag = _school_tag(highest_school, default_tag)
         should_update_first = overwrite or not cand.first_degree_tag_id
         should_update_highest = overwrite or not cand.highest_degree_tag_id
+        # Step2 的补分类只补空字段。已有标签/平台可能来自 HR 手工修正或
+        # 完整 Step3 分类结果，不能因为单次处理简历而被院校清单兜底覆盖。
+        should_update_first_platform = overwrite or not cand.first_degree_platform
+        should_update_highest_platform = overwrite or not cand.highest_degree_platform
         if should_update_first:
             cand.first_degree_tag = first_tag
         if should_update_highest:
             cand.highest_degree_tag = highest_tag
-        cand.first_degree_platform = (
-            _tag_name(cand.first_degree_tag)
-            if cand.first_degree_tag_id or first_tag
-            else (first_school.platform if first_school and first_school.platform else "非目标院校")
-        )
-        cand.highest_degree_platform = (
-            _tag_name(cand.highest_degree_tag)
-            if cand.highest_degree_tag_id or highest_tag
-            else (
-                highest_school.platform
-                if highest_school and highest_school.platform
-                else "非目标院校"
+        if should_update_first_platform:
+            cand.first_degree_platform = _school_platform_name(
+                cand.first_degree_tag, first_school
             )
-        )
-        update_fields = ["first_degree_platform", "highest_degree_platform"]
+        if should_update_highest_platform:
+            cand.highest_degree_platform = _school_platform_name(
+                cand.highest_degree_tag, highest_school
+            )
+        update_fields = []
         if should_update_first:
             update_fields.append("first_degree_tag")
         if should_update_highest:
             update_fields.append("highest_degree_tag")
-        cand.save(update_fields=update_fields)
+        if should_update_first_platform:
+            update_fields.append("first_degree_platform")
+        if should_update_highest_platform:
+            update_fields.append("highest_degree_platform")
+        if update_fields:
+            cand.save(update_fields=update_fields)
         count += 1
     return count
 

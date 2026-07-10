@@ -12,6 +12,8 @@ import {
   Table,
   Typography,
   Tooltip,
+  Select,
+  Input,
 } from 'antd'
 import { DownloadOutlined, PlayCircleOutlined, UndoOutlined } from '@ant-design/icons'
 import {
@@ -20,11 +22,14 @@ import {
   fetchCandidates,
   fetchUndoStatus,
   undoLastImport,
+  fetchContacts,
+  manualAssignResume,
 } from '../api/services'
 import ImportButton from '../components/ImportButton'
 import ResumePreview from '../components/ResumePreview'
 import { useProcessRunner } from '../components/useProcessRunner'
 import { useMode } from '../contexts/ModeContext'
+import { useRole } from '../contexts/RoleContext'
 import {
   normalizeTableFilters,
   selectColumnFilter,
@@ -38,10 +43,8 @@ const RESUME_IMPORT_FIELDS = [
   { key: 'resume_package', label: '② 简历包 (.zip，文件名含应聘ID)', accept: '.zip' },
 ]
 
-// 上传后自动处理：前置数据准备 + 候选人处理主流程
+// 普通简历上传只跑候选人主流程；Step3/Step4 由前置主数据维护负责。
 const PROCESS_STEPS = [
-  { step: 'step3', label: '院校分类' },
-  { step: 'step4', label: '需求录入' },
   { step: 'step1', label: '查重与志愿排序' },
   { step: 'step2', label: '简历分类、分配与下发' },
 ]
@@ -119,6 +122,7 @@ const REASON_TYPE = {
 export default function ResumesPage() {
   const actionRef = useRef()
   const { mode } = useMode()
+  const { hasPermission } = useRole()
   const { run, modal } = useProcessRunner()
   const [undo, setUndo] = useState({ available: false })
   const [detailRecord, setDetailRecord] = useState(null)
@@ -128,6 +132,49 @@ export default function ResumesPage() {
   const [processModalOpen, setProcessModalOpen] = useState(false)
   const [processStatusSelection, setProcessStatusSelection] = useState([])
   const [lastQuery, setLastQuery] = useState({})
+  const [manualModal, setManualModal] = useState({
+    open: false,
+    resume: null,
+    contacts: [],
+    contactId: undefined,
+    secondaryId: undefined,
+    reason: '',
+    loading: false,
+  })
+
+  const openManualAssign = async (resume) => {
+    setManualModal((prev) => ({ ...prev, open: true, resume, loading: true }))
+    try {
+      const { data } = await fetchContacts({
+        is_active: 'true',
+        page_size: 500,
+      })
+      setManualModal((prev) => ({ ...prev, contacts: data?.results || [], loading: false }))
+    } catch {
+      setManualModal((prev) => ({ ...prev, loading: false }))
+    }
+  }
+
+  const handleManualAssign = async () => {
+    if (!manualModal.contactId) {
+      message.warning('请选择二级接口人')
+      return
+    }
+    setManualModal((prev) => ({ ...prev, loading: true }))
+    try {
+      await manualAssignResume(manualModal.resume.id, {
+        contact_id: manualModal.contactId,
+        secondary_contact_id: manualModal.secondaryId,
+        manual_reason: manualModal.reason || 'HR 手动强制分配',
+      })
+      message.success('已创建人工分配尝试')
+      setManualModal({ open: false, resume: null, contacts: [], contactId: undefined, secondaryId: undefined, reason: '', loading: false })
+      setDetailRecord(null)
+      actionRef.current?.reload()
+    } catch {
+      setManualModal((prev) => ({ ...prev, loading: false }))
+    }
+  }
 
   const refreshUndo = async () => {
     try {
@@ -618,6 +665,15 @@ export default function ResumesPage() {
               </Descriptions.Item>
             </Descriptions>
 
+            {hasPermission('resume.manual_assign') && detailRecord.current_resume && (
+              <Button
+                style={{ marginTop: 16 }}
+                onClick={() => openManualAssign(detailRecord.current_resume)}
+              >
+                手动强制分配当前志愿
+              </Button>
+            )}
+
             <Table
               style={{ marginTop: 16 }}
               title={() => '投递志愿'}
@@ -704,6 +760,52 @@ export default function ResumesPage() {
           </>
         )}
       </Drawer>
+      <Modal
+        title="手动强制分配当前志愿"
+        open={manualModal.open}
+        confirmLoading={manualModal.loading}
+        onOk={handleManualAssign}
+        onCancel={() => setManualModal({ open: false, resume: null, contacts: [], contactId: undefined, secondaryId: undefined, reason: '', loading: false })}
+        okText="确认分配"
+      >
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <Select
+            showSearch
+            optionFilterProp="label"
+            style={{ width: '100%' }}
+            placeholder="选择二级或三级接口人"
+            value={manualModal.contactId}
+            options={manualModal.contacts.map((contact) => ({
+              value: contact.id,
+              label: `${contact.name}（${contact.contact_level === 'secondary' ? '二级' : '三级'} / ${contact.department_name || '未绑定部门'} / ${contact.employee_no}）`,
+            }))}
+            onChange={(value) => setManualModal((prev) => ({ ...prev, contactId: value, secondaryId: undefined }))}
+          />
+          {(() => {
+            const target = manualModal.contacts.find((item) => item.id === manualModal.contactId)
+            if (target?.contact_level !== 'tertiary') return null
+            const parents = manualModal.contacts.filter(
+              (item) => item.contact_level === 'secondary' && item.department === target.parent_department,
+            )
+            if (parents.length <= 1) return null
+            return (
+              <Select
+                style={{ width: '100%' }}
+                placeholder="该三级部门有多个上级二级接口人，请明确选择"
+                value={manualModal.secondaryId}
+                options={parents.map((item) => ({ value: item.id, label: `${item.name}（${item.employee_no}）` }))}
+                onChange={(value) => setManualModal((prev) => ({ ...prev, secondaryId: value }))}
+              />
+            )
+          })()}
+          <Input.TextArea
+            rows={3}
+            placeholder="人工分配原因"
+            value={manualModal.reason}
+            onChange={(event) => setManualModal((prev) => ({ ...prev, reason: event.target.value }))}
+          />
+        </Space>
+      </Modal>
       {modal}
     </PageContainer>
   )

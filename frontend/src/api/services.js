@@ -119,6 +119,9 @@ export function previewResume(id) {
 export function previewAllocationResume(id) {
   return client.get(`/workflow-attempts/${id}/resume-preview/`, { responseType: 'blob' })
 }
+export function manualAssignResume(id, body) {
+  return client.post(`/resumes/${id}/manual-assign/`, body)
+}
 
 // ---- Generic list endpoints (placeholder pages / dropdowns) ----
 export function fetchCandidates(params) {
@@ -168,6 +171,9 @@ export function runPipeline(body) {
 export function fetchPipelineRuns(params) {
   return client.get('/pipeline/runs/', { params })
 }
+export function fetchPipelineRun(id) {
+  return client.get(`/pipeline/runs/${id}/`)
+}
 
 // ---- Candidate workflows ----
 export function fetchWorkflows(params) {
@@ -184,6 +190,15 @@ export function dispatchAllocation(id) {
 export function confirmReviewAllocation(id) {
   return client.post(`/workflow-attempts/${id}/confirm-review/`)
 }
+export function cancelAllocation(id, body) {
+  return client.post(`/workflow-attempts/${id}/cancel/`, body)
+}
+export function cancelReviewAllocation(id, body) {
+  return client.post(`/workflow-attempts/${id}/cancel-review/`, body)
+}
+export function transferAllocationToManual(id, body) {
+  return client.post(`/workflow-attempts/${id}/transfer-to-manual/`, body)
+}
 export function bulkDispatchAllocations(body, params) {
   return client.post('/workflow-attempts/bulk-dispatch/', body, { params })
 }
@@ -198,4 +213,12 @@ export function exportAllocations(ids, params) {
     params: { ...(ids && ids.length ? { ids: ids.join(',') } : {}), ...params },
     responseType: 'blob',
   })
+}
+
+// ---- AI decisions ----
+export function fetchAgentDecisions(params) {
+  return client.get('/agent-decisions/', { params })
+}
+export function retryAgentDecision(id) {
+  return client.post(`/agent-decisions/${id}/retry/`)
 }

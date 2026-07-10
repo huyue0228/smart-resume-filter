@@ -929,7 +929,15 @@ class AssignmentAttemptSerializer(serializers.ModelSerializer):
 class ProcessingRunSerializer(serializers.ModelSerializer):
     class Meta:
         model = m.ProcessingRun
-        fields = ["id", "step", "mode", "status", "message", "created_at", "finished_at"]
+        fields = [
+            "id", "step", "mode", "status", "message", "scope",
+            "celery_task_id", "celery_group_id", "params",
+            "total_count", "processed_count", "success_count", "failed_count",
+            "review_count", "dispatch_count", "archive_count",
+            "chunk_size", "chunk_total", "chunk_done", "chunk_failed", "chunk_errors",
+            "model_name", "prompt_version", "decision_version",
+            "created_at", "started_at", "finished_at", "undone_at", "undone_by", "error",
+        ]
 
 
 class AgentDispatchDecisionSerializer(serializers.ModelSerializer):
