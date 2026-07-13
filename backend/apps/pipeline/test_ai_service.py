@@ -138,6 +138,40 @@ class AIResumeScreeningServiceTests(TestCase):
 
         self.assertEqual(captured.exception.code, "ai_not_configured")
 
+    def test_provider_exception_is_reduced_to_safe_summary(self):
+        class ProviderError(Exception):
+            status_code = 401
+
+            def __str__(self):
+                return "Authorization: Bearer sk-secret-must-not-leak"
+
+        code, summary = service._safe_model_error(ProviderError())
+
+        self.assertEqual(code, "llm_connection_error")
+        self.assertIn("认证失败", summary)
+        self.assertNotIn("sk-secret", summary)
+
+    def test_client_initialization_exception_is_safely_mapped(self):
+        context = service._eligible_context(self.resume, [self.job])
+        with patch.dict(
+            "os.environ",
+            {
+                "AI_PROFILE": "openai",
+                "AI_MODEL_NAME": "gpt-5.4-mini",
+                "AI_API_KEY_ENV": "OPENAI_API_KEY",
+                "OPENAI_API_KEY": "test-key",
+            },
+            clear=False,
+        ), patch(
+            "openai.OpenAI",
+            side_effect=RuntimeError("proxy setup failed: sk-secret-must-not-leak"),
+        ):
+            with self.assertRaises(service.AIServiceError) as captured:
+                service._call_model(self.resume, "PDF 正文", context)
+
+        self.assertEqual(captured.exception.code, "llm_error")
+        self.assertNotIn("sk-secret", captured.exception.message)
+
     def test_deepseek_uses_chat_json_output_and_validates_schema(self):
         output = screening_output(
             contact_id=self.contact.id,

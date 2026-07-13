@@ -1,6 +1,6 @@
 interface:
   display_name: "智能简历筛选离线部署"
-  short_description: "部署、验证和安全卸载 smart-resume-filter 离线 Docker 包"
-  default_prompt: "Use $smart-resume-offline-deploy to deploy, verify, upgrade, or safely uninstall the smart-resume-filter offline Docker package. Require the prescribed confirmations before any Docker state change or data removal."
+  short_description: "通过固定编号菜单部署、验证和安全卸载离线 Docker 包"
+  default_prompt: "Use $smart-resume-offline-deploy to deploy, verify, or uninstall the smart-resume-filter offline Docker package through its fixed numbered confirmation menus."
 policy:
   allow_implicit_invocation: false

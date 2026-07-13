@@ -5,7 +5,6 @@ import {
   Tag,
   Space,
   Popconfirm,
-  Segmented,
   Modal,
   message,
   Select,
@@ -31,15 +30,8 @@ import {
   fetchContacts,
 } from '../api/services'
 import { useRole } from '../contexts/RoleContext'
-import { useMode } from '../contexts/ModeContext'
-import { useProcessRunner } from '../components/useProcessRunner'
 import ResumePreview from '../components/ResumePreview'
-import { AgentDecisionsTable } from './AgentDecisionsPage'
 import { downloadBlobFromResponse } from '../utils/download'
-
-const REPROCESS_STEPS = [
-  { step: 'step2', label: '简历分类、分配与下发' },
-]
 
 const STATUS_ENUM = {
   pending_dispatch: { text: '待下发', status: 'Default' },
@@ -57,17 +49,14 @@ const SOURCE_TEXT = {
   manual: '手动',
 }
 
-export default function AllocationsPage() {
+export default function AllocationsPage({ source = 'rule' }) {
   const actionRef = useRef()
   const { hasPermission, isContact, isSecondaryContact, isTertiaryContact } = useRole()
-  const { mode, setMode } = useMode()
-  const { run } = useProcessRunner()
   const [dispatchingId, setDispatchingId] = useState(null)
   const [bulkDispatching, setBulkDispatching] = useState(false)
   const [selectedRowKeys, setSelectedRowKeys] = useState([])
   const [exporting, setExporting] = useState(false)
   const [lastQuery, setLastQuery] = useState({})
-  const [allocationView, setAllocationView] = useState('attempts')
   const [detailRecord, setDetailRecord] = useState(null)
   const [assignModal, setAssignModal] = useState({
     open: false,
@@ -92,24 +81,6 @@ export default function AllocationsPage() {
     reason: '',
     loading: false,
   })
-
-  const handleModeChange = (next) => {
-    if (next === mode) return
-    Modal.confirm({
-      title: `切换到${next === 'ai' ? 'AI' : '规则'}模式`,
-      content: '将按新模式重新进行简历分类、分配与下发，是否继续？',
-      okText: '重新处理',
-      onOk: async () => {
-        setMode(next)
-        const r = await run(
-          REPROCESS_STEPS,
-          next,
-          `正在按${next === 'ai' ? 'AI' : '规则'}模式重算`,
-        )
-        if (r.success) message.success('已提交重新分配任务，可继续操作并在任务中心查看进度')
-      },
-    })
-  }
 
   const handleDispatch = async (record) => {
     setDispatchingId(record.id)
@@ -329,8 +300,6 @@ export default function AllocationsPage() {
         rejected: STATUS_ENUM.rejected,
       }
     : STATUS_ENUM
-  const canViewAgentDecisions = hasPermission('attempt.view_all')
-
   const columns = [
     { title: '候选人', dataIndex: 'candidate_name', width: 120, fixed: 'left' },
     {
@@ -462,46 +431,15 @@ export default function AllocationsPage() {
 
   return (
     <PageContainer
-      title="简历分配"
+      title={source === 'ai' ? 'AI分配' : '规则分配'}
       content={
         isContact
           ? isSecondaryContact
             ? 'HR 下发给你的分配尝试，可选择本二级部门下的三级接口人转派。'
             : '转派给你的分配尝试，可导出简历并提交通过/未通过反馈。'
-          : '简历分类、分配与下发尝试，可逐条下发到二级接口人，并导出候选人简历文件。'
-      }
-      extra={
-        isContact
-          ? undefined
-          : [
-              <Space key="mode" align="center">
-                <span style={{ color: '#666' }}>处理模式：</span>
-                <Segmented
-                  value={mode}
-                  onChange={handleModeChange}
-                  options={[
-                    { label: '规则模式', value: 'rule' },
-                    { label: 'AI 模式', value: 'ai' },
-                  ]}
-                />
-              </Space>,
-            ]
+          : `${source === 'ai' ? 'AI' : '规则'}分配尝试，可逐条下发到二级接口人，并导出候选人简历文件。`
       }
     >
-      {canViewAgentDecisions && (
-        <Segmented
-          value={allocationView}
-          onChange={setAllocationView}
-          options={[
-            { label: '规则分配', value: 'attempts' },
-            { label: 'AI分配', value: 'agent-decisions' },
-          ]}
-          style={{ marginBottom: 16 }}
-        />
-      )}
-      {allocationView === 'agent-decisions' ? (
-        <AgentDecisionsTable />
-      ) : (
       <ProTable
         actionRef={actionRef}
         rowKey="id"
@@ -569,7 +507,7 @@ export default function AllocationsPage() {
         ]}
         request={async (params) => {
           const { current, pageSize, status } = params
-          const query = { status }
+          const query = { status, source }
           setLastQuery(query)
           try {
             const { data } = await fetchAllocations({
@@ -587,7 +525,6 @@ export default function AllocationsPage() {
           }
         }}
       />
-      )}
       <Drawer
         title={
           detailRecord ? `${detailRecord.candidate_name || '-'} 的分配详情` : '分配详情'

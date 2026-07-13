@@ -3,31 +3,45 @@ from apps.core import models as m
 
 
 NON_TARGET_TAG_NAME = "非目标院校"
+NON_TARGET_TAG_CODE = "NON_TARGET"
 
 
 def _normalized(value):
     return "".join((value or "").lower().split())
 
 
-def _default_school_tag():
-    default_tag = m.SchoolTag.objects.filter(is_default=True, is_active=True).first()
-    if default_tag:
-        return default_tag
+def _non_target_school_tag():
     non_target = _normalized(NON_TARGET_TAG_NAME)
-    return next(
+    configured = next(
         (
             tag
             for tag in m.SchoolTag.objects.filter(is_active=True).order_by("id")
-            if _normalized(tag.name) == non_target
-            or _normalized(tag.code) == non_target
+            if _normalized(tag.name) == non_target or tag.code == NON_TARGET_TAG_CODE
         ),
         None,
     )
+    if configured:
+        return configured
+    # 兼容未执行 seed_base 的旧环境，首次院校分类时补齐同一预置标签。
+    return m.SchoolTag.objects.create(
+        code=NON_TARGET_TAG_CODE,
+        name=NON_TARGET_TAG_NAME,
+        is_default=False,
+        is_active=True,
+    )
 
 
-def _school_tag(school, default_tag):
+def _default_school_tag(non_target_tag):
+    default_tag = m.SchoolTag.objects.filter(is_default=True, is_active=True).first()
+    return default_tag or non_target_tag
+
+
+def _school_tag(school, default_tag, non_target_tag):
     if school and school.school_tag:
         return school.school_tag
+    # 不在导入院校清单中的学校统一视为非目标院校；清单中未配置标签时才用默认标签。
+    if not school:
+        return non_target_tag
     return default_tag
 
 
@@ -54,7 +68,8 @@ def classify_candidates(candidates, *, overwrite=True):
     """
     count = 0
     school_map = {s.name: s for s in m.School.objects.select_related("school_tag")}
-    default_tag = _default_school_tag()
+    non_target_tag = _non_target_school_tag()
+    default_tag = _default_school_tag(non_target_tag)
     for cand in candidates:
         first_school = (
             school_map.get(cand.first_degree_school) if cand.first_degree_school else None
@@ -62,8 +77,8 @@ def classify_candidates(candidates, *, overwrite=True):
         highest_school = (
             school_map.get(cand.highest_degree_school) if cand.highest_degree_school else None
         )
-        first_tag = _school_tag(first_school, default_tag)
-        highest_tag = _school_tag(highest_school, default_tag)
+        first_tag = _school_tag(first_school, default_tag, non_target_tag)
+        highest_tag = _school_tag(highest_school, default_tag, non_target_tag)
         should_update_first = overwrite or not cand.first_degree_tag_id
         should_update_highest = overwrite or not cand.highest_degree_tag_id
         # Step2 的补分类只补空字段。已有标签/平台可能来自 HR 手工修正或

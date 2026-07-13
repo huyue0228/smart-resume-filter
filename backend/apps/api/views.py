@@ -35,9 +35,10 @@ from apps.ingestion.sources import (
     import_files,
 )
 from apps.pipeline.ai_config import PUBLIC_AI_CONFIG_REGISTRY
-from apps.pipeline import ai_config, runner
-from apps.pipeline.tasks import execute_run_task
+from apps.pipeline import ai_config, cancellation, runner
+from apps.pipeline.tasks import execute_runs_sequence_task
 from apps.pipeline.services import allocate as allocate_service
+from apps.pipeline.ai import service as ai_service
 
 from . import serializers
 
@@ -63,6 +64,20 @@ def bool_query_value(value):
     if value in ["true", "false"]:
         return value == "true"
     return None
+
+
+def submit_processing_runs(runs):
+    """提交一组已创建运行，并为上传与手动处理统一回填 Celery 审计标识。"""
+    if not runs:
+        return runs
+    task = execute_runs_sequence_task.delay([run.id for run in runs])
+    task_id = getattr(task, "id", "") or ""
+    for run in runs:
+        run.refresh_from_db()
+        if not run.celery_task_id:
+            run.celery_task_id = task_id
+            run.save(update_fields=["celery_task_id"])
+    return runs
 
 
 def _clear_user_references(users):
@@ -232,6 +247,14 @@ class MeView(APIView):
         return Response(serializers.CurrentUserSerializer(request.user).data)
 
 
+class AIAvailabilityView(APIView):
+    permission_classes = [HasPermissionCode]
+    permission_code = "pipeline.run"
+
+    def get(self, request):
+        return Response({"enabled": ai_config.is_ai_enabled()})
+
+
 class ImportView(APIView):
     """数据导入：multipart 上传 4 张表 + 简历包。"""
 
@@ -248,9 +271,6 @@ class ImportView(APIView):
                 {"detail": "未上传任何文件"}, status=status.HTTP_400_BAD_REQUEST
             )
         mode = request.data.get("mode", "incremental")
-        processing_mode = request.data.get("processing_mode", "rule")
-        if processing_mode not in {"rule", "ai"}:
-            return Response({"detail": "未知分配模式"}, status=status.HTTP_400_BAD_REQUEST)
         # 含简历数据的上传：先存撤销快照（上传前状态），再导入
         takes_resume = bool(files.get("resume_list") or files.get("resume_package"))
         if takes_resume:
@@ -262,31 +282,36 @@ class ImportView(APIView):
                 {"detail": f"导入失败: {exc}"}, status=status.HTTP_400_BAD_REQUEST
             )
         candidate_ids = counts.pop("_candidate_ids", [])
-        processing_run = None
+        processing_runs = []
         if takes_resume and candidate_ids:
-            processing_run = runner.create_run(
+            modes = ["rule"]
+            if ai_config.is_ai_enabled():
+                modes.append("ai")
+            processing_runs = runner.create_runs(
                 "resume_process",
-                mode=processing_mode,
+                modes=modes,
                 scope={"candidate_ids": candidate_ids, "source": "resume_import"},
                 created_by=request.user,
             )
-            # import_files 的原子事务已结束；生产环境立即入队，本地 eager 仍保留开发便利。
-            execute_run_task.delay(processing_run.id)
-            processing_run.refresh_from_db()
+            # 同一批候选人的 Rule 与 AI 结果按顺序生成，避免流程锁和重跑清理互相干扰。
+            submit_processing_runs(processing_runs)
         return Response(
             {
                 "detail": "导入完成",
                 "counts": counts,
                 "undo_available": takes_resume,
                 "processing_run": (
-                    serializers.ProcessingRunSerializer(processing_run).data
-                    if processing_run
+                    serializers.ProcessingRunSerializer(processing_runs[0]).data
+                    if processing_runs
                     else None
                 ),
+                "processing_runs": serializers.ProcessingRunSerializer(
+                    processing_runs, many=True
+                ).data,
             },
             status=(
                 status.HTTP_202_ACCEPTED
-                if processing_run and processing_run.status in ["pending", "running"]
+                if any(run.status in ["pending", "running"] for run in processing_runs)
                 else status.HTTP_200_OK
             ),
         )
@@ -979,8 +1004,18 @@ class ProcessingRunViewSet(PermissionedReadOnlyModelViewSet):
     def get_queryset(self):
         qs = m.ProcessingRun.objects.select_related("created_by", "undone_by").prefetch_related("stages")
         if self.request.query_params.get("active") == "true":
-            qs = qs.filter(status__in=["pending", "running", "waiting_conflict"])
+            qs = qs.filter(status__in=["pending", "running", "waiting_conflict", "cancelling"])
         return qs
+
+    @action(detail=True, methods=["post"], url_path="cancel")
+    def cancel(self, request, pk=None):
+        if not has_permission_code(request.user, "pipeline.run"):
+            return Response({"detail": "无取消处理任务权限"}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            run = cancellation.request_cancellation(pk, request.user)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+        return Response(serializers.ProcessingRunSerializer(run).data)
 
 
 class PipelineRunView(APIView):
@@ -992,30 +1027,29 @@ class PipelineRunView(APIView):
     def post(self, request):
         step = request.data.get("step", "all")
         mode = request.data.get("mode", "rule")
+        requested_modes = request.data.get("modes", None)
+        modes = [mode] if requested_modes is None else requested_modes
+        if not isinstance(modes, list):
+            return Response({"detail": "modes 必须是数组"}, status=status.HTTP_400_BAD_REQUEST)
+        if not modes:
+            return Response({"detail": "至少选择一种分配方式"}, status=status.HTTP_400_BAD_REQUEST)
         scope = request.data.get("scope") or {}
         try:
-            run = runner.create_run(step, mode=mode, scope=scope, created_by=request.user)
+            runs = runner.create_runs(step, modes=modes, scope=scope, created_by=request.user)
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        task = execute_run_task.delay(run.id)
-        run.refresh_from_db()
-        if not run.celery_task_id:
-            run.celery_task_id = task.id or ""
-            run.save(update_fields=["celery_task_id"])
+        submit_processing_runs(runs)
+        first = runs[0]
+        payload = serializers.ProcessingRunSerializer(first).data
+        payload["run_id"] = first.id
+        payload["processing_runs"] = serializers.ProcessingRunSerializer(
+            runs, many=True
+        ).data
         return Response(
-            {
-                "id": run.id,
-                "step": run.step,
-                "mode": run.mode,
-                "status": run.status,
-                "message": run.message,
-                "total_count": run.total_count,
-                "processed_count": run.processed_count,
-                "failed_count": run.failed_count,
-            },
+            payload,
             status=(
                 status.HTTP_202_ACCEPTED
-                if run.status in ["pending", "running"]
+                if any(run.status in ["pending", "running"] for run in runs)
                 else status.HTTP_200_OK
             ),
         )
@@ -1116,3 +1150,46 @@ class ConfigViewSet(viewsets.ViewSet):
             key=pk, defaults={"value": value}
         )
         return Response(self._item_data(pk))
+
+
+class AIConnectionConfigView(APIView):
+    """仅管理员可维护的模型连接配置；API Key 永不回传。"""
+
+    permission_classes = [HasPermissionCode]
+    permission_code = "settings.manage_permissions"
+
+    def get(self, request):
+        try:
+            return Response(ai_config.get_ai_connection_status())
+        except (RuntimeError, ValueError) as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    def patch(self, request):
+        try:
+            current = ai_config.get_ai_connection_status()
+            payload = {
+                "profile": request.data.get("profile", current["profile"]),
+                "api_style": request.data.get("api_style", current["api_style"]),
+                "model_name": request.data.get("model_name", current["model_name"]),
+                "base_url": request.data.get("base_url", current["base_url"]),
+                "api_key": request.data.get("api_key", ""),
+                "clear_api_key": bool(request.data.get("clear_api_key", False)),
+            }
+            ai_config.save_ai_connection_config(payload)
+            return Response(ai_config.get_ai_connection_status())
+        except (RuntimeError, ValueError) as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AIConnectionTestView(APIView):
+    permission_classes = [HasPermissionCode]
+    permission_code = "settings.manage_permissions"
+
+    def post(self, request):
+        try:
+            result = ai_service.test_model_connection()
+        except ai_service.AIServiceError as exc:
+            return Response({"ok": False, "code": exc.code, "detail": exc.message})
+        except (RuntimeError, ValueError) as exc:
+            return Response({"ok": False, "code": "ai_not_configured", "detail": str(exc)})
+        return Response({"ok": True, "detail": "模型连接测试成功", **result})

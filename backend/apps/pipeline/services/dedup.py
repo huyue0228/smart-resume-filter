@@ -6,6 +6,7 @@ from django.utils import timezone
 
 from apps.core import models as m
 
+from ..cancellation import raise_if_cancel_requested
 from ..regions import candidate_region
 
 
@@ -49,6 +50,7 @@ def run(scope=None, processing_run=None, processing_stage=None):
         processing_stage.save(update_fields=["total_count"])
 
     for index, candidate_id in enumerate(candidate_ids, start=1):
+        raise_if_cancel_requested(processing_run)
         # 候选人级行锁使并发上传/重跑不会同时改写同一人的志愿顺序。
         with transaction.atomic():
             cand = m.Candidate.objects.select_for_update().prefetch_related("resumes").get(pk=candidate_id)

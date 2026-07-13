@@ -109,6 +109,39 @@ class AllocationDesignContractTests(TestCase):
         self.assertTrue(run.last_heartbeat_at)
         self.assertEqual(list(run.stages.values_list("status", flat=True)), ["success", "success"])
 
+    def test_create_runs_marks_rule_and_ai_as_coordinated_parallel_modes(self):
+        with patch("apps.pipeline.runner.ai_config.is_ai_enabled", return_value=True):
+            runs = runner.create_runs(
+                "step2",
+                modes=["rule", "ai"],
+                scope={"candidate_ids": [self.candidate.id]},
+            )
+
+        self.assertEqual([run.mode for run in runs], ["rule", "ai"])
+        self.assertTrue(all(run.scope["parallel_modes"] for run in runs))
+        self.assertEqual(
+            [list(run.scope_items.values_list("candidate_id", flat=True)) for run in runs],
+            [[self.candidate.id], [self.candidate.id]],
+        )
+
+    def test_coordinated_rule_and_ai_runs_keep_both_attempt_sources(self):
+        with patch("apps.pipeline.runner.ai_config.is_ai_enabled", return_value=True), patch(
+            "apps.pipeline.services.allocate.ai_service.screen_resume",
+            return_value=self._ai_result(),
+        ):
+            runs = runner.create_runs(
+                "step2",
+                modes=["rule", "ai"],
+                scope={"candidate_ids": [self.candidate.id]},
+            )
+            for run in runs:
+                runner.execute_run(run.id)
+
+        self.assertEqual(
+            set(m.AssignmentAttempt.objects.values_list("source", flat=True)),
+            {m.AssignmentAttempt.SOURCE_RULE, m.AssignmentAttempt.SOURCE_AI},
+        )
+
     def test_run_skips_candidate_changed_after_submit(self):
         workflow = m.CandidateWorkflow.objects.create(candidate=self.candidate)
         run = runner.create_run(
@@ -220,6 +253,22 @@ class AllocationDesignContractTests(TestCase):
         self.assertEqual(self.candidate.highest_degree_tag, mapped_tag)
         self.assertEqual(self.candidate.first_degree_platform, "人工确认平台")
         self.assertEqual(self.candidate.highest_degree_platform, "人工确认平台")
+
+    def test_school_outside_imported_list_is_always_non_target(self):
+        m.SchoolTag.objects.create(
+            code="DEFAULT_TARGET", name="默认目标院校", is_default=True, is_active=True
+        )
+        self.candidate.first_degree_school = "未在清单中的学校"
+        self.candidate.highest_degree_school = "另一所未在清单中的学校"
+        self.candidate.save(
+            update_fields=["first_degree_school", "highest_degree_school"]
+        )
+
+        classify_school.classify_candidates([self.candidate])
+
+        self.candidate.refresh_from_db()
+        self.assertEqual(self.candidate.first_degree_tag.code, "NON_TARGET")
+        self.assertEqual(self.candidate.highest_degree_tag.code, "NON_TARGET")
 
     def test_rule_allocation_skips_resume_when_required_major_not_matched(self):
         self.candidate.highest_major = "计算机科学与技术"

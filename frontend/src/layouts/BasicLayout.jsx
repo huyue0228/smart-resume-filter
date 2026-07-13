@@ -17,7 +17,7 @@ import {
 import { useRole, ROLES } from '../contexts/RoleContext'
 import ProcessingTaskCenter from '../components/ProcessingTaskCenter'
 
-const ROOT_MENU_KEYS = ['/data', '/system']
+const ROOT_MENU_KEYS = ['/data', '/allocations', '/system']
 
 function pathMatchesGroup(pathname, route) {
   if (!route.routes) return false
@@ -30,11 +30,15 @@ function defaultOpenKeys(pathname) {
     .map((route) => route.path)
 }
 
-// 简历分配直接进入分配尝试操作台，避免只有一个子页时多一层点击。
+// 简历分配按来源拆为两个子页；两页复用同一分配尝试操作台和相同处置能力。
 const assignGroup = {
   path: '/allocations',
   name: '简历分配',
   icon: <DeploymentUnitOutlined />,
+  routes: [
+    { path: '/allocations/rule', name: '规则分配' },
+    { path: '/allocations/ai', name: 'AI分配' },
+  ],
 }
 
 const allRoute = {
@@ -70,7 +74,8 @@ function filterRoutesByPermission(routes, hasPermission) {
     '/jobs': 'job.view',
     '/schools': 'school.view',
     '/departments': 'department.view',
-    '/allocations': ['attempt.view_all', 'attempt.view_received', 'attempt.view_assigned'],
+    '/allocations/rule': ['attempt.view_all', 'attempt.view_received', 'attempt.view_assigned'],
+    '/allocations/ai': 'attempt.view_all',
     '/config': 'settings.manage_config',
     '/users': 'settings.manage_permissions',
   }

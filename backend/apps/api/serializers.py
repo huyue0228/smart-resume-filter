@@ -942,6 +942,7 @@ class ProcessingRunSerializer(serializers.ModelSerializer):
             "chunk_size", "chunk_total", "chunk_done", "chunk_failed", "chunk_errors",
             "model_name", "prompt_version", "decision_version",
             "created_at", "started_at", "finished_at", "undone_at", "undone_by", "error",
+            "cancel_requested_at", "cancelled_at", "cancelled_by", "cancelled_by_username_snapshot",
             "stages",
         ]
 

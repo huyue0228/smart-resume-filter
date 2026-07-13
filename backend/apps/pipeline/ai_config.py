@@ -1,12 +1,18 @@
 """AI Agent 配置抽象。
 
-敏感配置只从环境变量读取；可由 HR 调整的运行参数仍保存在 Config 表，
-但默认值和元数据集中维护在本模块，避免散落在 API 和分配服务里。
+管理员保存的模型连接配置（含加密 API Key）优先从 Config 表读取；部署环境变量
+仅在未保存管理员配置时兼容兜底。默认模板和运行参数元数据集中维护在本模块，
+避免散落在 API 和分配服务里。
 """
-import os
 import json
+import base64
+import hashlib
+import os
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
+
+from django.conf import settings
 
 try:
     from dotenv import load_dotenv
@@ -70,6 +76,15 @@ PUBLIC_AI_CONFIG_REGISTRY = {
 }
 
 
+AI_CONNECTION_CONFIG_KEYS = {
+    "profile": "ai_connection_profile",
+    "api_style": "ai_connection_api_style",
+    "model_name": "ai_connection_model_name",
+    "base_url": "ai_connection_base_url",
+    "api_key": "ai_connection_api_key",
+}
+
+
 @dataclass(frozen=True)
 class AIModelConfig:
     profile: str
@@ -114,11 +129,126 @@ def _model_registry():
     return registry
 
 
+def ai_connection_profiles():
+    """返回可由管理员选择的模型 profile（不含任何密钥）。"""
+    registry = _model_registry()
+    return [
+        {
+            "key": key,
+            "label": profile.get("label", key),
+            "api_style": profile.get("api_style", ""),
+            "default_model": profile.get("default_model", ""),
+            "base_url": profile.get("base_url", ""),
+        }
+        for key, profile in registry["profiles"].items()
+    ]
+
+
+def _connection_value(name):
+    from apps.core import models as m
+
+    config = m.Config.objects.filter(key=AI_CONNECTION_CONFIG_KEYS[name]).first()
+    if not config:
+        return None
+    value = config.value
+    return value.get("value") if isinstance(value, dict) else value
+
+
+def _has_saved_connection_config():
+    from apps.core import models as m
+
+    return m.Config.objects.filter(key__in=AI_CONNECTION_CONFIG_KEYS.values()).exists()
+
+
+def _secret_fernet():
+    """用 Django SECRET_KEY 派生数据库密钥的加密器，不将 API Key 明文落库。"""
+    try:
+        from cryptography.fernet import Fernet
+    except ImportError as exc:
+        raise RuntimeError("服务端缺少 cryptography，无法安全保存模型 API Key") from exc
+    digest = hashlib.sha256(
+        f"{settings.SECRET_KEY}:smart-resume-filter:ai-connection:v1".encode("utf-8")
+    ).digest()
+    return Fernet(base64.urlsafe_b64encode(digest))
+
+
+def encrypt_api_key(value):
+    return _secret_fernet().encrypt(value.encode("utf-8")).decode("utf-8")
+
+
+def decrypt_api_key(value):
+    if not value:
+        return ""
+    try:
+        return _secret_fernet().decrypt(value.encode("utf-8")).decode("utf-8")
+    except Exception as exc:  # noqa: BLE001 - 密钥轮换或数据损坏均不得泄漏原文
+        raise ValueError("已保存的模型 API Key 无法解密，请由管理员重新保存") from exc
+
+
+def save_ai_connection_config(payload):
+    """保存管理员维护的连接参数；API Key 仅接受写入并以密文保存。"""
+    registry = _model_registry()
+    profile_name = payload["profile"]
+    if profile_name not in registry["profiles"]:
+        raise ValueError("未知模型 profile")
+    if payload["api_style"] not in {"responses", "chat_json"}:
+        raise ValueError("API 风格必须是 responses 或 chat_json")
+    if not isinstance(payload["model_name"], str) or not payload["model_name"].strip():
+        raise ValueError("模型名称不能为空")
+    if not isinstance(payload["base_url"], str):
+        raise ValueError("API 地址格式不正确")
+    if payload["base_url"]:
+        parsed = urlparse(payload["base_url"])
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("API 地址必须是完整的 http(s) 地址")
+    if payload.get("api_key") and not isinstance(payload["api_key"], str):
+        raise ValueError("API Key 格式不正确")
+    from apps.core import models as m
+
+    for field in ["profile", "api_style", "model_name", "base_url"]:
+        m.Config.objects.update_or_create(
+            key=AI_CONNECTION_CONFIG_KEYS[field], defaults={"value": payload[field].strip()}
+        )
+    if payload.get("clear_api_key"):
+        m.Config.objects.filter(key=AI_CONNECTION_CONFIG_KEYS["api_key"]).delete()
+    elif payload.get("api_key"):
+        m.Config.objects.update_or_create(
+            key=AI_CONNECTION_CONFIG_KEYS["api_key"],
+            defaults={"value": encrypt_api_key(payload["api_key"].strip())},
+        )
+
+
+def get_ai_connection_status():
+    registry = _model_registry()
+    current = get_ai_model_config()
+    stored_key = _connection_value("api_key")
+    return {
+        "profile": current.profile,
+        "api_style": current.api_style,
+        "model_name": current.model_name,
+        "base_url": current.base_url,
+        "api_key_configured": bool(current.api_key),
+        "api_key_source": "system_config" if stored_key else ("environment" if current.api_key else "not_configured"),
+        "profiles": ai_connection_profiles(),
+        "profile_version": current.profile_version,
+    }
+
+
+def is_ai_enabled():
+    """仅用于决定是否提交 AI 任务；不暴露任何连接或密钥信息。"""
+    try:
+        return bool(get_ai_model_config().api_key)
+    except (RuntimeError, ValueError):
+        return False
+
+
 def get_ai_model_config():
     registry = _model_registry()
-    profile_name = _env(
-        "AI_PROFILE",
-        _env("AI_PROVIDER", registry.get("default_profile", "openai")),
+    has_saved_connection = _has_saved_connection_config()
+    profile_name = _connection_value("profile") or (
+        registry.get("default_profile", "openai")
+        if has_saved_connection
+        else _env("AI_PROFILE", _env("AI_PROVIDER", registry.get("default_profile", "openai")))
     )
     try:
         profile = registry["profiles"][profile_name]
@@ -127,20 +257,36 @@ def get_ai_model_config():
         raise ValueError(
             f"未知 AI_PROFILE={profile_name}，可选：{available}"
         ) from exc
-    api_style = _env("AI_API_STYLE", profile.get("api_style", ""))
+    api_style = _connection_value("api_style") or (
+        profile.get("api_style", "")
+        if has_saved_connection
+        else _env("AI_API_STYLE", profile.get("api_style", ""))
+    )
     if api_style not in ["responses", "chat_json"]:
         raise ValueError(
             f"AI profile {profile_name} 的 api_style 必须是 responses 或 chat_json"
         )
-    api_key_env = _env("AI_API_KEY_ENV", profile.get("api_key_env", ""))
-    base_url_env = _env("AI_BASE_URL_ENV", profile.get("base_url_env", ""))
+    api_key_env = (
+        profile.get("api_key_env", "")
+        if has_saved_connection
+        else _env("AI_API_KEY_ENV", profile.get("api_key_env", ""))
+    )
+    base_url_env = (
+        profile.get("base_url_env", "")
+        if has_saved_connection
+        else _env("AI_BASE_URL_ENV", profile.get("base_url_env", ""))
+    )
+    saved_api_key = _connection_value("api_key")
+    saved_base_url = _connection_value("base_url")
     return AIModelConfig(
         profile=profile_name,
         provider=profile_name,
         api_style=api_style,
-        model_name=_env(
-            "AI_MODEL_NAME",
-            _env("OPENAI_MODEL", profile.get("default_model", "")),
+        model_name=_connection_value("model_name")
+        or (
+            profile.get("default_model", "")
+            if has_saved_connection
+            else _env("AI_MODEL_NAME", _env("OPENAI_MODEL", profile.get("default_model", "")))
         ),
         api_key_env=api_key_env,
         base_url_env=base_url_env,
@@ -148,11 +294,19 @@ def get_ai_model_config():
         decision_version=_env("AI_DECISION_VERSION", "decision-v1"),
         profile_version=_env("AI_PROFILE_VERSION", "profile-v1"),
         parser_version=_env("AI_PARSER_VERSION", "pypdf-v1"),
-        api_key=_env(api_key_env) if api_key_env else "",
+        api_key=(
+            decrypt_api_key(saved_api_key)
+            if saved_api_key
+            else ("" if has_saved_connection else (_env(api_key_env) if api_key_env else ""))
+        ),
         base_url=(
-            _env(base_url_env, profile.get("base_url", ""))
-            if base_url_env
-            else profile.get("base_url", "")
+            saved_base_url
+            if saved_base_url is not None
+            else (
+                profile.get("base_url", "")
+                if has_saved_connection
+                else (_env(base_url_env, profile.get("base_url", "")) if base_url_env else profile.get("base_url", ""))
+            )
         ),
     )
 

@@ -1,6 +1,5 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { RoleProvider, useRole } from './contexts/RoleContext'
-import { ModeProvider } from './contexts/ModeContext'
 import BasicLayout from './layouts/BasicLayout'
 import LoginPage from './pages/LoginPage'
 import ResumesPage from './pages/ResumesPage'
@@ -57,10 +56,21 @@ function AppRoutes() {
           path="/allocations"
           element={guarded(
             ['attempt.view_all', 'attempt.view_received', 'attempt.view_assigned'],
-            <AllocationsPage />,
+            <Navigate to="/allocations/rule" replace />,
           )}
         />
-        <Route path="/agent-decisions" element={<Navigate to="/allocations" replace />} />
+        <Route
+          path="/allocations/rule"
+          element={guarded(
+            ['attempt.view_all', 'attempt.view_received', 'attempt.view_assigned'],
+            <AllocationsPage source="rule" />,
+          )}
+        />
+        <Route
+          path="/allocations/ai"
+          element={guarded('attempt.view_all', <AllocationsPage source="ai" />)}
+        />
+        <Route path="/agent-decisions" element={<Navigate to="/allocations/ai" replace />} />
         <Route
           path="/archives"
           element={guarded('attempt.view_all', <WorkflowsPage archivedOnly />)}
@@ -82,9 +92,7 @@ function AppRoutes() {
 export default function App() {
   return (
     <RoleProvider>
-      <ModeProvider>
-        <AppRoutes />
-      </ModeProvider>
+      <AppRoutes />
     </RoleProvider>
   )
 }

@@ -787,6 +787,16 @@ class ProcessingRun(models.Model):
         related_name="processing_runs_created",
     )
     created_by_username_snapshot = models.CharField(max_length=150, blank=True)
+    cancel_requested_at = models.DateTimeField(null=True, blank=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    cancelled_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="processing_runs_cancelled",
+    )
+    cancelled_by_username_snapshot = models.CharField(max_length=150, blank=True)
     error = models.TextField(blank=True)
 
     class Meta:

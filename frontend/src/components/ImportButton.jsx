@@ -10,7 +10,7 @@ const { Dragger } = Upload
 //   fields: [{ key, label, accept }]  —— 后端 multipart 字段
 //   buttonText / title
 //   onDone(data) —— 导入成功回调（用于刷新列表）
-export default function ImportButton({ fields, buttonText = '导入', title, onDone, processingMode }) {
+export default function ImportButton({ fields, buttonText = '导入', title, onDone }) {
   const [open, setOpen] = useState(false)
   const [files, setFiles] = useState({})
   const [mode, setMode] = useState('incremental')
@@ -34,7 +34,6 @@ export default function ImportButton({ fields, buttonText = '导入', title, onD
     const formData = new FormData()
     picked.forEach((f) => formData.append(f.key, files[f.key]))
     formData.append('mode', mode)
-    if (processingMode) formData.append('processing_mode', processingMode)
 
     setLoading(true)
     setResult('')

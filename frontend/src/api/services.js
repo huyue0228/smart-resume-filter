@@ -40,6 +40,18 @@ export function fetchConfigs() {
 export function updateConfig(key, value) {
   return client.patch(`/configs/${key}/`, { value })
 }
+export function fetchAIConnection() {
+  return client.get('/ai-connection/')
+}
+export function updateAIConnection(body) {
+  return client.patch('/ai-connection/', body)
+}
+export function testAIConnection() {
+  return client.post('/ai-connection/test/')
+}
+export function fetchAIAvailability() {
+  return client.get('/ai-availability/')
+}
 export function fetchSchoolTagRules(params) {
   return client.get('/school-tag-rules/', { params })
 }
@@ -176,6 +188,9 @@ export function fetchPipelineRuns(params) {
 }
 export function fetchPipelineRun(id) {
   return client.get(`/pipeline/runs/${id}/`)
+}
+export function cancelPipelineRun(id) {
+  return client.post(`/pipeline/runs/${id}/cancel/`)
 }
 
 // ---- Candidate workflows ----

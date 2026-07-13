@@ -1,4 +1,5 @@
 from io import BytesIO
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -16,6 +17,7 @@ from rest_framework.test import APIClient
 from apps.accounts.models import User
 from apps.accounts.permissions import ensure_rbac_defaults
 from apps.core import models as m
+from apps.pipeline import ai_config
 from apps.pipeline.services import classify_school
 
 
@@ -213,8 +215,8 @@ class PipelineRunApiTests(TestCase):
             "candidate_filters": {"system_status": "screening_passed,screening_rejected"},
         }
 
-        with patch("apps.api.views.runner.create_run", return_value=run) as mock_create, patch(
-            "apps.api.views.execute_run_task.delay",
+        with patch("apps.api.views.runner.create_runs", return_value=[run]) as mock_create, patch(
+            "apps.api.views.execute_runs_sequence_task.delay",
             return_value=SimpleNamespace(id="task-123"),
         ):
             response = self.client.post(
@@ -225,9 +227,83 @@ class PipelineRunApiTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         mock_create.assert_called_once_with(
-            "step2", mode="rule", scope=scope, created_by=self.user
+            "step2", modes=["rule"], scope=scope, created_by=self.user
         )
         self.assertEqual(response.data["message"], "ok")
+
+    def test_pipeline_run_forwards_multiple_modes_as_one_sequence(self):
+        rule_run = m.ProcessingRun.objects.create(step="step2", mode="rule", status="pending")
+        ai_run = m.ProcessingRun.objects.create(step="step2", mode="ai", status="pending")
+        with patch(
+            "apps.api.views.runner.create_runs", return_value=[rule_run, ai_run]
+        ) as mock_create, patch(
+            "apps.api.views.execute_runs_sequence_task.delay",
+            return_value=SimpleNamespace(id="task-multi"),
+        ):
+            response = self.client.post(
+                "/api/pipeline/run/",
+                {"step": "step2", "modes": ["rule", "ai"], "scope": {"candidate_ids": []}},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        mock_create.assert_called_once_with(
+            "step2", modes=["rule", "ai"], scope={"candidate_ids": []}, created_by=self.user
+        )
+        self.assertEqual(
+            [item["mode"] for item in response.data["processing_runs"]],
+            ["rule", "ai"],
+        )
+
+    def test_pipeline_run_rejects_ai_when_connection_is_not_enabled(self):
+        with patch("apps.pipeline.runner.ai_config.is_ai_enabled", return_value=False):
+            response = self.client.post(
+                "/api/pipeline/run/",
+                {"step": "step2", "modes": ["ai"]},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("AI 模式未启用", response.data["detail"])
+
+    def test_pipeline_run_rejects_explicit_empty_modes(self):
+        response = self.client.post(
+            "/api/pipeline/run/",
+            {"step": "step2", "modes": []},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("至少选择", response.data["detail"])
+
+    def test_pending_processing_run_can_be_cancelled(self):
+        run = m.ProcessingRun.objects.create(step="step2", mode="ai", status="pending")
+        stage = m.ProcessingRunStage.objects.create(
+            run=run, sequence=1, step="step2", label="简历分类、分配与下发"
+        )
+
+        response = self.client.post(f"/api/pipeline/runs/{run.id}/cancel/")
+
+        self.assertEqual(response.status_code, 200)
+        run.refresh_from_db()
+        stage.refresh_from_db()
+        self.assertEqual(run.status, "cancelled")
+        self.assertEqual(run.cancelled_by, self.user)
+        self.assertTrue(run.cancel_requested_at)
+        self.assertTrue(run.cancelled_at)
+        self.assertTrue(run.finished_at)
+        self.assertEqual(stage.status, "cancelled")
+
+    def test_finished_processing_run_cannot_be_cancelled(self):
+        run = m.ProcessingRun.objects.create(
+            step="step2", mode="rule", status="success"
+        )
+
+        response = self.client.post(f"/api/pipeline/runs/{run.id}/cancel/")
+
+        self.assertEqual(response.status_code, 409)
+        run.refresh_from_db()
+        self.assertEqual(run.status, "success")
 
 
 @override_settings(
@@ -447,6 +523,69 @@ class RbacApiTests(TestCase):
             format="json",
         )
         self.assertEqual(update_response.status_code, 404)
+
+    def test_only_admin_can_save_and_view_redacted_ai_connection(self):
+        self.client.force_authenticate(self.hr)
+        self.assertEqual(self.client.get("/api/ai-connection/").status_code, 403)
+
+        self.client.force_authenticate(self.admin)
+        payload = {
+            "profile": "deepseek",
+            "api_style": "chat_json",
+            "model_name": "deepseek-v4-pro",
+            "base_url": "https://api.deepseek.com",
+            "api_key": "sk-test-secret",
+        }
+        response = self.client.patch("/api/ai-connection/", payload, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["api_key_configured"])
+        self.assertNotIn("api_key", response.data)
+        self.assertNotIn("sk-test-secret", str(response.data))
+        stored = m.Config.objects.get(key="ai_connection_api_key").value
+        self.assertNotEqual(stored, "sk-test-secret")
+        model_config = ai_config.get_ai_model_config()
+        self.assertEqual(model_config.model_name, "deepseek-v4-pro")
+        self.assertEqual(model_config.api_key, "sk-test-secret")
+
+    def test_admin_can_test_ai_connection(self):
+        self.client.force_authenticate(self.admin)
+        with patch(
+            "apps.api.views.ai_service.test_model_connection",
+            return_value={
+                "profile": "deepseek",
+                "model_name": "deepseek-v4-pro",
+                "api_style": "chat_json",
+                "base_url": "https://api.deepseek.com",
+            },
+        ):
+            response = self.client.post("/api/ai-connection/test/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["ok"])
+        self.assertNotIn("api_key", response.data)
+
+    def test_saved_connection_does_not_fall_back_to_environment_key_after_clear(self):
+        self.client.force_authenticate(self.admin)
+        with patch.dict("os.environ", {"DEEPSEEK_API_KEY": "env-secret"}, clear=False):
+            self.client.patch(
+                "/api/ai-connection/",
+                {
+                    "profile": "deepseek",
+                    "api_style": "chat_json",
+                    "model_name": "deepseek-v4-pro",
+                    "base_url": "https://api.deepseek.com",
+                    "api_key": "saved-secret",
+                },
+                format="json",
+            )
+            response = self.client.patch(
+                "/api/ai-connection/", {"clear_api_key": True}, format="json"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data["api_key_configured"])
+        self.assertEqual(ai_config.get_ai_model_config().api_key, "")
 
     def test_permissions_endpoint_returns_tree_for_admin(self):
         self.client.force_authenticate(self.admin)
@@ -1832,6 +1971,50 @@ class ImportApiTests(TestCase):
         )
         self.hr.groups.add(Group.objects.get(name="HR"))
         self.client.force_authenticate(self.hr)
+
+    @patch("apps.api.views.execute_runs_sequence_task.delay")
+    @patch("apps.api.views.runner.create_runs")
+    @patch("apps.api.views.ai_config.is_ai_enabled", return_value=True)
+    @patch("apps.api.views.snapshot.take_snapshot")
+    @patch("apps.api.views.import_files")
+    def test_resume_upload_starts_rule_and_enabled_ai_runs(
+        self,
+        mock_import_files,
+        mock_take_snapshot,
+        _mock_ai_enabled,
+        mock_create_runs,
+        mock_execute,
+    ):
+        candidate = m.Candidate.objects.create(
+            identity_hash="candidate-upload-modes", name="上传候选人", phone="13800000001"
+        )
+        rule_run = m.ProcessingRun.objects.create(step="resume_process", mode="rule")
+        ai_run = m.ProcessingRun.objects.create(step="resume_process", mode="ai")
+        mock_import_files.return_value = {
+            "candidates_created": 1,
+            "candidates_updated": 0,
+            "resumes_created": 1,
+            "resumes_updated": 0,
+            "_candidate_ids": [candidate.id],
+        }
+        mock_create_runs.return_value = [rule_run, ai_run]
+        mock_execute.return_value = SimpleNamespace(id="upload-modes")
+
+        response = self.client.post(
+            "/api/import/",
+            {"resume_package": SimpleUploadedFile("简历包.zip", b"zip")},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, 202)
+        mock_create_runs.assert_called_once_with(
+            "resume_process",
+            modes=["rule", "ai"],
+            scope={"candidate_ids": [candidate.id], "source": "resume_import"},
+            created_by=self.hr,
+        )
+        mock_execute.assert_called_once_with([rule_run.id, ai_run.id])
+        self.assertEqual([item["mode"] for item in response.data["processing_runs"]], ["rule", "ai"])
 
     def test_replace_contacts_import_keeps_existing_resume_pool(self):
         candidate = m.Candidate.objects.create(

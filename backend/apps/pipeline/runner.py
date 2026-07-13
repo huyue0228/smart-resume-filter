@@ -1,6 +1,7 @@
 """流水线编排：单步、上传后主流程或一键全流程，记录共享 ProcessingRun。"""
 from copy import deepcopy
 
+from django.db import transaction
 from django.utils import timezone
 
 from apps.core.models import (
@@ -11,6 +12,7 @@ from apps.core.models import (
 )
 from apps.pipeline import ai_config
 
+from .cancellation import RunCancelled, raise_if_cancel_requested
 from .services import allocate, classify_job, classify_school, dedup, demand
 
 STEP_FUNCS = {
@@ -125,6 +127,24 @@ def create_run(step, mode="rule", scope=None, created_by=None):
     return run
 
 
+def create_runs(step, modes, scope=None, created_by=None):
+    """为一次多策略处理分别建单，并标记为同一范围的协同运行。"""
+    unique_modes = list(dict.fromkeys(modes or []))
+    if not unique_modes:
+        raise ValueError("至少选择一种分配方式")
+    if any(mode not in {"rule", "ai"} for mode in unique_modes):
+        raise ValueError("存在未知分配方式")
+    if "ai" in unique_modes and not ai_config.is_ai_enabled():
+        raise ValueError("AI 模式未启用，请先由管理员完成模型连接配置并测试")
+    run_scope = deepcopy(scope or {})
+    if len(unique_modes) > 1:
+        run_scope["parallel_modes"] = True
+    return [
+        create_run(step, mode=mode, scope=run_scope, created_by=created_by)
+        for mode in unique_modes
+    ]
+
+
 def _run_scope(run):
     scope = deepcopy(run.scope or {})
     candidate_ids = list(run.scope_items.order_by("candidate_id").values_list("candidate_id", flat=True))
@@ -140,6 +160,7 @@ def _heartbeat(run, *, stage=""):
 
 
 def _run_one_stage(run, stage, mode, scope):
+    raise_if_cancel_requested(run)
     stage_record = run.stages.get(step=stage)
     stage_record.status = "running"
     stage_record.started_at = timezone.now()
@@ -163,11 +184,31 @@ def _run_one_stage(run, stage, mode, scope):
 
 
 def execute_run(run_id):
-    run = ProcessingRun.objects.get(pk=run_id)
-    run.status = "running"
-    run.started_at = timezone.now()
-    run.last_heartbeat_at = run.started_at
-    run.save(update_fields=["status", "started_at", "last_heartbeat_at"])
+    # 只由第一个成功领取 pending 任务的 worker 运行，避免取消请求与 worker
+    # 启动同时发生时，把已取消任务重新写回 running。
+    with transaction.atomic():
+        run = ProcessingRun.objects.select_for_update().get(pk=run_id)
+        if run.status != "pending" or run.cancel_requested_at:
+            if run.status == "cancelling":
+                run.status = "cancelled"
+                run.cancelled_at = run.cancelled_at or timezone.now()
+                run.finished_at = run.cancelled_at
+                run.current_stage = ""
+                run.message = "任务已取消；未开始处理"
+                run.save(
+                    update_fields=[
+                        "status",
+                        "cancelled_at",
+                        "finished_at",
+                        "current_stage",
+                        "message",
+                    ]
+                )
+            return run
+        run.status = "running"
+        run.started_at = timezone.now()
+        run.last_heartbeat_at = run.started_at
+        run.save(update_fields=["status", "started_at", "last_heartbeat_at"])
     step, mode, scope = run.step, run.mode, _run_scope(run)
     try:
         messages = [
@@ -178,6 +219,14 @@ def execute_run(run_id):
         run.refresh_from_db()
         run.status = "partial_failed" if run.failed_count else "success"
         run.message = message
+    except RunCancelled:
+        run.refresh_from_db()
+        run.status = "cancelled"
+        run.message = "任务已取消；已完成的候选人处理结果已保留"
+        run.cancelled_at = run.cancelled_at or timezone.now()
+        run.stages.filter(status="running").update(
+            status="cancelled", finished_at=run.cancelled_at
+        )
     except Exception as exc:  # noqa: BLE001 - 记录失败信息供前端展示
         run.status = "failed"
         run.message = f"{type(exc).__name__}: {exc}"

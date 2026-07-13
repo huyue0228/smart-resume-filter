@@ -288,6 +288,12 @@ class Command(BaseCommand):
         for key, value in defaults.items():
             m.Config.objects.update_or_create(key=key, defaults={"value": value})
 
+        # 院校清单之外的学校统一使用该预置标签，作为院校准入规则的稳定输入。
+        m.SchoolTag.objects.update_or_create(
+            code="NON_TARGET",
+            defaults={"name": "非目标院校", "is_default": False, "is_active": True},
+        )
+
         for index, (code, name, description, is_active, aliases) in enumerate(
             MAJOR_DICTIONARY, start=1
         ):

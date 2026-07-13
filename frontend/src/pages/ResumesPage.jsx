@@ -1,9 +1,8 @@
-import { useRef, useEffect, useState } from 'react'
+import { useRef, useEffect, useState, useCallback } from 'react'
 import { PageContainer, ProTable } from '@ant-design/pro-components'
 import {
   Button,
   Checkbox,
-  Radio,
   Tag,
   Space,
   Modal,
@@ -26,11 +25,13 @@ import {
   undoLastImport,
   fetchContacts,
   manualAssignResume,
+  fetchAgentDecisions,
+  retryAgentDecision,
+  fetchAIAvailability,
 } from '../api/services'
 import ImportButton from '../components/ImportButton'
 import ResumePreview from '../components/ResumePreview'
 import { useProcessRunner } from '../components/useProcessRunner'
-import { useMode } from '../contexts/ModeContext'
 import { useRole } from '../contexts/RoleContext'
 import {
   normalizeTableFilters,
@@ -117,17 +118,22 @@ const REASON_TYPE = {
 
 export default function ResumesPage() {
   const actionRef = useRef()
-  const { mode } = useMode()
   const { hasPermission } = useRole()
+  const canViewAgentDecisions = hasPermission('attempt.view_all')
   const { run } = useProcessRunner()
   const [undo, setUndo] = useState({ available: false })
   const [detailRecord, setDetailRecord] = useState(null)
   const [previewRecord, setPreviewRecord] = useState(null)
+  const [agentDecisions, setAgentDecisions] = useState([])
+  const [agentDecisionsLoading, setAgentDecisionsLoading] = useState(false)
+  const [agentDecisionDetail, setAgentDecisionDetail] = useState(null)
+  const [retryingDecisionId, setRetryingDecisionId] = useState(null)
   const [exporting, setExporting] = useState(false)
   const [processing, setProcessing] = useState(false)
   const [processModalOpen, setProcessModalOpen] = useState(false)
   const [processStatusSelection, setProcessStatusSelection] = useState([])
-  const [processMode, setProcessMode] = useState(mode)
+  const [processModes, setProcessModes] = useState(['rule'])
+  const [aiAvailable, setAIAvailable] = useState(false)
   const [lastQuery, setLastQuery] = useState({})
   const [filterOptions, setFilterOptions] = useState({})
   const [tableFilters, setTableFilters] = useState({})
@@ -196,6 +202,9 @@ export default function ResumesPage() {
   useEffect(() => {
     refreshUndo()
     refreshFilterOptions()
+    fetchAIAvailability()
+      .then(({ data }) => setAIAvailable(Boolean(data?.enabled)))
+      .catch(() => setAIAvailable(false))
   }, [])
 
   useEffect(() => {
@@ -213,6 +222,45 @@ export default function ResumesPage() {
       detailRecord.preview_resume || detailRecord.current_resume || detailRecord.resumes?.[0] || null,
     )
   }, [detailRecord])
+
+  const loadAgentDecisions = useCallback(async (workflowId) => {
+    if (!workflowId || !canViewAgentDecisions) {
+      setAgentDecisions([])
+      return
+    }
+    setAgentDecisionsLoading(true)
+    try {
+      const { data } = await fetchAgentDecisions({ workflow: workflowId, page_size: 100 })
+      setAgentDecisions(data?.results || [])
+    } catch {
+      setAgentDecisions([])
+    } finally {
+      setAgentDecisionsLoading(false)
+    }
+  }, [canViewAgentDecisions])
+
+  useEffect(() => {
+    const workflowId = detailRecord?.workflow_id
+    if (!workflowId) {
+      setAgentDecisions([])
+      setAgentDecisionDetail(null)
+      return
+    }
+    loadAgentDecisions(workflowId)
+  }, [detailRecord?.workflow_id, loadAgentDecisions])
+
+  const handleRetryAgentDecision = async (decision) => {
+    setRetryingDecisionId(decision.id)
+    try {
+      const { data } = await retryAgentDecision(decision.id)
+      setAgentDecisionDetail(data?.decision || null)
+      await loadAgentDecisions(decision.workflow)
+      actionRef.current?.reload()
+      message.success(data?.attempt ? 'AI 已重试并生成分配尝试' : 'AI 已重试，请查看最新决策')
+    } finally {
+      setRetryingDecisionId(null)
+    }
+  }
 
   // 导入接口已在服务端创建并提交 Step1 → Step2 后台任务，页面无需等待执行完成。
   const handleImported = async (data) => {
@@ -292,7 +340,7 @@ export default function ResumesPage() {
 
   const handleProcessSelectedStatuses = () => {
     setProcessStatusSelection(selectedSystemStatuses())
-    setProcessMode(mode)
+    setProcessModes(['rule'])
     setProcessModalOpen(true)
   }
 
@@ -302,13 +350,17 @@ export default function ResumesPage() {
       message.warning('请先勾选需要处理的简历状态')
       return
     }
+    if (!processModes.length) {
+      message.warning('请至少勾选一种分配方式')
+      return
+    }
     setProcessing(true)
     try {
       const { system_status: _ignoredSystemStatus, ...candidateFilters } = lastQuery
       const r = await run(
         [{ step: 'step2', label: '简历分类、分配与下发' }],
-        processMode,
-        `正在重新处理简历（${processMode === 'ai' ? 'AI' : '规则'}模式）`,
+        processModes,
+        `正在重新处理简历（${processModes.map((item) => item === 'ai' ? 'AI' : '规则').join(' + ')}）`,
         {
           scope: {
             system_statuses: statuses,
@@ -573,7 +625,6 @@ export default function ResumesPage() {
             title="上传简历（简历列表 + 简历包），上传后自动处理"
             fields={RESUME_IMPORT_FIELDS}
               onDone={handleImported}
-              processingMode={mode}
           />,
           <Button
             key="process"
@@ -657,7 +708,7 @@ export default function ResumesPage() {
         okText="开始处理"
         cancelText="取消"
         confirmLoading={processing}
-        okButtonProps={{ disabled: !processStatusSelection.length }}
+        okButtonProps={{ disabled: !processStatusSelection.length || !processModes.length }}
         onOk={handleConfirmProcess}
         onCancel={() => {
           if (!processing) setProcessModalOpen(false)
@@ -668,16 +719,20 @@ export default function ResumesPage() {
             选择需要重新处理的系统简历状态。系统会按当前表格的其它筛选条件限定范围，并保留历史分配与反馈记录。
           </Typography.Text>
           <div>
-            <Typography.Text>处理策略：</Typography.Text>
-            <Radio.Group
-              value={processMode}
-              onChange={(event) => setProcessMode(event.target.value)}
+            <Typography.Text>分配方式：</Typography.Text>
+            <Checkbox.Group
+              value={processModes}
+              onChange={setProcessModes}
               disabled={processing}
               style={{ marginLeft: 12 }}
             >
-              <Radio value="rule">规则分配</Radio>
-              <Radio value="ai">AI 分配</Radio>
-            </Radio.Group>
+              <Space>
+                <Checkbox value="rule">规则分配</Checkbox>
+                <Checkbox value="ai" disabled={!aiAvailable}>
+                  AI 分配{aiAvailable ? '' : '（未启用）'}
+                </Checkbox>
+              </Space>
+            </Checkbox.Group>
           </div>
           <Checkbox.Group
             value={processStatusSelection}
@@ -837,9 +892,92 @@ export default function ResumesPage() {
                 { title: '备注', dataIndex: 'feedback_note', ellipsis: true },
               ]}
             />
+
+            {canViewAgentDecisions && (
+              <Table
+                style={{ marginTop: 16 }}
+                title={() => 'AI 筛选决策'}
+                rowKey="id"
+                size="small"
+                loading={agentDecisionsLoading}
+                pagination={false}
+                dataSource={agentDecisions}
+                locale={{ emptyText: '暂无 AI 筛选决策' }}
+                columns={[
+                  {
+                    title: '结论',
+                    width: 100,
+                    render: (_, decision) =>
+                      decision.error_code ? (
+                        <Tag color="error">处理失败</Tag>
+                      ) : (
+                        <Tag color={decision.recommendation === 'dispatch' ? 'success' : decision.recommendation === 'review' ? 'warning' : 'default'}>
+                          {decision.recommendation === 'dispatch' ? '建议下发' : decision.recommendation === 'review' ? '人工复核' : decision.recommendation === 'archive' ? '建议归档' : '-'}
+                        </Tag>
+                      ),
+                  },
+                  {
+                    title: '置信度',
+                    dataIndex: 'confidence_score',
+                    width: 90,
+                    render: (value) => (value == null ? '-' : `${Math.round(value * 100)}%`),
+                  },
+                  { title: '推荐岗位', dataIndex: 'recommended_job_name', ellipsis: true },
+                  { title: '摘要/失败原因', width: 300, ellipsis: true, render: (_, decision) => decision.error_message || decision.summary || decision.reason || '-' },
+                  {
+                    title: '操作',
+                    width: 145,
+                    render: (_, decision) => (
+                      <Space>
+                        <a onClick={() => setAgentDecisionDetail(decision)}>详情</a>
+                        {(decision.error_code || decision.recommendation === 'archive') && hasPermission('attempt.dispatch') && (
+                          <Button
+                            type="link"
+                            size="small"
+                            loading={retryingDecisionId === decision.id}
+                            onClick={() => handleRetryAgentDecision(decision)}
+                          >
+                            重试 AI
+                          </Button>
+                        )}
+                      </Space>
+                    ),
+                  },
+                ]}
+              />
+            )}
           </>
         )}
       </Drawer>
+      <Modal
+        title="AI 筛选决策详情"
+        open={Boolean(agentDecisionDetail)}
+        width={760}
+        footer={null}
+        onCancel={() => setAgentDecisionDetail(null)}
+      >
+        {agentDecisionDetail && (
+          <Descriptions column={2} bordered size="small">
+            <Descriptions.Item label="建议">
+              {agentDecisionDetail.recommendation || '无有效建议'}
+            </Descriptions.Item>
+            <Descriptions.Item label="置信度">
+              {agentDecisionDetail.confidence_score == null ? '-' : `${Math.round(agentDecisionDetail.confidence_score * 100)}%`}
+            </Descriptions.Item>
+            <Descriptions.Item label="推荐岗位">{agentDecisionDetail.recommended_job_name || '-'}</Descriptions.Item>
+            <Descriptions.Item label="推荐二级部门">{agentDecisionDetail.recommended_department_name || '-'}</Descriptions.Item>
+            <Descriptions.Item label="摘要" span={2}>{agentDecisionDetail.summary || '-'}</Descriptions.Item>
+            <Descriptions.Item label="理由" span={2}>{agentDecisionDetail.reason || '-'}</Descriptions.Item>
+            <Descriptions.Item label="简历证据" span={2}>{(agentDecisionDetail.evidence || []).join('；') || '-'}</Descriptions.Item>
+            <Descriptions.Item label="风险点" span={2}>{(agentDecisionDetail.risks || []).join('；') || '-'}</Descriptions.Item>
+            {agentDecisionDetail.error_code && (
+              <Descriptions.Item label={`失败：${agentDecisionDetail.error_code}`} span={2}>
+                {agentDecisionDetail.error_message || '-'}
+              </Descriptions.Item>
+            )}
+          </Descriptions>
+        )}
+      </Modal>
       <Modal
         title="手动强制分配当前志愿"
         open={manualModal.open}

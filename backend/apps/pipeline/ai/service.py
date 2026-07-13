@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -22,6 +23,9 @@ from apps.ingestion.sources import RESUME_SUBDIR
 from apps.pipeline import ai_config
 
 from .schemas import ResumeScreeningOutput
+
+
+logger = logging.getLogger(__name__)
 
 
 SCORE_WEIGHTS = {
@@ -42,6 +46,76 @@ class AIServiceError(Exception):
         self.code = code
         self.message = message
         self.profile = profile
+
+
+def _safe_model_error(exc):
+    """第三方 SDK 的原始异常可能带请求地址或鉴权上下文，不能进入审计或日志。"""
+    name = type(exc).__name__.lower()
+    status_code = getattr(exc, "status_code", None)
+    if "timeout" in name:
+        return "llm_timeout", "模型请求超时，请检查网络、服务状态或超时配置"
+    if status_code in {401, 403} or "authentication" in name or "permission" in name:
+        return "llm_connection_error", "模型认证失败，请检查 API Key 与服务权限"
+    if status_code == 404 or "notfound" in name:
+        return "llm_connection_error", "模型或 API 地址不可用，请检查模型名称和 Base URL"
+    if status_code == 429 or "ratelimit" in name:
+        return "llm_error", "模型服务限流，请稍后重试或调整并发"
+    if "connection" in name or "connect" in name or "network" in name:
+        return "llm_connection_error", "模型连接失败，请检查 Base URL、网络、代理和证书"
+    return "llm_error", "模型服务调用失败，请通过服务端日志查看错误类型"
+
+
+def test_model_connection():
+    """以最小请求验证管理员保存的模型连接，不记录或返回 API Key。"""
+    model_config = ai_config.get_ai_model_config()
+    runtime_config = ai_config.get_ai_runtime_config()
+    if not model_config.api_key:
+        raise AIServiceError("ai_not_configured", "尚未配置模型 API Key")
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise AIServiceError("ai_not_configured", "服务端未安装 OpenAI SDK") from exc
+
+    kwargs = {
+        "api_key": model_config.api_key,
+        "timeout": runtime_config.timeout_seconds,
+        "max_retries": 0,
+    }
+    if model_config.base_url:
+        kwargs["base_url"] = model_config.base_url
+    try:
+        client = OpenAI(**kwargs)
+        if model_config.api_style == "chat_json":
+            client.chat.completions.create(
+                model=model_config.model_name,
+                messages=[{"role": "user", "content": "Reply with OK."}],
+                max_tokens=4,
+                stream=False,
+            )
+        else:
+            client.responses.create(
+                model=model_config.model_name,
+                input="Reply with OK.",
+                max_output_tokens=4,
+                store=False,
+            )
+    except Exception as exc:  # SDK 供应商异常类型随版本变化，统一输出脱敏摘要
+        code, detail = _safe_model_error(exc)
+        logger.warning(
+            "AI connection test failed profile=%s model=%s api_style=%s code=%s error_type=%s",
+            model_config.profile,
+            model_config.model_name,
+            model_config.api_style,
+            code,
+            type(exc).__name__,
+        )
+        raise AIServiceError(code, detail) from exc
+    return {
+        "profile": model_config.profile,
+        "model_name": model_config.model_name,
+        "api_style": model_config.api_style,
+        "base_url": model_config.base_url,
+    }
 
 
 @dataclass(frozen=True)
@@ -155,8 +229,13 @@ def _call_model(resume, text, job_context):
     model_config = ai_config.get_ai_model_config()
     runtime_config = ai_config.get_ai_runtime_config()
     if not model_config.api_key:
+        logger.warning(
+            "AI screening unavailable profile=%s model=%s: API Key is not configured",
+            model_config.profile,
+            model_config.model_name,
+        )
         raise AIServiceError(
-            "ai_not_configured", f"未配置环境变量 {model_config.api_key_env}"
+            "ai_not_configured", "尚未配置模型 API Key"
         )
     try:
         import openai
@@ -172,8 +251,20 @@ def _call_model(resume, text, job_context):
     }
     if model_config.base_url:
         client_kwargs["base_url"] = model_config.base_url
-    client = OpenAI(**client_kwargs)
     attempts = max(1, runtime_config.retry_count + 1)
+    try:
+        client = OpenAI(**client_kwargs)
+    except Exception as exc:
+        code, message = _safe_model_error(exc)
+        logger.warning(
+            "AI client initialization failed profile=%s model=%s api_style=%s code=%s error_type=%s",
+            model_config.profile,
+            model_config.model_name,
+            model_config.api_style,
+            code,
+            type(exc).__name__,
+        )
+        raise AIServiceError(code, message) from exc
     for index in range(attempts):
         try:
             if model_config.api_style == "chat_json":
@@ -217,13 +308,22 @@ def _call_model(resume, text, job_context):
         except AIServiceError:
             raise
         except (openai.APITimeoutError,) as exc:
-            code, message = "llm_timeout", f"AI 调用超时：{exc}"
+            code, message = "llm_timeout", "模型请求超时，请检查网络、服务状态或超时配置"
         except (ValidationError, ValueError, TypeError) as exc:
-            raise AIServiceError("invalid_ai_output", f"AI 结构化输出不合法：{exc}") from exc
+            raise AIServiceError("invalid_ai_output", "AI 返回内容不符合结构化要求") from exc
         except openai.APIError as exc:
-            code, message = "llm_error", f"AI 接口错误：{exc}"
+            code, message = _safe_model_error(exc)
         except Exception as exc:
-            code, message = "llm_error", f"AI 调用失败：{exc}"
+            code, message = _safe_model_error(exc)
+        logger.warning(
+            "AI screening call failed profile=%s model=%s attempt=%s/%s code=%s error_type=%s",
+            model_config.profile,
+            model_config.model_name,
+            index + 1,
+            attempts,
+            code,
+            type(exc).__name__,
+        )
         if index + 1 >= attempts:
             raise AIServiceError(code, message)
         time.sleep(max(0, runtime_config.retry_backoff_seconds) * (index + 1))
