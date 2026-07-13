@@ -127,7 +127,7 @@ cp .env.example .env
 - `APP_VERSION`：建议发布时改成明确版本号，如 `2026-07-03-1`，方便回滚和排查。
 - `DOCKER_PLATFORM`：内网服务器是常见 x86_64 Linux 时保持 `linux/amd64`；如果是 ARM 服务器，改成 `linux/arm64` 后重新构建镜像包。
 
-启用 AI 模式前必须在服务器 `.env` 配置 `OPENAI_API_KEY`；密钥只注入 backend/worker，不落库、不返回前端。未配置密钥时 AI 会写入 `ai_not_configured` 失败决策，不会回退 Rule。
+启用 AI 模式前，使用管理员账号进入「系统设置 → AI 模型连接」完成连接配置并执行测试。只要保存任一管理员连接项，系统完全使用数据库配置，绝不读取环境变量；清除已保存 API Key 后即为未配置，也不会回退旧环境变量。模型 profile 注册表和环境变量只在从未保存管理员连接项时作为默认模板/兼容兜底；API Key 只允许写入，服务端加密保存，页面和 API 均不会回显。未配置可用连接时 AI 会写入 `ai_not_configured` 失败决策，不会回退 Rule。
 
 `RUN_SEED_BASE` 默认保持 `0`。不要在长期运行环境里把它改成 `1`，否则每次 backend 重启都可能把配置页中的参数重置为种子默认值。首次初始化请使用下一节的一次性 `init` 命令。
 
@@ -317,30 +317,15 @@ tar -czf "backups/$MEDIA_BACKUP.tar.gz" -C backups "$MEDIA_BACKUP"
 - `ai_retry_count`
 - `ai_retry_backoff_seconds`
 
-大模型连接配置只在服务器 `.env` 中维护，不在前端展示，也不进入普通配置表：
+大模型连接由拥有 `settings.manage_permissions` 的管理员在「系统设置 → AI 模型连接」维护，页面可配置 profile、API 风格、模型名、Base URL 和 API Key，并执行一次最小真实模型测试。API Key 仅可写入；服务端用 Django `SECRET_KEY` 派生的 Fernet 密钥加密存储，GET、前端状态和测试结果都不会返回明文或密文。HR 和接口人不可见、不可调用该配置/测试接口。
+
+只要管理员保存任一连接项，数据库连接即完整接管，运行时不会读取 `AI_PROFILE`、`AI_PROVIDER`、`AI_MODEL_NAME`、`AI_API_STYLE`、API Key 或 Base URL 等环境变量；清除已保存 Key 后仍不会回退旧环境变量。`backend/config/ai_models.json` 继续提供 OpenAI、DeepSeek 等 profile 模板；环境变量只在从未保存管理员连接项时作为默认值或兼容兜底；通常无需为改动模型连接重启 backend/worker。
+
+AI 运行中的连接异常会继续写入 `AgentDispatchDecision.error_code` / `error_message`，但内容仅为稳定错误码和脱敏摘要。第三方 SDK 原始异常不会进入数据库、API 响应或日志；backend 和 worker 标准输出仅记录 profile、model、api_style、错误码和异常类型。排查时执行：
 
 ```bash
-AI_PROFILE=openai
-AI_PROMPT_VERSION=resume-dispatch-v1
-AI_DECISION_VERSION=dispatch-schema-v1
-AI_PROFILE_VERSION=profile-v1
-AI_PARSER_VERSION=pypdf-v1
-OPENAI_API_KEY=sk-...
-OPENAI_BASE_URL=
-```
-
-DeepSeek V4 使用兼容的 Chat Completions + JSON Output 链路，可改为：
-
-```bash
-AI_PROFILE=deepseek
-DEEPSEEK_API_KEY=sk-...
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-```
-
-修改 `.env` 后需要重启 backend 和 worker：
-
-```bash
-docker compose up -d backend worker
+docker compose logs --tail=200 backend
+docker compose logs --tail=200 worker
 ```
 
 ### 11. 服务器安全检查
@@ -426,10 +411,7 @@ docker compose up -d
 - `ai_retry_backoff_seconds`
 - `welink_enabled`
 
-大模型连接配置不放在前端，也不进入普通配置表；后端统一由
-`backend/config/ai_models.json` 声明模型 profile，由
-`backend/apps/pipeline/ai_config.py` 加载。切换已有供应商通常只需修改
-`AI_PROFILE` 和对应密钥；新增兼容供应商时增加 profile，不需要修改业务流程代码。
+管理员可在「系统设置 → AI 模型连接」配置模型 profile、API 风格、模型名、Base URL 和 API Key，并执行最小真实模型测试；该入口由 `settings.manage_permissions` 保护，HR/接口人不可访问。Key 仅允许写入、不会被读取接口返回，服务端以由 Django `SECRET_KEY` 派生的 Fernet 密文存储。只要保存任一管理员连接项，配置即完全屏蔽环境变量；清除 Key 后 AI 未配置且不得回退旧环境变量。`backend/config/ai_models.json` 仍声明 profile 模板，并只在从未保存管理员连接项时提供兜底；新增兼容供应商时增加 profile，不需要修改业务流程代码。
 
 当前支持的环境变量：
 
@@ -440,27 +422,20 @@ docker compose up -d
 | `AI_PROVIDER` | `openai` | 旧版兼容项；未设置 `AI_PROFILE` 时作为 profile 名 |
 | `AI_API_STYLE` | profile 配置 | 可选覆盖：`responses` / `chat_json` |
 | `AI_MODEL_NAME` | profile 的 `default_model` | 可选覆盖具体模型 ID，并写入决策审计 |
-| `AI_API_KEY_ENV` | profile 配置 | 可选覆盖密钥所在环境变量名 |
-| `AI_BASE_URL_ENV` | profile 配置 | 可选覆盖 Base URL 所在环境变量名 |
+| `AI_API_KEY_ENV` | profile 配置 | 仅从未保存管理员连接项时的兼容兜底：可选覆盖密钥所在环境变量名 |
+| `AI_BASE_URL_ENV` | profile 配置 | 仅从未保存管理员连接项时的兼容兜底：可选覆盖 Base URL 所在环境变量名 |
 | `AI_PROMPT_VERSION` | `resume-screening-v1` | 提示词版本 |
 | `AI_DECISION_VERSION` | `decision-v1` | 决策 schema / 评分规则版本 |
 | `AI_PROFILE_VERSION` | `profile-v1` | 简历画像 schema 版本 |
 | `AI_PARSER_VERSION` | `pypdf-v1` | PDF 文本解析器版本 |
 
-例如：
-
-```bash
-export OPENAI_API_KEY="sk-..."
-export AI_MODEL_NAME="gpt-5.4-mini"
-export AI_PROMPT_VERSION="resume-dispatch-v1"
-export AI_DECISION_VERSION="dispatch-schema-v1"
-```
+这些环境变量只适合用于从未保存管理员连接项时的部署默认值或兼容兜底；一旦管理员保存任一连接项，系统不再读取它们。日常修改连接请使用管理员配置页，避免在 shell、文档或工单中传播 API Key。
 
 ## 主要流程
 
 1. 使用 `admin` 或 `hr` 登录。
 2. 在简历库、岗位需求、院校清单、部门接口人页面导入对应 Excel/简历包；也可先执行 `gen_sample` 和 `load_sample`。
-3. 简历导入后自动触发 Step1→Step2；使用 AI 模式前先配置模型密钥并用少量真实脱敏样本验收评分与护栏。
+3. 简历导入后自动触发 Step1→Step2；使用 AI 模式前由管理员在「系统设置 → AI 模型连接」配置并测试模型，再用少量真实脱敏样本验收评分与护栏。
 4. HR 在「简历分配」查看待下发、待复核、已下发等分配尝试。
 5. HR 单条、批量或一键全部下发给二级接口人。
 6. 二级接口人登录后仅看到自己的分配，可导出简历并转派本部门三级接口人。
