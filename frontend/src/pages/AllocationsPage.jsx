@@ -485,6 +485,7 @@ export default function AllocationsPage({ source = 'rule' }) {
         scroll={{ x: scrollX }}
         search={false}
         pagination={{ defaultPageSize: 10, showSizeChanger: true }}
+        params={{ source }}
         rowSelection={{
           selectedRowKeys,
           onChange: (keys) => setSelectedRowKeys(keys),
@@ -544,7 +545,7 @@ export default function AllocationsPage({ source = 'rule' }) {
           ),
         ]}
         request={async (params, _sort, filters) => {
-          const { current, pageSize } = params
+          const { current, pageSize, source: requestedSource } = params
           const tableFilters = normalizeTableFilters(filters, [
             'candidate_name',
             'volunteer_rank',
@@ -556,7 +557,7 @@ export default function AllocationsPage({ source = 'rule' }) {
             'match_reason',
             'status',
           ])
-          const query = { ...tableFilters, source }
+          const query = { ...tableFilters, source: requestedSource }
           setLastQuery(query)
           try {
             const { data } = await fetchAllocations({

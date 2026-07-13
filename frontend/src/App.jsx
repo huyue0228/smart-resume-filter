@@ -64,12 +64,12 @@ function AppRoutes() {
           path="/allocations/rule"
           element={guarded(
             ['attempt.view_all', 'attempt.view_received', 'attempt.view_assigned'],
-            <AllocationsPage source="rule" />,
+            <AllocationsPage key="rule" source="rule" />,
           )}
         />
         <Route
           path="/allocations/ai"
-          element={guarded('attempt.view_all', <AllocationsPage source="ai" />)}
+          element={guarded('attempt.view_all', <AllocationsPage key="ai" source="ai" />)}
         />
         <Route path="/agent-decisions" element={<Navigate to="/allocations/ai" replace />} />
         <Route
