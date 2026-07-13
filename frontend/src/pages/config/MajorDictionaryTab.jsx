@@ -21,6 +21,12 @@ import {
   updateMajorCategory,
 } from '../../api/services'
 import { useModalRecord } from './useModalRecord'
+import {
+  normalizeTableFilters,
+  selectColumnFilter,
+  textColumnFilter,
+  useResizableColumns,
+} from '../../components/DataTableControls'
 
 const matchTypeOptions = [
   { label: '包含匹配', value: 'contains' },
@@ -111,16 +117,31 @@ export default function MajorDictionaryTab() {
     return true
   }
 
-  const categoryColumns = [
-    { title: '编码', dataIndex: 'code', width: 170, fixed: 'left' },
-    { title: '名称', dataIndex: 'name', width: 180 },
-    { title: '说明', dataIndex: 'description', ellipsis: true },
+  const categoryBaseColumns = [
+    {
+      title: '编码',
+      dataIndex: 'code',
+      width: 170,
+      fixed: 'left',
+      ...textColumnFilter('筛选编码'),
+    },
+    { title: '名称', dataIndex: 'name', width: 180, ...textColumnFilter('筛选名称') },
+    {
+      title: '说明',
+      dataIndex: 'description',
+      ellipsis: true,
+      ...textColumnFilter('筛选说明'),
+    },
     { title: '别名数', dataIndex: 'alias_count', width: 90 },
     { title: '排序', dataIndex: 'sort_order', width: 80 },
     {
       title: '状态',
       dataIndex: 'is_active',
       width: 90,
+      ...selectColumnFilter([
+        { value: 'true', text: '启用' },
+        { value: 'false', text: '停用' },
+      ]),
       render: (value) => <StatusTag active={value} />,
     },
     {
@@ -162,14 +183,36 @@ export default function MajorDictionaryTab() {
     },
   ]
 
-  const aliasColumns = [
-    { title: '专业名称 / 关键词', dataIndex: 'name', width: 180, fixed: 'left' },
-    { title: '规范化名称', dataIndex: 'normalized_name', width: 150 },
-    { title: '所属大类', dataIndex: 'category_name', width: 180 },
+  const aliasBaseColumns = [
+    {
+      title: '专业名称 / 关键词',
+      dataIndex: 'name',
+      width: 180,
+      fixed: 'left',
+      ...textColumnFilter('筛选专业名称'),
+    },
+    {
+      title: '规范化名称',
+      dataIndex: 'normalized_name',
+      width: 150,
+      ...textColumnFilter('筛选规范化名称'),
+    },
+    {
+      title: '所属大类',
+      key: 'category',
+      dataIndex: 'category_name',
+      width: 180,
+      ...selectColumnFilter(
+        categories.map((category) => ({ value: category.id, text: category.name })),
+      ),
+    },
     {
       title: '匹配方式',
       dataIndex: 'match_type',
       width: 110,
+      ...selectColumnFilter(
+        matchTypeOptions.map((item) => ({ value: item.value, text: item.label })),
+      ),
       render: (value) =>
         value === 'exact' ? <Tag color="blue">精确</Tag> : <Tag color="cyan">包含</Tag>,
     },
@@ -177,16 +220,23 @@ export default function MajorDictionaryTab() {
       title: '来源',
       dataIndex: 'source',
       width: 100,
+      ...selectColumnFilter(
+        sourceOptions.map((item) => ({ value: item.value, text: item.label })),
+      ),
       render: (value) => {
         const option = sourceOptions.find((item) => item.value === value)
         return option?.label || value || '-'
       },
     },
-    { title: '备注', dataIndex: 'note', ellipsis: true },
+    { title: '备注', dataIndex: 'note', ellipsis: true, ...textColumnFilter('筛选备注') },
     {
       title: '状态',
       dataIndex: 'is_active',
       width: 90,
+      ...selectColumnFilter([
+        { value: 'true', text: '启用' },
+        { value: 'false', text: '停用' },
+      ]),
       render: (value) => <StatusTag active={value} />,
     },
     {
@@ -216,6 +266,16 @@ export default function MajorDictionaryTab() {
       ),
     },
   ]
+  const {
+    columns: categoryColumns,
+    components: categoryComponents,
+    scrollX: categoryScrollX,
+  } = useResizableColumns(categoryBaseColumns)
+  const {
+    columns: aliasColumns,
+    components: aliasComponents,
+    scrollX: aliasScrollX,
+  } = useResizableColumns(aliasBaseColumns)
 
   const categoryInitialValues = categoryModal.record || {
     is_active: true,
@@ -241,7 +301,8 @@ export default function MajorDictionaryTab() {
         rowKey="id"
         search={false}
         columns={categoryColumns}
-        scroll={{ x: 1060 }}
+        components={categoryComponents}
+        scroll={{ x: categoryScrollX }}
         pagination={{ defaultPageSize: 10, showSizeChanger: true }}
         rowClassName={(record) =>
           selectedCategory?.id === record.id ? 'ant-table-row-selected' : ''
@@ -259,11 +320,18 @@ export default function MajorDictionaryTab() {
             新增大类
           </Button>,
         ]}
-        request={async (params) => {
+        request={async (params, _sort, filters) => {
           const { current, pageSize } = params
+          const tableFilters = normalizeTableFilters(filters, [
+            'code',
+            'name',
+            'description',
+            'is_active',
+          ])
           const { data } = await fetchMajorCategories({
             page: current,
             page_size: pageSize,
+            ...tableFilters,
           })
           return {
             data: data?.results || [],
@@ -278,7 +346,8 @@ export default function MajorDictionaryTab() {
         rowKey="id"
         search={false}
         columns={aliasColumns}
-        scroll={{ x: 1120 }}
+        components={aliasComponents}
+        scroll={{ x: aliasScrollX }}
         pagination={{ defaultPageSize: 10, showSizeChanger: true }}
         headerTitle={
           selectedCategory ? (
@@ -301,12 +370,22 @@ export default function MajorDictionaryTab() {
             新增别名
           </Button>,
         ]}
-        request={async (params) => {
+        request={async (params, _sort, filters) => {
           const { current, pageSize } = params
+          const tableFilters = normalizeTableFilters(filters, [
+            'category',
+            'name',
+            'normalized_name',
+            'match_type',
+            'source',
+            'note',
+            'is_active',
+          ])
           const { data } = await fetchMajorAliases({
             page: current,
             page_size: pageSize,
-            category: selectedCategory?.id,
+            ...tableFilters,
+            category: selectedCategory?.id || tableFilters.category,
           })
           return {
             data: data?.results || [],
