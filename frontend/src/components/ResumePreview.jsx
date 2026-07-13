@@ -67,7 +67,7 @@ export default function ResumePreview({ resume, attemptId, height = 520 }) {
     let alive = true
     let revokedUrl = ''
     let pdfDoc = null
-    if (!resume?.id && !attemptId) {
+    if (!resume?.resume_file) {
       setState({
         loading: false,
         rendering: false,
@@ -206,6 +206,15 @@ export default function ResumePreview({ resume, attemptId, height = 520 }) {
 
   if (!resume && !attemptId) {
     return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="未选择简历" />
+  }
+
+  if (!resume?.resume_file) {
+    return (
+      <Empty
+        image={Empty.PRESENTED_IMAGE_SIMPLE}
+        description="该投递未关联简历文件，请先上传包含对应应聘ID的简历包"
+      />
+    )
   }
 
   if (state.loading) {

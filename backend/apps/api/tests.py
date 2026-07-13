@@ -496,6 +496,7 @@ class RbacApiTests(TestCase):
         self.assertEqual([item["id"] for item in response.data["results"]], [self.attempt_a.workflow.candidate_id])
         row = response.data["results"][0]
         self.assertEqual(row["phone"], "")
+        self.assertIsNone(row["preview_resume"])
         self.assertEqual([item["id"] for item in row["resumes"]], [self.attempt_a.resume_id])
         self.assertEqual([item["id"] for item in row["attempts"]], [self.attempt_a.id])
         self.assertEqual(row["current_attempt"]["id"], self.attempt_a.id)

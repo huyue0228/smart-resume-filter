@@ -1,5 +1,8 @@
 from io import BytesIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
+import zipfile
 
 import pandas as pd
 from django.contrib.auth.models import Group
@@ -92,6 +95,35 @@ class ResumeImportDesignContractTests(TestCase):
         candidate = m.Candidate.objects.get()
         self.assertEqual(candidate.name, "张三")
         self.assertEqual(candidate.gender, "M")
+
+    def test_resume_package_links_pdf_by_apply_id_and_persists_file(self):
+        resume_list = _excel_file(
+            [
+                {
+                    "姓名": "张三",
+                    "手机号": "13800000000",
+                    "应聘ID": "PDF1001",
+                    "对外职位名称": "后端工程师",
+                }
+            ]
+        )
+        package = BytesIO()
+        with zipfile.ZipFile(package, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("简历/张三（PDF1001）.pdf", b"%PDF-1.4\n% test pdf\n")
+        package.seek(0)
+        package.name = "简历包.zip"
+
+        with TemporaryDirectory() as media_root, self.settings(MEDIA_ROOT=media_root):
+            import_files(
+                {"resume_list": resume_list, "resume_package": package},
+                mode="incremental",
+            )
+            resume = m.Resume.objects.get(apply_id="PDF1001")
+            stored_file = Path(media_root) / "resumes" / resume.resume_file
+
+            self.assertEqual(resume.resume_file, "张三（PDF1001）.pdf")
+            self.assertTrue(stored_file.exists())
+            self.assertTrue(stored_file.read_bytes().startswith(b"%PDF"))
 
     def test_replace_contacts_does_not_clear_existing_resume_pool(self):
         candidate = m.Candidate.objects.create(

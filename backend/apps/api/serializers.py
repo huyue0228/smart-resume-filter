@@ -381,7 +381,11 @@ class CandidateSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         if request and "resume.view" not in user_permission_codes(request.user):
             attempt = visible_candidate_attempt(obj, request.user)
-            return ResumeBriefSerializer(attempt.resume).data if attempt else None
+            return (
+                ResumeBriefSerializer(attempt.resume).data
+                if attempt and attempt.resume.resume_file
+                else None
+            )
         resume = candidate_summary.preview_resume(obj)
         return ResumeBriefSerializer(resume).data if resume else None
 

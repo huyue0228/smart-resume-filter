@@ -1146,7 +1146,11 @@ export default function ResumesPage() {
               </Typography.Title>
               <ResumePreview
                 resume={previewRecord}
-                attemptId={isContact ? detailRecord.current_attempt?.id : undefined}
+                attemptId={
+                  isContact && previewRecord?.resume_file
+                    ? detailRecord.current_attempt?.id
+                    : undefined
+                }
               />
             </div>
 
