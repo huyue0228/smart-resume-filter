@@ -8,6 +8,7 @@ import JobsPage from './pages/JobsPage'
 import SchoolsPage from './pages/SchoolsPage'
 import DepartmentsPage from './pages/DepartmentsPage'
 import ConfigPage from './pages/ConfigPage'
+import AIConnectionPage from './pages/AIConnectionPage'
 import UsersPage from './pages/UsersPage'
 import WorkflowsPage from './pages/WorkflowsPage'
 
@@ -78,6 +79,10 @@ function AppRoutes() {
         <Route
           path="/config"
           element={guarded('settings.manage_config', <ConfigPage />)}
+        />
+        <Route
+          path="/ai-connection"
+          element={guarded('settings.manage_ai_connection', <AIConnectionPage />)}
         />
         <Route
           path="/users"

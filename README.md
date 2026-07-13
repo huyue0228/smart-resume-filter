@@ -317,7 +317,7 @@ tar -czf "backups/$MEDIA_BACKUP.tar.gz" -C backups "$MEDIA_BACKUP"
 - `ai_retry_count`
 - `ai_retry_backoff_seconds`
 
-大模型连接由拥有 `settings.manage_permissions` 的管理员在「系统设置 → AI 模型连接」维护，页面可配置 profile、API 风格、模型名、Base URL 和 API Key，并执行一次最小真实模型测试。API Key 仅可写入；服务端用 Django `SECRET_KEY` 派生的 Fernet 密钥加密存储，GET、前端状态和测试结果都不会返回明文或密文。HR 和接口人不可见、不可调用该配置/测试接口。
+大模型连接由拥有 `settings.manage_ai_connection` 的角色在「系统设置 → AI 模型连接」维护；管理员角色默认拥有该权限，也可在「用户权限」按角色授予。页面可配置 profile、API 风格、模型名、Base URL 和 API Key，并执行一次最小真实模型测试。API Key 仅可写入；服务端用 Django `SECRET_KEY` 派生的 Fernet 密钥加密存储，GET、前端状态和测试结果都不会返回明文或密文。未获授权的 HR 和接口人不可见、不可调用该配置/测试接口。
 
 模型连接仅由管理员保存的数据库配置决定；运行时不会读取部署环境变量中的模型、Base URL 或 API Key。`backend/config/ai_models.json` 继续提供 OpenAI、DeepSeek 等表单 profile 模板；通常无需为改动模型连接重启 backend/worker。
 
@@ -411,7 +411,7 @@ docker compose up -d
 - `ai_retry_backoff_seconds`
 - `welink_enabled`
 
-管理员可在「系统设置 → AI 模型连接」配置模型 profile、API 风格、模型名、Base URL 和 API Key，并执行最小真实模型测试；该入口由 `settings.manage_permissions` 保护，HR/接口人不可访问。Key 仅允许写入、不会被读取接口返回，服务端以由 Django `SECRET_KEY` 派生的 Fernet 密文存储。运行时只读取该数据库配置；`backend/config/ai_models.json` 仅声明表单 profile 模板。日常修改连接请使用管理员配置页，避免在 shell、文档或工单中传播 API Key。
+拥有 `settings.manage_ai_connection` 的角色可在「系统设置 → AI 模型连接」配置模型 profile、API 风格、模型名、Base URL 和 API Key，并执行最小真实模型测试；管理员角色默认拥有该权限，HR/接口人未被授权时不可访问。Key 仅允许写入、不会被读取接口返回，服务端以由 Django `SECRET_KEY` 派生的 Fernet 密文存储。运行时只读取该数据库配置；`backend/config/ai_models.json` 仅声明表单 profile 模板。日常修改连接请使用授权角色的配置页，避免在 shell、文档或工单中传播 API Key。
 
 ## 主要流程
 

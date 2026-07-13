@@ -1132,10 +1132,10 @@ class ConfigViewSet(viewsets.ViewSet):
 
 
 class AIConnectionConfigView(APIView):
-    """仅管理员可维护的模型连接配置；API Key 永不回传。"""
+    """由 AI 模型连接权限维护的连接配置；API Key 永不回传。"""
 
     permission_classes = [HasPermissionCode]
-    permission_code = "settings.manage_permissions"
+    permission_code = "settings.manage_ai_connection"
 
     def get(self, request):
         try:
@@ -1162,7 +1162,7 @@ class AIConnectionConfigView(APIView):
 
 class AIConnectionTestView(APIView):
     permission_classes = [HasPermissionCode]
-    permission_code = "settings.manage_permissions"
+    permission_code = "settings.manage_ai_connection"
 
     def post(self, request):
         try:

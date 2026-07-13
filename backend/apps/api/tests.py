@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import zipfile
 from urllib.parse import quote
 
-from django.contrib.auth.models import Group
+from django.contrib.auth.models import Group, Permission
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 import pandas as pd
@@ -15,7 +15,7 @@ from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
 from apps.accounts.models import User
-from apps.accounts.permissions import ensure_rbac_defaults
+from apps.accounts.permissions import ensure_rbac_defaults, permission_codename
 from apps.core import models as m
 from apps.pipeline import ai_config
 from apps.pipeline.services import classify_school
@@ -533,7 +533,7 @@ class RbacApiTests(TestCase):
         )
         self.assertEqual(update_response.status_code, 404)
 
-    def test_only_admin_can_save_and_view_redacted_ai_connection(self):
+    def test_only_users_with_ai_connection_permission_can_save_and_view_redacted_connection(self):
         self.client.force_authenticate(self.hr)
         self.assertEqual(self.client.get("/api/ai-connection/").status_code, 403)
 
@@ -556,6 +556,41 @@ class RbacApiTests(TestCase):
         model_config = ai_config.get_ai_model_config()
         self.assertEqual(model_config.model_name, "deepseek-v4-pro")
         self.assertEqual(model_config.api_key, "sk-test-secret")
+
+    def test_role_granted_ai_connection_permission_can_manage_connection(self):
+        permission = Permission.objects.get(
+            codename=permission_codename("settings.manage_ai_connection")
+        )
+        ai_operator = Group.objects.create(name="AI 模型管理员")
+        ai_operator.permissions.add(permission)
+        user = User.objects.create_user(
+            username="ai-operator", password="pass", role=User.ROLE_HR
+        )
+        user.groups.add(ai_operator)
+        self.client.force_authenticate(user)
+
+        response = self.client.get("/api/ai-connection/")
+
+        self.assertEqual(response.status_code, 200)
+        update_response = self.client.patch(
+            "/api/ai-connection/",
+            {"model_name": "delegated-model"},
+            format="json",
+        )
+        self.assertEqual(update_response.status_code, 200)
+        with patch(
+            "apps.api.views.ai_service.test_model_connection",
+            return_value={
+                "profile": "deepseek",
+                "model_name": "delegated-model",
+                "api_style": "chat_json",
+                "base_url": "https://api.deepseek.com",
+            },
+        ):
+            test_response = self.client.post("/api/ai-connection/test/")
+
+        self.assertEqual(test_response.status_code, 200)
+        self.assertTrue(test_response.data["ok"])
 
     def test_admin_can_test_ai_connection(self):
         self.client.force_authenticate(self.admin)
@@ -596,6 +631,7 @@ class RbacApiTests(TestCase):
             for permission in module["children"]
         ]
         self.assertIn("settings.manage_permissions", codes)
+        self.assertIn("settings.manage_ai_connection", codes)
 
 
 class SchoolRuleConfigApiTests(TestCase):
