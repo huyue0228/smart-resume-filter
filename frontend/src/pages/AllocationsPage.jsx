@@ -43,12 +43,6 @@ const STATUS_ENUM = {
   cancelled: { text: '已取消', status: 'Default' },
 }
 
-const SOURCE_TEXT = {
-  rule: '规则',
-  ai: 'AI',
-  manual: '手动',
-}
-
 export default function AllocationsPage({ source = 'rule' }) {
   const actionRef = useRef()
   const { hasPermission, isContact, isSecondaryContact, isTertiaryContact } = useRole()
@@ -311,17 +305,10 @@ export default function AllocationsPage({ source = 'rule' }) {
     },
     { title: '应聘ID', dataIndex: 'apply_id', width: 120, search: false },
     { title: '当前投递', dataIndex: 'position_name', ellipsis: true },
-    {
-      title: '来源',
-      dataIndex: 'source',
-      width: 80,
-      search: false,
-      render: (value) => SOURCE_TEXT[value] || value || '-',
-    },
     { title: '分配部门', dataIndex: 'department_name', width: 160 },
     !isSecondaryContact && { title: '二级接口人', dataIndex: 'contact_name', width: 120 },
     { title: '三级接口人', dataIndex: 'sub_contact_name', width: 120 },
-    { title: '分配理由', dataIndex: 'match_reason', ellipsis: true, search: false },
+    { title: '分配原因', dataIndex: 'match_reason', ellipsis: true, search: false },
     {
       title: '状态',
       dataIndex: 'status',
@@ -444,7 +431,7 @@ export default function AllocationsPage({ source = 'rule' }) {
         actionRef={actionRef}
         rowKey="id"
         columns={columns}
-        scroll={{ x: 1250 }}
+        scroll={{ x: 1170 }}
         search={{ labelWidth: 'auto' }}
         pagination={{ defaultPageSize: 10, showSizeChanger: true }}
         rowSelection={{
@@ -545,9 +532,6 @@ export default function AllocationsPage({ source = 'rule' }) {
               <Descriptions.Item label="投递岗位">
                 {detailRecord.position_name || detailRecord.position_name_snapshot || '-'}
               </Descriptions.Item>
-              <Descriptions.Item label="来源">
-                {SOURCE_TEXT[detailRecord.source] || detailRecord.source || '-'}
-              </Descriptions.Item>
               <Descriptions.Item label="状态">
                 {STATUS_ENUM[detailRecord.status]?.text || detailRecord.status || '-'}
               </Descriptions.Item>
@@ -564,7 +548,7 @@ export default function AllocationsPage({ source = 'rule' }) {
                   detailRecord.sub_contact_name_snapshot ||
                   '-'}
               </Descriptions.Item>
-              <Descriptions.Item label="分配理由" span={2}>
+              <Descriptions.Item label="分配原因" span={2}>
                 {detailRecord.match_reason || '-'}
               </Descriptions.Item>
               {detailRecord.agent_decision_summary?.summary && (

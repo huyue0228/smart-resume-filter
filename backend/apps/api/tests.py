@@ -489,6 +489,22 @@ class RbacApiTests(TestCase):
         ids = [item["id"] for item in response.data["results"]]
         self.assertEqual(ids, [self.attempt_a.id])
 
+    def test_rule_and_ai_attempt_lists_return_assignment_reason(self):
+        self.attempt_a.match_reason = "规则：院校准入、专业匹配"
+        self.attempt_a.save(update_fields=["match_reason"])
+        self.attempt_b.source = m.AssignmentAttempt.SOURCE_AI
+        self.attempt_b.match_reason = "AI：简历能力与岗位要求匹配"
+        self.attempt_b.save(update_fields=["source", "match_reason"])
+        self.client.force_authenticate(self.hr)
+
+        rule_response = self.client.get("/api/workflow-attempts/", {"source": "rule"})
+        ai_response = self.client.get("/api/workflow-attempts/", {"source": "ai"})
+
+        self.assertEqual(rule_response.status_code, 200)
+        self.assertEqual(ai_response.status_code, 200)
+        self.assertEqual(rule_response.data["results"][0]["match_reason"], "规则：院校准入、专业匹配")
+        self.assertEqual(ai_response.data["results"][0]["match_reason"], "AI：简历能力与岗位要求匹配")
+
     def test_contact_cannot_access_settings(self):
         self.client.force_authenticate(self.secondary_user)
 
