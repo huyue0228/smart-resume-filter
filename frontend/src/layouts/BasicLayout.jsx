@@ -8,7 +8,6 @@ import {
   ApartmentOutlined,
   BankOutlined,
   TeamOutlined,
-  DeploymentUnitOutlined,
   SettingOutlined,
   ControlOutlined,
   UserOutlined,
@@ -17,7 +16,7 @@ import {
 import { useRole, ROLES } from '../contexts/RoleContext'
 import ProcessingTaskCenter from '../components/ProcessingTaskCenter'
 
-const ROOT_MENU_KEYS = ['/data', '/allocations', '/system']
+const ROOT_MENU_KEYS = ['/data', '/system']
 
 function pathMatchesGroup(pathname, route) {
   if (!route.routes) return false
@@ -28,17 +27,6 @@ function defaultOpenKeys(pathname) {
   return allRoute.routes
     .filter((route) => ROOT_MENU_KEYS.includes(route.path) && pathMatchesGroup(pathname, route))
     .map((route) => route.path)
-}
-
-// 简历分配按来源拆为两个子页；两页复用同一分配尝试操作台和相同处置能力。
-const assignGroup = {
-  path: '/allocations',
-  name: '简历分配',
-  icon: <DeploymentUnitOutlined />,
-  routes: [
-    { path: '/allocations/rule', name: '规则分配' },
-    { path: '/allocations/ai', name: 'AI分配' },
-  ],
 }
 
 const allRoute = {
@@ -55,7 +43,6 @@ const allRoute = {
         { path: '/departments', name: '部门接口人', icon: <TeamOutlined /> },
       ],
     },
-    assignGroup,
     {
       path: '/system',
       name: '系统设置',
@@ -71,12 +58,10 @@ const allRoute = {
 
 function filterRoutesByPermission(routes, hasPermission) {
   const permissionMap = {
-    '/resumes': 'resume.view',
+    '/resumes': ['resume.view', 'attempt.view_received', 'attempt.view_assigned'],
     '/jobs': 'job.view',
     '/schools': 'school.view',
     '/departments': 'department.view',
-    '/allocations/rule': ['attempt.view_all', 'attempt.view_received', 'attempt.view_assigned'],
-    '/allocations/ai': 'attempt.view_all',
     '/config': 'settings.manage_config',
     '/ai-connection': 'settings.manage_ai_connection',
     '/users': 'settings.manage_permissions',

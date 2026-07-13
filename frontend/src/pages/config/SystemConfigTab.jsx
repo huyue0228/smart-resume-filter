@@ -59,7 +59,10 @@ export default function SystemConfigTab() {
     try {
       const { data } = await updateConfig(record.key, drafts[record.key])
       setConfigs((prev) => prev.map((item) => (item.key === record.key ? data : item)))
+      setDrafts((prev) => ({ ...prev, [record.key]: data.value }))
       message.success('配置已保存')
+    } catch {
+      setDrafts((prev) => ({ ...prev, [record.key]: record.value }))
     } finally {
       setSavingKey('')
     }

@@ -124,22 +124,10 @@ def create_run(step, mode="rule", scope=None, created_by=None):
     return run
 
 
-def create_runs(step, modes, scope=None, created_by=None):
-    """为一次多策略处理分别建单，并标记为同一范围的协同运行。"""
-    unique_modes = list(dict.fromkeys(modes or []))
-    if not unique_modes:
-        raise ValueError("至少选择一种分配方式")
-    if any(mode not in {"rule", "ai"} for mode in unique_modes):
-        raise ValueError("存在未知分配方式")
-    if "ai" in unique_modes and not ai_config.is_ai_enabled():
-        raise ValueError("AI 模式未启用，请先由管理员完成模型连接配置并测试")
-    run_scope = deepcopy(scope or {})
-    if len(unique_modes) > 1:
-        run_scope["parallel_modes"] = True
-    return [
-        create_run(step, mode=mode, scope=run_scope, created_by=created_by)
-        for mode in unique_modes
-    ]
+def create_configured_run(step, scope=None, created_by=None):
+    """按系统参数中的全局分配模式创建唯一运行。"""
+    mode = ai_config.allocation_mode()
+    return create_run(step, mode=mode, scope=scope, created_by=created_by)
 
 
 def _run_scope(run):

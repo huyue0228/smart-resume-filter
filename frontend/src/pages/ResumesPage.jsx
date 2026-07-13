@@ -13,6 +13,7 @@ import {
   Tooltip,
   Select,
   Input,
+  Popconfirm,
 } from 'antd'
 import { DownloadOutlined, PlayCircleOutlined, UndoOutlined } from '@ant-design/icons'
 import {
@@ -26,7 +27,17 @@ import {
   manualAssignResume,
   fetchAgentDecisions,
   retryAgentDecision,
-  fetchAIAvailability,
+  fetchAllocationMode,
+  dispatchAllocation,
+  confirmReviewAllocation,
+  cancelAllocation,
+  cancelReviewAllocation,
+  transferAllocationToManual,
+  bulkDispatchCandidates,
+  assignSubContact,
+  fetchEligibleSubContacts,
+  submitAllocationFeedback,
+  exportAllocations,
 } from '../api/services'
 import ImportButton from '../components/ImportButton'
 import ResumePreview from '../components/ResumePreview'
@@ -120,8 +131,10 @@ const REASON_TYPE = {
 
 export default function ResumesPage() {
   const actionRef = useRef()
-  const { hasPermission } = useRole()
+  const { hasPermission, isContact, isSecondaryContact, isTertiaryContact } = useRole()
   const canViewAgentDecisions = hasPermission('attempt.view_all')
+  const canRunPipeline = hasPermission('pipeline.run')
+  const canImport = hasPermission('resume.import')
   const { run } = useProcessRunner()
   const [undo, setUndo] = useState({ available: false })
   const [detailRecord, setDetailRecord] = useState(null)
@@ -134,23 +147,40 @@ export default function ResumesPage() {
   const [processing, setProcessing] = useState(false)
   const [processModalOpen, setProcessModalOpen] = useState(false)
   const [processStatusSelection, setProcessStatusSelection] = useState([])
-  const [processModes, setProcessModes] = useState(['rule'])
-  const [aiAvailable, setAIAvailable] = useState(false)
+  const [allocationMode, setAllocationMode] = useState({ mode: 'rule', ai_enabled: false, ai_ready: false })
   const [lastQuery, setLastQuery] = useState({})
+  const [selectedRowKeys, setSelectedRowKeys] = useState([])
+  const [bulkDispatching, setBulkDispatching] = useState(false)
+  const [dispatchingId, setDispatchingId] = useState(null)
   const [filterOptions, setFilterOptions] = useState({})
   const [tableFilters, setTableFilters] = useState({})
   const [manualModal, setManualModal] = useState({
     open: false,
     resume: null,
+    attempt: null,
     contacts: [],
     contactId: undefined,
     secondaryId: undefined,
     reason: '',
     loading: false,
   })
+  const [assignModal, setAssignModal] = useState({
+    open: false,
+    record: null,
+    contacts: [],
+    selected: undefined,
+    loading: false,
+  })
+  const [feedbackModal, setFeedbackModal] = useState({
+    open: false,
+    record: null,
+    result: 'passed',
+    note: '',
+    loading: false,
+  })
 
-  const openManualAssign = async (resume) => {
-    setManualModal((prev) => ({ ...prev, open: true, resume, loading: true }))
+  const openManualAssign = async (resume, attempt = null) => {
+    setManualModal((prev) => ({ ...prev, open: true, resume, attempt, loading: true }))
     try {
       const { data } = await fetchContacts({
         is_active: 'true',
@@ -169,13 +199,18 @@ export default function ResumesPage() {
     }
     setManualModal((prev) => ({ ...prev, loading: true }))
     try {
-      await manualAssignResume(manualModal.resume.id, {
+      const payload = {
         contact_id: manualModal.contactId,
         secondary_contact_id: manualModal.secondaryId,
         manual_reason: manualModal.reason || 'HR 手动强制分配',
-      })
+      }
+      if (manualModal.attempt) {
+        await transferAllocationToManual(manualModal.attempt.id, payload)
+      } else {
+        await manualAssignResume(manualModal.resume.id, payload)
+      }
       message.success('已创建人工分配尝试')
-      setManualModal({ open: false, resume: null, contacts: [], contactId: undefined, secondaryId: undefined, reason: '', loading: false })
+      setManualModal({ open: false, resume: null, attempt: null, contacts: [], contactId: undefined, secondaryId: undefined, reason: '', loading: false })
       setDetailRecord(null)
       actionRef.current?.reload()
     } catch {
@@ -202,12 +237,14 @@ export default function ResumesPage() {
   }
 
   useEffect(() => {
-    refreshUndo()
+    if (canImport) refreshUndo()
     refreshFilterOptions()
-    fetchAIAvailability()
-      .then(({ data }) => setAIAvailable(Boolean(data?.enabled)))
-      .catch(() => setAIAvailable(false))
-  }, [])
+    if (canRunPipeline) {
+      fetchAllocationMode()
+        .then(({ data }) => setAllocationMode(data || { mode: 'rule', ai_enabled: false, ai_ready: false }))
+        .catch(() => setAllocationMode({ mode: 'rule', ai_enabled: false, ai_ready: false }))
+    }
+  }, [canImport, canRunPipeline])
 
   useEffect(() => {
     if (Object.keys(tableFilters).length || actionRef.current) {
@@ -261,6 +298,129 @@ export default function ResumesPage() {
       message.success(data?.attempt ? 'AI 已重试并生成分配尝试' : 'AI 已重试，请查看最新决策')
     } finally {
       setRetryingDecisionId(null)
+    }
+  }
+
+  const reloadCandidates = () => {
+    setDetailRecord(null)
+    actionRef.current?.reload()
+  }
+
+  const handleDispatch = async (attempt) => {
+    setDispatchingId(attempt.id)
+    try {
+      const { data } = await dispatchAllocation(attempt.id)
+      message.success(data?.detail || '下发成功')
+      reloadCandidates()
+    } finally {
+      setDispatchingId(null)
+    }
+  }
+
+  const handleConfirmReview = async (attempt) => {
+    setDispatchingId(attempt.id)
+    try {
+      await confirmReviewAllocation(attempt.id)
+      message.success('已确认 AI 建议，当前记录进入待下发')
+      reloadCandidates()
+    } finally {
+      setDispatchingId(null)
+    }
+  }
+
+  const handleCancelAttempt = async (attempt) => {
+    setDispatchingId(attempt.id)
+    try {
+      const cancel = attempt.status === 'pending_review' ? cancelReviewAllocation : cancelAllocation
+      await cancel(attempt.id, {
+        reason: attempt.status === 'pending_review' ? 'hr_cancelled_review' : 'hr_cancelled_dispatch',
+      })
+      message.success(attempt.status === 'pending_review' ? '已取消 AI 复核建议' : '已取消待下发尝试')
+      reloadCandidates()
+    } finally {
+      setDispatchingId(null)
+    }
+  }
+
+  const handleBulkDispatch = (candidateIds = []) => {
+    const selected = candidateIds.length > 0
+    Modal.confirm({
+      title: selected ? '批量下发选中简历？' : '下发当前筛选下全部简历？',
+      content: selected
+        ? `将处理选中的 ${candidateIds.length} 名候选人，仅下发当前有效的待下发记录。`
+        : '将按当前简历库筛选条件处理全部候选人，仅下发当前有效的待下发记录。',
+      okText: selected ? '下发选中' : '下发全部',
+      onOk: async () => {
+        setBulkDispatching(true)
+        try {
+          const { data } = await bulkDispatchCandidates(
+            selected ? { candidate_ids: candidateIds } : { candidate_filters: lastQuery },
+          )
+          message.success(data?.detail || '批量下发完成')
+          setSelectedRowKeys([])
+          actionRef.current?.reload()
+        } finally {
+          setBulkDispatching(false)
+        }
+      },
+    })
+  }
+
+  const openAssignModal = async (attempt) => {
+    setAssignModal({
+      open: true,
+      record: attempt,
+      contacts: [],
+      selected: attempt.sub_contact || undefined,
+      loading: true,
+    })
+    try {
+      const { data } = await fetchEligibleSubContacts(attempt.id)
+      setAssignModal((previous) => ({ ...previous, contacts: data || [], loading: false }))
+    } catch {
+      setAssignModal((previous) => ({ ...previous, loading: false }))
+    }
+  }
+
+  const handleAssignSubContact = async () => {
+    if (!assignModal.selected) {
+      message.warning('请选择三级接口人')
+      return
+    }
+    setAssignModal((previous) => ({ ...previous, loading: true }))
+    try {
+      await assignSubContact(assignModal.record.id, { sub_contact_id: assignModal.selected })
+      message.success('已转派给三级接口人')
+      setAssignModal({ open: false, record: null, contacts: [], selected: undefined, loading: false })
+      reloadCandidates()
+    } catch {
+      setAssignModal((previous) => ({ ...previous, loading: false }))
+    }
+  }
+
+  const handleFeedback = async () => {
+    setFeedbackModal((previous) => ({ ...previous, loading: true }))
+    try {
+      await submitAllocationFeedback(feedbackModal.record.id, {
+        result: feedbackModal.result,
+        note: feedbackModal.note,
+      })
+      message.success('反馈已提交，简历状态已更新')
+      setFeedbackModal({ open: false, record: null, result: 'passed', note: '', loading: false })
+      reloadCandidates()
+    } catch {
+      setFeedbackModal((previous) => ({ ...previous, loading: false }))
+    }
+  }
+
+  const handleAttemptExport = async (attempt) => {
+    setExporting(true)
+    try {
+      const response = await exportAllocations([attempt.id], {})
+      downloadBlobFromResponse(response, 'resume_export.zip')
+      message.success('简历已导出')
+    } finally {
+      setExporting(false)
     }
   }
 
@@ -342,7 +502,6 @@ export default function ResumesPage() {
 
   const handleProcessSelectedStatuses = () => {
     setProcessStatusSelection(selectedSystemStatuses())
-    setProcessModes(['rule'])
     setProcessModalOpen(true)
   }
 
@@ -352,17 +511,12 @@ export default function ResumesPage() {
       message.warning('请先勾选需要处理的简历状态')
       return
     }
-    if (!processModes.length) {
-      message.warning('请至少勾选一种分配方式')
-      return
-    }
     setProcessing(true)
     try {
       const { system_status: _ignoredSystemStatus, ...candidateFilters } = lastQuery
       const r = await run(
         [{ step: 'step2', label: '简历分类、分配与下发' }],
-        processModes,
-        `正在重新处理简历（${processModes.map((item) => item === 'ai' ? 'AI' : '规则').join(' + ')}）`,
+        `正在重新处理简历（${allocationMode.mode === 'ai' ? 'AI' : '规则'}）`,
         {
           scope: {
             system_statuses: statuses,
@@ -400,6 +554,58 @@ export default function ResumesPage() {
   const controlledFilter = (field) => ({
     filteredValue: tableFilters[field] || null,
   })
+
+  const renderCandidateActions = (record) => {
+    const attempt = record.current_attempt
+    const canDispatch = hasPermission('attempt.dispatch') && attempt?.status === 'pending_dispatch'
+    const canReview = hasPermission('attempt.dispatch') && attempt?.status === 'pending_review'
+    const canAssign = isSecondaryContact && attempt && ['dispatched_l2', 'assigned_l3'].includes(attempt.status) && !attempt.feedback_at
+    const canFeedback = isTertiaryContact && attempt?.status === 'assigned_l3' && !attempt.feedback_at
+    return (
+      <Space>
+        <a onClick={() => setDetailRecord(record)}>详情</a>
+        {attempt && hasPermission('attempt.export') && (
+          <a onClick={() => handleAttemptExport(attempt)}>导出</a>
+        )}
+        {canReview && (
+          <Popconfirm title="确认采纳 AI 建议？确认后进入待下发。" onConfirm={() => handleConfirmReview(attempt)}>
+            <Button type="link" size="small" style={{ padding: 0 }} loading={dispatchingId === attempt.id}>确认建议</Button>
+          </Popconfirm>
+        )}
+        {canReview && hasPermission('resume.manual_assign') && (
+          <Button type="link" size="small" style={{ padding: 0 }} onClick={() => openManualAssign(record.current_resume, attempt)}>转人工</Button>
+        )}
+        {canDispatch && (
+          <Popconfirm title="确认下发该简历到二级接口人？" onConfirm={() => handleDispatch(attempt)}>
+            <Button type="link" size="small" style={{ padding: 0 }} loading={dispatchingId === attempt.id}>下发二级</Button>
+          </Popconfirm>
+        )}
+        {(canReview || canDispatch) && (
+          <Popconfirm title={canReview ? '取消该 AI 复核建议？' : '取消该待下发尝试？'} onConfirm={() => handleCancelAttempt(attempt)}>
+            <Button type="link" danger size="small" style={{ padding: 0 }}>取消</Button>
+          </Popconfirm>
+        )}
+        {canAssign && (
+          <Button type="link" size="small" style={{ padding: 0 }} onClick={() => openAssignModal(attempt)}>
+            {attempt.sub_contact ? '改派' : '转派'}
+          </Button>
+        )}
+        {canFeedback && (
+          <Button
+            type="link"
+            size="small"
+            style={{ padding: 0 }}
+            onClick={() => setFeedbackModal({ open: true, record: attempt, result: 'passed', note: '', loading: false })}
+          >
+            反馈
+          </Button>
+        )}
+        {hasPermission('resume.import') && (
+          <a style={{ color: '#cf1322' }} onClick={() => handleDelete(record)}>删除</a>
+        )}
+      </Space>
+    )
+  }
 
   const baseColumns = [
     {
@@ -484,6 +690,49 @@ export default function ResumesPage() {
         updateTableFilter('current_job_category', values),
       ),
       render: (_, record) => record.current_resume?.job_category || '-',
+    },
+    {
+      title: '分配来源',
+      dataIndex: 'allocation_source',
+      width: 100,
+      ...controlledFilter('allocation_source'),
+      ...selectColumnFilter(
+        Object.entries(SOURCE_TEXT).map(([value, text]) => ({ value, text })),
+        true,
+        (values) => updateTableFilter('allocation_source', values),
+      ),
+      render: (_, record) => SOURCE_TEXT[record.current_attempt?.source] || '-',
+    },
+    {
+      title: '二级接口人',
+      dataIndex: 'contact_name',
+      width: 120,
+      ...controlledFilter('contact_name'),
+      ...textColumnFilter('筛选二级接口人', (values) => updateTableFilter('contact_name', values)),
+      render: (_, record) => record.current_attempt?.contact_name || record.current_attempt?.contact_name_snapshot || '-',
+    },
+    {
+      title: '三级接口人',
+      dataIndex: 'sub_contact_name',
+      width: 120,
+      ...controlledFilter('sub_contact_name'),
+      ...textColumnFilter('筛选三级接口人', (values) => updateTableFilter('sub_contact_name', values)),
+      render: (_, record) => record.current_attempt?.sub_contact_name || record.current_attempt?.sub_contact_name_snapshot || '-',
+    },
+    {
+      title: '分配状态',
+      dataIndex: 'attempt_status',
+      width: 120,
+      ...controlledFilter('attempt_status'),
+      ...selectColumnFilter(
+        Object.entries(ATTEMPT_STATUS).map(([value, item]) => ({ value, text: item.text })),
+        true,
+        (values) => updateTableFilter('attempt_status', values),
+      ),
+      render: (_, record) => {
+        const status = record.current_attempt?.status
+        return status ? <Tag color={ATTEMPT_STATUS[status]?.color || 'default'}>{ATTEMPT_STATUS[status]?.text || status}</Tag> : '-'
+      },
     },
     {
       title: '院校标签',
@@ -590,19 +839,9 @@ export default function ResumesPage() {
     {
       title: '操作',
       valueType: 'option',
-      width: 160,
+      width: 260,
       fixed: 'right',
-      render: (_, record) => (
-        <Space>
-          <a onClick={() => setDetailRecord(record)}>详情</a>
-          <a
-            style={{ color: '#cf1322' }}
-            onClick={() => handleDelete(record)}
-          >
-            删除
-          </a>
-        </Space>
-      ),
+      render: (_, record) => renderCandidateActions(record),
     },
   ]
   const { columns, components, scrollX } = useResizableColumns(baseColumns)
@@ -620,15 +859,29 @@ export default function ResumesPage() {
         scroll={{ x: scrollX }}
         pagination={{ defaultPageSize: 10, showSizeChanger: true }}
         search={false}
+        rowSelection={
+          hasPermission('attempt.dispatch')
+            ? {
+                selectedRowKeys,
+                onChange: (keys) => setSelectedRowKeys(keys),
+              }
+            : false
+        }
+        tableAlertOptionRender={() => (
+          <Space>
+            <a onClick={() => handleBulkDispatch(selectedRowKeys)}>下发选中</a>
+            <a onClick={() => setSelectedRowKeys([])}>取消选择</a>
+          </Space>
+        )}
         toolBarRender={() => [
-          <ImportButton
+          canImport && <ImportButton
             key="import"
             buttonText="上传简历"
             title="上传简历（简历列表 + 简历包），上传后自动处理"
             fields={RESUME_IMPORT_FIELDS}
               onDone={handleImported}
           />,
-          <Button
+          canRunPipeline && <Button
             key="process"
             type="primary"
             icon={<PlayCircleOutlined />}
@@ -637,7 +890,7 @@ export default function ResumesPage() {
           >
             处理简历
           </Button>,
-          <Button
+          canImport && <Button
             key="undo"
             icon={<UndoOutlined />}
             disabled={!undo.available}
@@ -645,7 +898,22 @@ export default function ResumesPage() {
           >
             撤销上次上传
           </Button>,
-          <Button
+          hasPermission('attempt.dispatch') && <Button
+            key="dispatch-selected"
+            disabled={!selectedRowKeys.length}
+            loading={bulkDispatching}
+            onClick={() => handleBulkDispatch(selectedRowKeys)}
+          >
+            下发选中{selectedRowKeys.length ? `(${selectedRowKeys.length})` : ''}
+          </Button>,
+          hasPermission('attempt.dispatch') && <Button
+            key="dispatch-all"
+            loading={bulkDispatching}
+            onClick={() => handleBulkDispatch([])}
+          >
+            一键全部下发
+          </Button>,
+          (hasPermission('resume.view') || hasPermission('attempt.export')) && <Button
             key="export"
             icon={<DownloadOutlined />}
             loading={exporting}
@@ -653,7 +921,7 @@ export default function ResumesPage() {
           >
             导出
           </Button>,
-        ]}
+        ].filter(Boolean)}
         request={async (params) => {
           const {
             current,
@@ -672,6 +940,10 @@ export default function ResumesPage() {
             'system_status',
             'workflow_status',
             'reason_type',
+            'allocation_source',
+            'contact_name',
+            'sub_contact_name',
+            'attempt_status',
           ])
           const query = {
             system_status: toFilterValue(normalizedFilters.system_status),
@@ -686,6 +958,10 @@ export default function ResumesPage() {
             school_tag_in: toFilterValue(normalizedFilters.school_tag),
             workflow_status: toFilterValue(normalizedFilters.workflow_status),
             reason_type: toFilterValue(normalizedFilters.reason_type),
+            allocation_source: toFilterValue(normalizedFilters.allocation_source),
+            contact_name: toFilterValue(normalizedFilters.contact_name),
+            sub_contact_name: toFilterValue(normalizedFilters.sub_contact_name),
+            attempt_status: toFilterValue(normalizedFilters.attempt_status),
           }
           setLastQuery(query)
           try {
@@ -710,7 +986,7 @@ export default function ResumesPage() {
         okText="开始处理"
         cancelText="取消"
         confirmLoading={processing}
-        okButtonProps={{ disabled: !processStatusSelection.length || !processModes.length }}
+        okButtonProps={{ disabled: !processStatusSelection.length }}
         onOk={handleConfirmProcess}
         onCancel={() => {
           if (!processing) setProcessModalOpen(false)
@@ -720,22 +996,15 @@ export default function ResumesPage() {
           <Typography.Text>
             选择需要重新处理的系统简历状态。系统会按当前表格的其它筛选条件限定范围，并保留历史分配与反馈记录。
           </Typography.Text>
-          <div>
-            <Typography.Text>分配方式：</Typography.Text>
-            <Checkbox.Group
-              value={processModes}
-              onChange={setProcessModes}
-              disabled={processing}
-              style={{ marginLeft: 12 }}
-            >
-              <Space>
-                <Checkbox value="rule">规则分配</Checkbox>
-                <Checkbox value="ai" disabled={!aiAvailable}>
-                  AI 分配{aiAvailable ? '' : '（未启用）'}
-                </Checkbox>
-              </Space>
-            </Checkbox.Group>
-          </div>
+          <Space>
+            <Typography.Text>当前系统分配模式：</Typography.Text>
+            <Tag color={allocationMode.mode === 'ai' ? 'purple' : 'blue'}>
+              {allocationMode.mode === 'ai' ? 'AI 分配' : '规则分配'}
+            </Tag>
+            {allocationMode.mode === 'ai' && !allocationMode.ai_ready && (
+              <Typography.Text type="danger">模型连接尚未测试成功</Typography.Text>
+            )}
+          </Space>
           <Checkbox.Group
             value={processStatusSelection}
             onChange={setProcessStatusSelection}
@@ -875,7 +1144,10 @@ export default function ResumesPage() {
               <Typography.Title level={5} style={{ marginTop: 0 }}>
                 简历预览
               </Typography.Title>
-              <ResumePreview resume={previewRecord} />
+              <ResumePreview
+                resume={previewRecord}
+                attemptId={isContact ? detailRecord.current_attempt?.id : undefined}
+              />
             </div>
 
             <ResizableTable
@@ -1040,14 +1312,17 @@ export default function ResumesPage() {
                       <Space>
                         <a onClick={() => setAgentDecisionDetail(decision)}>详情</a>
                         {(decision.error_code || decision.recommendation === 'archive') && hasPermission('attempt.dispatch') && (
-                          <Button
-                            type="link"
-                            size="small"
-                            loading={retryingDecisionId === decision.id}
-                            onClick={() => handleRetryAgentDecision(decision)}
-                          >
-                            重试 AI
-                          </Button>
+                          <Tooltip title={allocationMode.mode !== 'ai' || !allocationMode.ai_ready ? 'AI 分配未开启或模型连接未测试成功' : ''}>
+                            <Button
+                              type="link"
+                              size="small"
+                              disabled={allocationMode.mode !== 'ai' || !allocationMode.ai_ready}
+                              loading={retryingDecisionId === decision.id}
+                              onClick={() => handleRetryAgentDecision(decision)}
+                            >
+                              重试 AI
+                            </Button>
+                          </Tooltip>
                         )}
                       </Space>
                     ),
@@ -1088,11 +1363,11 @@ export default function ResumesPage() {
         )}
       </Modal>
       <Modal
-        title="手动强制分配当前志愿"
+        title={manualModal.attempt ? 'AI 复核转人工分配' : '手动强制分配当前志愿'}
         open={manualModal.open}
         confirmLoading={manualModal.loading}
         onOk={handleManualAssign}
-        onCancel={() => setManualModal({ open: false, resume: null, contacts: [], contactId: undefined, secondaryId: undefined, reason: '', loading: false })}
+        onCancel={() => setManualModal({ open: false, resume: null, attempt: null, contacts: [], contactId: undefined, secondaryId: undefined, reason: '', loading: false })}
         okText="确认分配"
       >
         <Space direction="vertical" style={{ width: '100%' }}>
@@ -1130,6 +1405,51 @@ export default function ResumesPage() {
             placeholder="人工分配原因"
             value={manualModal.reason}
             onChange={(event) => setManualModal((prev) => ({ ...prev, reason: event.target.value }))}
+          />
+        </Space>
+      </Modal>
+      <Modal
+        title="转派三级接口人"
+        open={assignModal.open}
+        confirmLoading={assignModal.loading}
+        onOk={handleAssignSubContact}
+        onCancel={() => setAssignModal({ open: false, record: null, contacts: [], selected: undefined, loading: false })}
+        okText="转派"
+      >
+        <Select
+          style={{ width: '100%' }}
+          placeholder="选择本二级部门下的三级接口人"
+          value={assignModal.selected}
+          options={assignModal.contacts.map((contact) => ({
+            value: contact.id,
+            label: `${contact.name}（${contact.employee_no} / ${contact.department_name || '未绑定部门'}）`,
+          }))}
+          onChange={(value) => setAssignModal((previous) => ({ ...previous, selected: value }))}
+        />
+      </Modal>
+      <Modal
+        title="提交筛选反馈"
+        open={feedbackModal.open}
+        confirmLoading={feedbackModal.loading}
+        onOk={handleFeedback}
+        onCancel={() => setFeedbackModal({ open: false, record: null, result: 'passed', note: '', loading: false })}
+        okText="提交反馈"
+      >
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <Select
+            style={{ width: '100%' }}
+            value={feedbackModal.result}
+            options={[
+              { value: 'passed', label: '通过' },
+              { value: 'rejected', label: '不通过' },
+            ]}
+            onChange={(value) => setFeedbackModal((previous) => ({ ...previous, result: value }))}
+          />
+          <Input.TextArea
+            rows={4}
+            placeholder="反馈备注（可选）"
+            value={feedbackModal.note}
+            onChange={(event) => setFeedbackModal((previous) => ({ ...previous, note: event.target.value }))}
           />
         </Space>
       </Modal>

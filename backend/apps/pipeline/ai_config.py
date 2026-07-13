@@ -11,8 +11,16 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from django.conf import settings
+from django.db import transaction
+from django.utils import timezone
 
 PUBLIC_AI_CONFIG_REGISTRY = {
+    "ai_enabled": {
+        "label": "AI 分配开关",
+        "description": "关闭时新任务只运行规则分配；开启时新任务只运行 AI 分配。",
+        "value_type": "boolean",
+        "default": False,
+    },
     "ai_dispatch_threshold": {
         "label": "AI 自动下发阈值",
         "description": "置信度大于等于该值时，AI 建议可进入待下发。",
@@ -71,6 +79,9 @@ AI_CONNECTION_CONFIG_KEYS = {
     "base_url": "ai_connection_base_url",
     "api_key": "ai_connection_api_key",
 }
+
+AI_CONNECTION_TEST_FINGERPRINT_KEY = "ai_connection_test_fingerprint"
+AI_CONNECTION_TESTED_AT_KEY = "ai_connection_tested_at"
 
 
 @dataclass(frozen=True)
@@ -160,6 +171,7 @@ def decrypt_api_key(value):
         raise ValueError("已保存的模型 API Key 无法解密，请由管理员重新保存") from exc
 
 
+@transaction.atomic
 def save_ai_connection_config(payload):
     """保存管理员维护的连接参数；API Key 仅接受写入并以密文保存。"""
     registry = _model_registry()
@@ -191,6 +203,74 @@ def save_ai_connection_config(payload):
             key=AI_CONNECTION_CONFIG_KEYS["api_key"],
             defaults={"value": encrypt_api_key(payload["api_key"].strip())},
         )
+    invalidate_ai_connection_test(disable_ai=True)
+
+
+def _connection_fingerprint():
+    """生成当前完整连接的不可逆指纹，不在任何接口中返回。"""
+    config = get_ai_model_config()
+    payload = {
+        "profile": config.profile,
+        "api_style": config.api_style,
+        "model_name": config.model_name,
+        "base_url": config.base_url,
+        "api_key_hash": hashlib.sha256(config.api_key.encode("utf-8")).hexdigest(),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
+def invalidate_ai_connection_test(*, disable_ai=False):
+    from apps.core import models as m
+
+    m.Config.objects.filter(
+        key__in=[AI_CONNECTION_TEST_FINGERPRINT_KEY, AI_CONNECTION_TESTED_AT_KEY]
+    ).delete()
+    if disable_ai:
+        m.Config.objects.update_or_create(key="ai_enabled", defaults={"value": False})
+
+
+def mark_ai_connection_tested():
+    from apps.core import models as m
+
+    fingerprint = _connection_fingerprint()
+    tested_at = timezone.now().isoformat()
+    m.Config.objects.update_or_create(
+        key=AI_CONNECTION_TEST_FINGERPRINT_KEY,
+        defaults={"value": fingerprint},
+    )
+    m.Config.objects.update_or_create(
+        key=AI_CONNECTION_TESTED_AT_KEY,
+        defaults={"value": tested_at},
+    )
+    return tested_at
+
+
+def is_ai_connection_tested():
+    from apps.core import models as m
+
+    stored = m.Config.objects.filter(
+        key=AI_CONNECTION_TEST_FINGERPRINT_KEY
+    ).values_list("value", flat=True).first()
+    if not stored:
+        return False
+    try:
+        return stored == _connection_fingerprint()
+    except (RuntimeError, ValueError):
+        return False
+
+
+def is_ai_switch_enabled():
+    return bool(_config_value("ai_enabled", False))
+
+
+def allocation_mode():
+    if not is_ai_switch_enabled():
+        return "rule"
+    if not is_ai_connection_tested():
+        raise ValueError("AI 分配已开启，但当前模型连接尚未测试成功")
+    return "ai"
 
 
 def get_ai_connection_status():
@@ -198,6 +278,7 @@ def get_ai_connection_status():
     default_profile_name = registry.get("default_profile", "openai")
     default_profile = registry["profiles"].get(default_profile_name, {})
     stored_key = _connection_value("api_key")
+    tested_at = _connection_value_by_key(AI_CONNECTION_TESTED_AT_KEY) or ""
     return {
         "profile": _connection_value("profile") or default_profile_name,
         "api_style": _connection_value("api_style") or default_profile.get("api_style", ""),
@@ -205,15 +286,17 @@ def get_ai_connection_status():
         "base_url": _connection_value("base_url") or default_profile.get("base_url", ""),
         "api_key_configured": bool(stored_key),
         "api_key_source": "system_config" if stored_key else "not_configured",
+        "test_passed": is_ai_connection_tested(),
+        "tested_at": tested_at,
         "profiles": ai_connection_profiles(),
         "profile_version": "profile-v1",
     }
 
 
 def is_ai_enabled():
-    """仅用于决定是否提交 AI 任务；不暴露任何连接或密钥信息。"""
+    """AI 仅在全局开关开启且当前连接测试通过时可提交新调用。"""
     try:
-        return bool(get_ai_model_config().api_key)
+        return allocation_mode() == "ai"
     except (RuntimeError, ValueError):
         return False
 
@@ -260,6 +343,16 @@ def _config_value(key, default):
     if isinstance(value, dict):
         return value.get("value", default)
     return value
+
+
+def _connection_value_by_key(key):
+    from apps.core import models as m
+
+    config = m.Config.objects.filter(key=key).first()
+    if not config:
+        return None
+    value = config.value
+    return value.get("value") if isinstance(value, dict) else value
 
 
 def _config_float(key):

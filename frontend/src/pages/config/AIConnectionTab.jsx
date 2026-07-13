@@ -60,7 +60,10 @@ export default function AIConnectionTab() {
     try {
       const { data } = await testAIConnection()
       setTestResult(data)
-      if (data.ok) message.success('模型连接测试成功')
+      if (data.ok) {
+        setConnection((previous) => ({ ...previous, test_passed: true, tested_at: data.tested_at }))
+        message.success('模型连接测试成功')
+      }
       else message.error(data.detail || '模型连接测试失败')
     } finally {
       setTesting(false)
@@ -98,6 +101,9 @@ export default function AIConnectionTab() {
         <Tag color={connection?.api_key_configured ? 'success' : 'warning'}>
           {connection?.api_key_configured ? 'API Key 已配置（系统设置）' : '未配置 API Key'}
         </Tag>
+        <Tag color={connection?.test_passed ? 'success' : 'warning'}>
+          {connection?.test_passed ? '当前连接已测试通过' : '当前连接尚未测试通过'}
+        </Tag>
         <Button type="primary" loading={saving} onClick={() => save(false)}>保存连接配置</Button>
         <Button loading={testing} disabled={!connection?.api_key_configured} onClick={test}>测试模型连接</Button>
         {connection?.api_key_configured && (
@@ -113,6 +119,9 @@ export default function AIConnectionTab() {
           message={testResult.detail}
           description={testResult.ok ? `Profile：${testResult.profile}；模型：${testResult.model_name}` : `错误码：${testResult.code || 'unknown'}`}
         />
+      )}
+      {connection?.tested_at && (
+        <Typography.Text type="secondary">最近测试时间：{connection.tested_at}</Typography.Text>
       )}
       <Typography.Text type="secondary">
         运行中的 AI 筛选失败会写入对应候选人的 AI 决策错误信息，并同步输出到后端/worker 容器日志；不会记录或打印 API Key。

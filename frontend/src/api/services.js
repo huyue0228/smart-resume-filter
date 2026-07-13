@@ -49,8 +49,8 @@ export function updateAIConnection(body) {
 export function testAIConnection() {
   return client.post('/ai-connection/test/')
 }
-export function fetchAIAvailability() {
-  return client.get('/ai-availability/')
+export function fetchAllocationMode() {
+  return client.get('/allocation-mode/')
 }
 export function fetchSchoolTagRules(params) {
   return client.get('/school-tag-rules/', { params })
@@ -177,7 +177,7 @@ export function deleteContact(id) {
 }
 
 // ---- Pipeline ----
-// POST /api/pipeline/run/  body { step, mode }
+// POST /api/pipeline/run/  body { step, scope }; mode is resolved by the backend
 // returns { id, step, mode, status, message }
 export function runPipeline(body) {
   return client.post('/pipeline/run/', body)
@@ -199,9 +199,6 @@ export function fetchWorkflows(params) {
 }
 
 // ---- Workflow attempts ----
-export function fetchAllocations(params) {
-  return client.get('/workflow-attempts/', { params })
-}
 export function dispatchAllocation(id) {
   return client.post(`/workflow-attempts/${id}/dispatch/`)
 }
@@ -217,11 +214,14 @@ export function cancelReviewAllocation(id, body) {
 export function transferAllocationToManual(id, body) {
   return client.post(`/workflow-attempts/${id}/transfer-to-manual/`, body)
 }
-export function bulkDispatchAllocations(body, params) {
-  return client.post('/workflow-attempts/bulk-dispatch/', body, { params })
+export function bulkDispatchCandidates(body) {
+  return client.post('/candidates/bulk-dispatch/', body)
 }
 export function assignSubContact(id, body) {
   return client.post(`/workflow-attempts/${id}/assign-sub-contact/`, body)
+}
+export function fetchEligibleSubContacts(id) {
+  return client.get(`/workflow-attempts/${id}/eligible-sub-contacts/`)
 }
 export function submitAllocationFeedback(id, body) {
   return client.post(`/workflow-attempts/${id}/feedback/`, body)

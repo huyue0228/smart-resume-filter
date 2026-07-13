@@ -5,7 +5,7 @@ import { runPipeline } from '../api/services'
 export function useProcessRunner() {
   const [submitting, setSubmitting] = useState(false)
 
-  const run = async (steps, modes, _title, options = {}) => {
+  const run = async (steps, _title, options = {}) => {
     const normalizedSteps = steps || []
     const isResumeProcess =
       normalizedSteps.length === 2 &&
@@ -13,14 +13,11 @@ export function useProcessRunner() {
       normalizedSteps[1]?.step === 'step2'
     const step = isResumeProcess ? 'resume_process' : normalizedSteps[0]?.step
     if (!step) return { success: false }
-    const selectedModes = Array.isArray(modes) ? modes : []
-    if (!selectedModes.length) return { success: false }
     setSubmitting(true)
     try {
       const scope = normalizedSteps[0]?.scope || options.scope
       const { data } = await runPipeline({
         step,
-        modes: selectedModes,
         ...(scope ? { scope } : {}),
       })
       return { success: true, run: data }

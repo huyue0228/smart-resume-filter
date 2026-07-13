@@ -14,6 +14,44 @@ from apps.core import models as m
 from apps.core import system_status
 
 
+def visible_candidate_attempt(candidate, user):
+    """返回当前用户在统一简历库中可操作的最新尝试。"""
+    workflow = candidate_summary.workflow_or_none(candidate)
+    if not workflow:
+        return None
+    permissions = user_permission_codes(user)
+    if "resume.view" in permissions:
+        resume = candidate_summary.current_resume(candidate)
+        return candidate_summary.latest_effective_attempt(
+            workflow, resume_id=resume.id if resume else None
+        )
+    contact_id = getattr(user, "contact_id", None)
+    if not contact_id:
+        return None
+    attempts = list(workflow.attempts.all())
+    visible = []
+    if "attempt.view_received" in permissions:
+        visible.extend(
+            attempt
+            for attempt in attempts
+            if attempt.contact_id == contact_id
+            and attempt.status
+            in {
+                m.AssignmentAttempt.STATUS_DISPATCHED_L2,
+                m.AssignmentAttempt.STATUS_ASSIGNED_L3,
+                m.AssignmentAttempt.STATUS_PASSED,
+                m.AssignmentAttempt.STATUS_REJECTED,
+            }
+        )
+    if "attempt.view_assigned" in permissions:
+        visible.extend(
+            attempt for attempt in attempts if attempt.sub_contact_id == contact_id
+        )
+    if not visible:
+        return None
+    return sorted(set(visible), key=lambda item: (item.attempt_no, item.id))[-1]
+
+
 class CurrentUserSerializer(serializers.ModelSerializer):
     roles = serializers.SerializerMethodField()
     permissions = serializers.SerializerMethodField()
@@ -226,6 +264,7 @@ class ResumeBriefSerializer(serializers.ModelSerializer):
 
 
 class CandidateSerializer(serializers.ModelSerializer):
+    phone = serializers.SerializerMethodField()
     school_tag = serializers.SerializerMethodField()
     system_status = serializers.SerializerMethodField()
     system_status_label = serializers.SerializerMethodField()
@@ -242,6 +281,7 @@ class CandidateSerializer(serializers.ModelSerializer):
     archive_detail = serializers.SerializerMethodField()
     resumes = serializers.SerializerMethodField()
     attempts = serializers.SerializerMethodField()
+    current_attempt = serializers.SerializerMethodField()
 
     class Meta:
         model = m.Candidate
@@ -275,6 +315,7 @@ class CandidateSerializer(serializers.ModelSerializer):
             "archive_detail",
             "resumes",
             "attempts",
+            "current_attempt",
             "imported_at",
             "updated_at",
         ]
@@ -282,8 +323,22 @@ class CandidateSerializer(serializers.ModelSerializer):
     def _workflow(self, obj):
         return candidate_summary.workflow_or_none(obj)
 
+    def _is_full_view(self):
+        request = self.context.get("request")
+        return not request or "resume.view" in user_permission_codes(request.user)
+
     def _current_resume(self, obj):
+        request = self.context.get("request")
+        if request and "resume.view" not in user_permission_codes(request.user):
+            attempt = visible_candidate_attempt(obj, request.user)
+            return attempt.resume if attempt else None
         return candidate_summary.current_resume(obj)
+
+    def get_phone(self, obj):
+        request = self.context.get("request")
+        if request and "resume.view" not in user_permission_codes(request.user):
+            return ""
+        return obj.phone
 
     def get_school_tag(self, obj):
         return (
@@ -295,6 +350,16 @@ class CandidateSerializer(serializers.ModelSerializer):
         )
 
     def get_system_status(self, obj):
+        if not self._is_full_view():
+            request = self.context.get("request")
+            attempt = visible_candidate_attempt(obj, request.user)
+            if not attempt:
+                return system_status.RAW
+            if attempt.status == m.AssignmentAttempt.STATUS_PASSED:
+                return system_status.SCREENING_PASSED
+            if attempt.status == m.AssignmentAttempt.STATUS_REJECTED:
+                return system_status.SCREENING_REJECTED
+            return system_status.PENDING_SCREENING
         return system_status.candidate_system_status(obj)
 
     def get_system_status_label(self, obj):
@@ -313,22 +378,48 @@ class CandidateSerializer(serializers.ModelSerializer):
         return ResumeBriefSerializer(resume).data if resume else None
 
     def get_preview_resume(self, obj):
+        request = self.context.get("request")
+        if request and "resume.view" not in user_permission_codes(request.user):
+            attempt = visible_candidate_attempt(obj, request.user)
+            return ResumeBriefSerializer(attempt.resume).data if attempt else None
         resume = candidate_summary.preview_resume(obj)
         return ResumeBriefSerializer(resume).data if resume else None
 
     def get_current_rank(self, obj):
-        return candidate_summary.current_rank(obj)
+        resume = self._current_resume(obj)
+        return resume.volunteer_rank if resume else None
 
     def get_current_apply_id(self, obj):
-        return candidate_summary.current_apply_id(obj)
+        resume = self._current_resume(obj)
+        return resume.apply_id if resume else ""
 
     def get_job_department_name(self, obj):
+        if not self._is_full_view():
+            request = self.context.get("request")
+            attempt = visible_candidate_attempt(obj, request.user)
+            if attempt:
+                return attempt.department_name_snapshot or (
+                    attempt.department.name if attempt.department else ""
+                )
         return candidate_summary.job_department_name(obj)
 
     def get_reason_type(self, obj):
+        if not self._is_full_view():
+            request = self.context.get("request")
+            return (
+                candidate_summary.REASON_ASSIGNMENT
+                if visible_candidate_attempt(obj, request.user)
+                else candidate_summary.REASON_NONE
+            )
         return candidate_summary.reason(obj)[0]
 
     def get_reason_text(self, obj):
+        if not self._is_full_view():
+            request = self.context.get("request")
+            attempt = visible_candidate_attempt(obj, request.user)
+            if attempt:
+                return attempt.manual_reason or attempt.match_reason or attempt.feedback_note
+            return ""
         return candidate_summary.reason(obj)[1]
 
     def get_archive_reason(self, obj):
@@ -340,6 +431,10 @@ class CandidateSerializer(serializers.ModelSerializer):
         return workflow.archive_detail if workflow else ""
 
     def get_resumes(self, obj):
+        request = self.context.get("request")
+        if request and "resume.view" not in user_permission_codes(request.user):
+            attempt = visible_candidate_attempt(obj, request.user)
+            return [ResumeBriefSerializer(attempt.resume).data] if attempt else []
         resumes = sorted(
             obj.resumes.all(),
             key=lambda resume: (
@@ -354,36 +449,35 @@ class CandidateSerializer(serializers.ModelSerializer):
         workflow = self._workflow(obj)
         if not workflow:
             return []
+        request = self.context.get("request")
+        if request and "resume.view" not in user_permission_codes(request.user):
+            attempt = visible_candidate_attempt(obj, request.user)
+            return [self._attempt_data(attempt, include_ai=False)] if attempt else []
         attempts = workflow.attempts.select_related(
-            "resume", "contact", "department", "sub_contact", "sub_department"
+            "resume",
+            "contact",
+            "department",
+            "sub_contact",
+            "sub_department",
+            "agent_decision",
         ).order_by("attempt_no")
-        return [
-            {
-                "id": attempt.id,
-                "attempt_no": attempt.attempt_no,
-                "source": attempt.source,
-                "status": attempt.status,
-                "resume": attempt.resume_id,
-                "apply_id": attempt.resume.apply_id,
-                "position_name": attempt.position_name_snapshot
-                or attempt.resume.position_name,
-                "department_name": attempt.department_name_snapshot
-                or (attempt.department.name if attempt.department else ""),
-                "contact_name": attempt.contact_name_snapshot
-                or (attempt.contact.name if attempt.contact else ""),
-                "sub_department_name": attempt.sub_department_name_snapshot
-                or (attempt.sub_department.name if attempt.sub_department else ""),
-                "sub_contact_name": attempt.sub_contact_name_snapshot
-                or (attempt.sub_contact.name if attempt.sub_contact else ""),
-                "feedback_result": attempt.feedback_result,
-                "feedback_note": attempt.feedback_note,
-                "feedback_at": attempt.feedback_at,
-                "match_reason": attempt.match_reason,
-                "manual_reason": attempt.manual_reason,
-                "created_at": attempt.created_at,
-            }
-            for attempt in attempts
-        ]
+        return [self._attempt_data(attempt, include_ai=True) for attempt in attempts]
+
+    def get_current_attempt(self, obj):
+        request = self.context.get("request")
+        user = request.user if request else None
+        attempt = visible_candidate_attempt(obj, user)
+        if not attempt:
+            return None
+        include_ai = bool(user and "resume.view" in user_permission_codes(user))
+        return self._attempt_data(attempt, include_ai=include_ai)
+
+    def _attempt_data(self, attempt, *, include_ai):
+        data = AssignmentAttemptSerializer(attempt, context=self.context).data
+        if not include_ai:
+            data.pop("agent_decision", None)
+            data.pop("agent_decision_summary", None)
+        return data
 
 
 class JobSerializer(serializers.ModelSerializer):

@@ -3,7 +3,6 @@ import { RoleProvider, useRole } from './contexts/RoleContext'
 import BasicLayout from './layouts/BasicLayout'
 import LoginPage from './pages/LoginPage'
 import ResumesPage from './pages/ResumesPage'
-import AllocationsPage from './pages/AllocationsPage'
 import JobsPage from './pages/JobsPage'
 import SchoolsPage from './pages/SchoolsPage'
 import DepartmentsPage from './pages/DepartmentsPage'
@@ -13,7 +12,7 @@ import UsersPage from './pages/UsersPage'
 import WorkflowsPage from './pages/WorkflowsPage'
 
 function AppRoutes() {
-  const { loading, isAuthenticated, hasPermission, isContact } = useRole()
+  const { loading, isAuthenticated, hasPermission } = useRole()
 
   if (loading) return null
 
@@ -26,7 +25,7 @@ function AppRoutes() {
     )
   }
 
-  const defaultPath = isContact ? '/allocations' : '/resumes'
+  const defaultPath = '/resumes'
 
   const guarded = (permission, element) => {
     const permissions = Array.isArray(permission) ? permission : [permission]
@@ -42,7 +41,13 @@ function AppRoutes() {
       <Route path="/login" element={<Navigate to={defaultPath} replace />} />
       <Route element={<BasicLayout />}>
         <Route index element={<Navigate to={defaultPath} replace />} />
-        <Route path="/resumes" element={guarded('resume.view', <ResumesPage />)} />
+        <Route
+          path="/resumes"
+          element={guarded(
+            ['resume.view', 'attempt.view_received', 'attempt.view_assigned'],
+            <ResumesPage />,
+          )}
+        />
         <Route path="/jobs" element={guarded('job.view', <JobsPage />)} />
         <Route path="/schools" element={guarded('school.view', <SchoolsPage />)} />
         <Route
@@ -53,25 +58,6 @@ function AppRoutes() {
           path="/workflows"
           element={guarded('attempt.view_all', <WorkflowsPage />)}
         />
-        <Route
-          path="/allocations"
-          element={guarded(
-            ['attempt.view_all', 'attempt.view_received', 'attempt.view_assigned'],
-            <Navigate to="/allocations/rule" replace />,
-          )}
-        />
-        <Route
-          path="/allocations/rule"
-          element={guarded(
-            ['attempt.view_all', 'attempt.view_received', 'attempt.view_assigned'],
-            <AllocationsPage key="rule" source="rule" />,
-          )}
-        />
-        <Route
-          path="/allocations/ai"
-          element={guarded('attempt.view_all', <AllocationsPage key="ai" source="ai" />)}
-        />
-        <Route path="/agent-decisions" element={<Navigate to="/allocations/ai" replace />} />
         <Route
           path="/archives"
           element={guarded('attempt.view_all', <WorkflowsPage archivedOnly />)}

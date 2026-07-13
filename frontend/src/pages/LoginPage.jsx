@@ -15,9 +15,8 @@ export default function LoginPage() {
   const handleFinish = async (values) => {
     setError('')
     try {
-      const user = await login(values)
-      const permissions = new Set(user?.permissions || [])
-      navigate(permissions.has('attempt.view_all') ? '/resumes' : '/allocations', {
+      await login(values)
+      navigate('/resumes', {
         replace: true,
       })
       return true

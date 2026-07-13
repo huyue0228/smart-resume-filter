@@ -28,7 +28,7 @@ from apps.accounts.permissions import (
     user_permission_codes,
 )
 from apps.core import models as m
-from apps.core import system_status
+from apps.core import candidate_summary, system_status
 from apps.ingestion import snapshot
 from apps.ingestion.sources import (
     RESUME_SUBDIR,
@@ -241,12 +241,19 @@ class MeView(APIView):
         return Response(serializers.CurrentUserSerializer(request.user).data)
 
 
-class AIAvailabilityView(APIView):
+class AllocationModeView(APIView):
     permission_classes = [HasPermissionCode]
     permission_code = "pipeline.run"
 
     def get(self, request):
-        return Response({"enabled": ai_config.is_ai_enabled()})
+        ai_enabled = ai_config.is_ai_switch_enabled()
+        return Response(
+            {
+                "mode": "ai" if ai_enabled else "rule",
+                "ai_enabled": ai_enabled,
+                "ai_ready": ai_config.is_ai_connection_tested(),
+            }
+        )
 
 
 class ImportView(APIView):
@@ -278,16 +285,12 @@ class ImportView(APIView):
         candidate_ids = counts.pop("_candidate_ids", [])
         processing_runs = []
         if takes_resume and candidate_ids:
-            modes = ["rule"]
-            if ai_config.is_ai_enabled():
-                modes.append("ai")
-            processing_runs = runner.create_runs(
+            run = runner.create_configured_run(
                 "resume_process",
-                modes=modes,
                 scope={"candidate_ids": candidate_ids, "source": "resume_import"},
                 created_by=request.user,
             )
-            # 同一批候选人的 Rule 与 AI 结果按顺序生成，避免流程锁和重跑清理互相干扰。
+            processing_runs = [run]
             submit_processing_runs(processing_runs)
         return Response(
             {
@@ -394,14 +397,15 @@ class ResumeViewSet(PermissionedReadOnlyModelViewSet):
 class CandidateViewSet(PermissionedModelViewSet):
     serializer_class = serializers.CandidateSerializer
     permission_codes_by_action = {
-        "list": "resume.view",
-        "retrieve": "resume.view",
+        "list": ["resume.view", "attempt.view_received", "attempt.view_assigned"],
+        "retrieve": ["resume.view", "attempt.view_received", "attempt.view_assigned"],
         "create": "resume.import",
         "update": "resume.import",
         "partial_update": "resume.import",
         "destroy": "resume.import",
-        "export_resumes": "resume.view",
-        "filter_options": "resume.view",
+        "export_resumes": ["resume.view", "attempt.export"],
+        "filter_options": ["resume.view", "attempt.view_received", "attempt.view_assigned"],
+        "bulk_dispatch": "attempt.dispatch",
     }
 
     def _base_queryset(self):
@@ -414,6 +418,7 @@ class CandidateViewSet(PermissionedModelViewSet):
                 "workflow__attempts__sub_contact",
                 "workflow__attempts__department",
                 "workflow__attempts__sub_department",
+                "workflow__attempts__agent_decision",
             )
             .select_related(
                 "first_degree_tag",
@@ -427,17 +432,87 @@ class CandidateViewSet(PermissionedModelViewSet):
         )
 
     def get_queryset(self):
-        return system_status.apply_candidate_filters(
-            self._base_queryset(), self.request.query_params
-        )
+        qs = self._scope_queryset(self._base_queryset())
+        qs = system_status.apply_candidate_filters(qs, self.request.query_params)
+        return self._apply_attempt_filters(qs, self.request.query_params)
+
+    def _scope_queryset(self, qs):
+        permissions = user_permission_codes(self.request.user)
+        if "resume.view" in permissions:
+            return qs
+        contact_id = getattr(self.request.user, "contact_id", None)
+        scope = Q(pk__in=[])
+        if contact_id and "attempt.view_received" in permissions:
+            scope |= Q(
+                workflow__attempts__contact_id=contact_id,
+                workflow__attempts__status__in=[
+                    m.AssignmentAttempt.STATUS_DISPATCHED_L2,
+                    m.AssignmentAttempt.STATUS_ASSIGNED_L3,
+                    m.AssignmentAttempt.STATUS_PASSED,
+                    m.AssignmentAttempt.STATUS_REJECTED,
+                ],
+            )
+        if contact_id and "attempt.view_assigned" in permissions:
+            scope |= Q(workflow__attempts__sub_contact_id=contact_id)
+        return qs.filter(scope).distinct()
+
+    def _apply_attempt_filters(self, qs, params):
+        source_values = {
+            item for item in str(params.get("allocation_source") or "").split(",") if item
+        }
+        status_values = {
+            item for item in str(params.get("attempt_status") or "").split(",") if item
+        }
+        contact_name = str(params.get("contact_name") or "").strip().casefold()
+        sub_contact_name = str(params.get("sub_contact_name") or "").strip().casefold()
+        if not any([source_values, status_values, contact_name, sub_contact_name]):
+            return qs
+        ids = []
+        for candidate in qs:
+            attempt = serializers.visible_candidate_attempt(candidate, self.request.user)
+            if not attempt:
+                continue
+            visible_contact_name = (
+                attempt.contact_name_snapshot
+                or (attempt.contact.name if attempt.contact else "")
+            ).casefold()
+            visible_sub_contact_name = (
+                attempt.sub_contact_name_snapshot
+                or (attempt.sub_contact.name if attempt.sub_contact else "")
+            ).casefold()
+            if source_values and attempt.source not in source_values:
+                continue
+            if status_values and attempt.status not in status_values:
+                continue
+            if contact_name and contact_name not in visible_contact_name:
+                continue
+            if sub_contact_name and sub_contact_name not in visible_sub_contact_name:
+                continue
+            ids.append(candidate.id)
+        return qs.filter(id__in=ids)
 
     @action(detail=False, methods=["get"], url_path="filter-options")
     def filter_options(self, request):
         """返回简历库表头选择器的当前可选值。"""
-        return Response(system_status.candidate_filter_options(self._base_queryset()))
+        return Response(
+            system_status.candidate_filter_options(
+                self._scope_queryset(self._base_queryset())
+            )
+        )
 
     @action(detail=False, methods=["get"], url_path="export")
     def export_resumes(self, request):
+        permissions = user_permission_codes(request.user)
+        if "resume.view" not in permissions:
+            attempt_ids = []
+            for candidate in self.get_queryset():
+                attempt = serializers.visible_candidate_attempt(candidate, request.user)
+                if attempt:
+                    attempt_ids.append(attempt.id)
+            attempts = m.AssignmentAttempt.objects.filter(id__in=attempt_ids).select_related(
+                "resume__candidate"
+            )
+            return resume_zip_response([attempt.resume for attempt in attempts])
         ids = request.query_params.get("ids")
         qs = self.get_queryset()
         if ids:
@@ -449,6 +524,64 @@ class CandidateViewSet(PermissionedModelViewSet):
             .order_by("candidate_id", "volunteer_rank", "id")
         )
         return resume_zip_response(resumes)
+
+    @action(detail=False, methods=["post"], url_path="bulk-dispatch")
+    def bulk_dispatch(self, request):
+        candidate_ids = request.data.get("candidate_ids")
+        candidate_filters = request.data.get("candidate_filters")
+        if candidate_ids is not None and candidate_filters is not None:
+            return Response(
+                {"detail": "candidate_ids 与 candidate_filters 只能提供一个"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if candidate_ids is None and candidate_filters is None:
+            return Response(
+                {"detail": "必须提供 candidate_ids 或 candidate_filters"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        qs = self._scope_queryset(self._base_queryset())
+        if candidate_ids is not None:
+            if not isinstance(candidate_ids, list):
+                return Response(
+                    {"detail": "candidate_ids 必须是数组"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            qs = qs.filter(id__in=[item for item in candidate_ids if isinstance(item, int)])
+        else:
+            if not isinstance(candidate_filters, dict):
+                return Response(
+                    {"detail": "candidate_filters 必须是对象"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            qs = system_status.apply_candidate_filters(qs, candidate_filters)
+            qs = self._apply_attempt_filters(qs, candidate_filters)
+
+        total = qs.count()
+        dispatched = 0
+        errors = []
+        for candidate in qs:
+            workflow = candidate_summary.workflow_or_none(candidate)
+            resume = candidate_summary.current_resume(candidate)
+            attempt = candidate_summary.latest_effective_attempt(
+                workflow, resume_id=resume.id if resume else None
+            )
+            if not attempt or attempt.status != m.AssignmentAttempt.STATUS_PENDING_DISPATCH:
+                continue
+            try:
+                allocate_service.dispatch_attempt(attempt, user=request.user)
+                dispatched += 1
+            except ValueError as exc:
+                errors.append({"candidate_id": candidate.id, "detail": str(exc)})
+        skipped = total - dispatched
+        return Response(
+            {
+                "detail": f"已下发 {dispatched} 条，跳过 {skipped} 条",
+                "total": total,
+                "dispatched": dispatched,
+                "skipped": skipped,
+                "errors": errors,
+            }
+        )
 
 
 class JobViewSet(PermissionedModelViewSet):
@@ -732,6 +865,7 @@ class AssignmentAttemptViewSet(PermissionedReadOnlyModelViewSet):
         "retrieve": None,
         "dispatch_welink": "attempt.dispatch",
         "bulk_dispatch": "attempt.dispatch",
+        "eligible_sub_contacts": "attempt.assign_sub_contact",
         "assign_sub_contact": "attempt.assign_sub_contact",
         "confirm_review": "attempt.dispatch",
         "cancel_attempt": "attempt.dispatch",
@@ -891,6 +1025,29 @@ class AssignmentAttemptViewSet(PermissionedReadOnlyModelViewSet):
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(serializers.AssignmentAttemptSerializer(attempt).data)
 
+    @action(detail=True, methods=["get"], url_path="eligible-sub-contacts")
+    def eligible_sub_contacts(self, request, pk=None):
+        attempt = self.get_object()
+        if attempt.status not in [
+            m.AssignmentAttempt.STATUS_DISPATCHED_L2,
+            m.AssignmentAttempt.STATUS_ASSIGNED_L3,
+        ]:
+            return Response(
+                {"detail": "当前分配状态不可转派三级接口人"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not attempt.department_id:
+            return Response(
+                {"detail": "当前分配缺少二级部门"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        contacts = m.Contact.objects.select_related("department").filter(
+            contact_level=m.Contact.LEVEL_TERTIARY,
+            department__parent_id=attempt.department_id,
+            is_active=True,
+        ).order_by("department__name", "name", "id")
+        return Response(serializers.ContactSerializer(contacts, many=True).data)
+
     @action(detail=True, methods=["post"], url_path="confirm-review")
     def confirm_review(self, request, pk=None):
         attempt = self.get_object()
@@ -1018,6 +1175,11 @@ class AgentDispatchDecisionViewSet(PermissionedReadOnlyModelViewSet):
 
     @action(detail=True, methods=["post"], url_path="retry")
     def retry(self, request, pk=None):
+        if not ai_config.is_ai_enabled():
+            return Response(
+                {"detail": "AI 分配当前未开启或模型连接尚未测试成功"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         decision = self.get_object()
         try:
             new_decision, attempt = allocate_service.retry_agent_decision(decision)
@@ -1065,16 +1227,17 @@ class PipelineRunView(APIView):
 
     def post(self, request):
         step = request.data.get("step", "all")
-        modes = request.data.get("modes")
-        if not isinstance(modes, list):
-            return Response({"detail": "modes 必须是数组"}, status=status.HTTP_400_BAD_REQUEST)
-        if not modes:
-            return Response({"detail": "至少选择一种分配方式"}, status=status.HTTP_400_BAD_REQUEST)
+        if "modes" in request.data or "mode" in request.data:
+            return Response(
+                {"detail": "分配方式由系统参数统一决定，请勿在请求中指定模式"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         scope = request.data.get("scope") or {}
         try:
-            runs = runner.create_runs(step, modes=modes, scope=scope, created_by=request.user)
+            run = runner.create_configured_run(step, scope=scope, created_by=request.user)
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        runs = [run]
         submit_processing_runs(runs)
         return Response(
             {"processing_runs": serializers.ProcessingRunSerializer(runs, many=True).data},
@@ -1187,6 +1350,11 @@ class ConfigViewSet(viewsets.ViewSet):
             review = ai_config._config_float("ai_review_threshold")
             if float(value) < review:
                 return Response({"detail": "自动下发阈值不能低于人工复核阈值"}, status=status.HTTP_400_BAD_REQUEST)
+        if pk == "ai_enabled" and value and not ai_config.is_ai_connection_tested():
+            return Response(
+                {"detail": "当前模型连接尚未测试成功，不能开启 AI 分配"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         m.Config.objects.update_or_create(
             key=pk, defaults={"value": value}
         )
@@ -1229,8 +1397,18 @@ class AIConnectionTestView(APIView):
     def post(self, request):
         try:
             result = ai_service.test_model_connection()
+            tested_at = ai_config.mark_ai_connection_tested()
         except ai_service.AIServiceError as exc:
+            ai_config.invalidate_ai_connection_test()
             return Response({"ok": False, "code": exc.code, "detail": exc.message})
         except (RuntimeError, ValueError) as exc:
+            ai_config.invalidate_ai_connection_test()
             return Response({"ok": False, "code": "ai_not_configured", "detail": str(exc)})
-        return Response({"ok": True, "detail": "模型连接测试成功", **result})
+        return Response(
+            {
+                "ok": True,
+                "detail": "模型连接测试成功",
+                "tested_at": tested_at,
+                **result,
+            }
+        )

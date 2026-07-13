@@ -723,7 +723,6 @@ def run(scope=None, mode="rule", processing_run=None, processing_stage=None):
     cancelled = 0
     created = 0
     scoped_reprocess = _is_scoped_reprocess(scope)
-    parallel_modes = bool(scope.get("parallel_modes"))
     archived_before = m.CandidateWorkflow.objects.filter(
         status=m.CandidateWorkflow.STATUS_ARCHIVED
     ).count()
@@ -772,7 +771,7 @@ def run(scope=None, mode="rule", processing_run=None, processing_stage=None):
                         and workflow.revision != expected_revision
                     )
                 )
-                if changed_after_submit and not parallel_modes:
+                if changed_after_submit:
                     scope_item.status = "skipped_manual_change"
                     scope_item.skip_reason = "workflow_changed_after_submit"
                     scope_item.save(update_fields=["status", "skip_reason"])
@@ -785,7 +784,7 @@ def run(scope=None, mode="rule", processing_run=None, processing_stage=None):
                         )
                         _sync_stage_progress(processing_stage, processing_run)
                     continue
-            if not scoped_reprocess and not parallel_modes and workflow.status in [
+            if not scoped_reprocess and workflow.status in [
             m.CandidateWorkflow.STATUS_PASSED,
             m.CandidateWorkflow.STATUS_ARCHIVED,
             ]:
@@ -809,7 +808,7 @@ def run(scope=None, mode="rule", processing_run=None, processing_stage=None):
                     m.AssignmentAttempt.SOURCE_AI,
                     m.AssignmentAttempt.SOURCE_RULE,
                 ]
-                if scoped_reprocess and not parallel_modes
+                if scoped_reprocess
                 else None,
                 source=(
                     m.AssignmentAttempt.SOURCE_AI

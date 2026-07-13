@@ -1,4 +1,4 @@
-"""Step2 岗位分类：按岗位类别映射表打标签，规则/AI 双模式（统一策略接口）。"""
+"""Step2 岗位分类：按岗位类别映射表打标签，供当前全局分配模式复用。"""
 from apps.core import models as m
 
 from ..strategies import get_rule_strategy

@@ -118,37 +118,38 @@ class AllocationDesignContractTests(TestCase):
         self.assertTrue(run.last_heartbeat_at)
         self.assertEqual(list(run.stages.values_list("status", flat=True)), ["success", "success"])
 
-    def test_create_runs_marks_rule_and_ai_as_coordinated_parallel_modes(self):
-        with patch("apps.pipeline.runner.ai_config.is_ai_enabled", return_value=True):
-            runs = runner.create_runs(
+    def test_configured_run_creates_one_run_with_current_rule_mode(self):
+        with patch("apps.pipeline.runner.ai_config.allocation_mode", return_value="rule"):
+            run = runner.create_configured_run(
                 "step2",
-                modes=["rule", "ai"],
                 scope={"candidate_ids": [self.candidate.id]},
             )
 
-        self.assertEqual([run.mode for run in runs], ["rule", "ai"])
-        self.assertTrue(all(run.scope["parallel_modes"] for run in runs))
+        self.assertEqual(run.mode, "rule")
         self.assertEqual(
-            [list(run.scope_items.values_list("candidate_id", flat=True)) for run in runs],
-            [[self.candidate.id], [self.candidate.id]],
+            list(run.scope_items.values_list("candidate_id", flat=True)),
+            [self.candidate.id],
         )
+        self.assertNotIn("parallel_modes", run.scope)
 
-    def test_coordinated_rule_and_ai_runs_keep_both_attempt_sources(self):
-        with patch("apps.pipeline.runner.ai_config.is_ai_enabled", return_value=True), patch(
+    def test_configured_run_freezes_ai_mode_at_submission_time(self):
+        with patch("apps.pipeline.runner.ai_config.allocation_mode", return_value="ai"):
+            run = runner.create_configured_run(
+                "step2",
+                scope={"candidate_ids": [self.candidate.id]},
+            )
+
+        with patch("apps.pipeline.runner.ai_config.allocation_mode", return_value="rule"), patch(
             "apps.pipeline.services.allocate.ai_service.screen_resume",
             return_value=self._ai_result(),
         ):
-            runs = runner.create_runs(
-                "step2",
-                modes=["rule", "ai"],
-                scope={"candidate_ids": [self.candidate.id]},
-            )
-            for run in runs:
-                runner.execute_run(run.id)
+            runner.execute_run(run.id)
 
+        run.refresh_from_db()
+        self.assertEqual(run.mode, "ai")
         self.assertEqual(
-            set(m.AssignmentAttempt.objects.values_list("source", flat=True)),
-            {m.AssignmentAttempt.SOURCE_RULE, m.AssignmentAttempt.SOURCE_AI},
+            list(m.AssignmentAttempt.objects.values_list("source", flat=True)),
+            [m.AssignmentAttempt.SOURCE_AI],
         )
 
     def test_run_skips_candidate_changed_after_submit(self):

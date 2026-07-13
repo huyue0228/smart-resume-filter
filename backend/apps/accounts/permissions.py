@@ -160,4 +160,6 @@ class HasPermissionCode(BasePermission):
             code = by_action[view.action]
         if code is None:
             return True
+        if isinstance(code, (list, tuple, set)):
+            return any(has_permission_code(request.user, item) for item in code)
         return has_permission_code(request.user, code)
