@@ -435,7 +435,7 @@ docker compose up -d
 
 1. 使用 `admin` 或 `hr` 登录。
 2. 在简历库、岗位需求、院校清单、部门接口人页面导入对应 Excel/简历包；也可先执行 `gen_sample` 和 `load_sample`。
-3. 简历导入后自动触发 Step1→Step2；使用 AI 模式前由管理员在「系统设置 → AI 模型连接」配置并测试模型，再用少量真实脱敏样本验收评分与护栏。
+3. 简历上传含候选人时固定创建 Rule 运行；AI 可用时额外创建 AI 运行。两条 `ProcessingRun` 独立可见，但由同一顺序任务先执行 Rule、后执行 AI，均完成 Step1→Step2。使用 AI 模式前由管理员在「系统设置 → AI 模型连接」配置并测试模型，再用少量真实脱敏样本验收评分与护栏。
 4. HR 在「简历分配」查看待下发、待复核、已下发等分配尝试。
 5. HR 单条、批量或一键全部下发给二级接口人。
 6. 二级接口人登录后仅看到自己的分配，可导出简历并转派本部门三级接口人。
@@ -461,8 +461,9 @@ docker compose up -d
 | GET | `/api/candidates/` | 候选人聚合列表 |
 | GET | `/api/candidates/export/` | 按候选人 ID 或当前筛选条件导出单个原文件或 zip |
 | GET/POST/PATCH | `/api/jobs/` `/api/schools/` `/api/departments/` `/api/contacts/` | 主数据维护 |
-| POST | `/api/pipeline/run/` | 触发处理流程，支持 `rule` / `ai` |
+| POST | `/api/pipeline/run/` | 按非空 `modes` 数组触发 Rule、AI 任一或两项处理；仅 `modes` 缺失时兼容旧 `mode`，空数组/非数组返回 400；AI 未启用时含 `ai` 的请求被拒绝。生产异步返回 202、本地 `CELERY_TASK_ALWAYS_EAGER=True` 同步完成返回 200，均返回 `processing_runs` 与单数兼容字段 |
 | GET | `/api/pipeline/runs/` | 处理运行记录 |
+| GET | `/api/ai-availability/` | 具有 `pipeline.run` 权限时只返回 AI 是否可用的 `enabled` 布尔值 |
 | GET | `/api/workflow-attempts/` | 分配尝试，后端按登录用户过滤数据范围 |
 | POST | `/api/workflow-attempts/{id}/dispatch/` | HR 单条下发 |
 | POST | `/api/workflow-attempts/bulk-dispatch/` | HR 批量或一键全部下发 |
