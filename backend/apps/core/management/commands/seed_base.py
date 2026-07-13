@@ -7,15 +7,6 @@ from apps.accounts.permissions import ensure_rbac_defaults
 from apps.core import models as m
 from apps.pipeline.ai_config import PUBLIC_AI_CONFIG_REGISTRY
 
-NORTH = [
-    "北京", "天津", "河北", "山西", "内蒙古", "辽宁", "吉林", "黑龙江",
-    "山东", "河南", "陕西", "甘肃", "宁夏", "新疆", "青海",
-]
-SOUTH = [
-    "上海", "江苏", "浙江", "安徽", "福建", "江西", "湖北", "湖南",
-    "广东", "广西", "海南", "重庆", "四川", "贵州", "云南", "西藏",
-]
-
 MAJOR_DICTIONARY = [
     (
         "CS_SOFTWARE",
@@ -273,17 +264,12 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         ensure_rbac_defaults()
-        for p in NORTH:
-            m.ProvinceRegion.objects.update_or_create(province=p, defaults={"region": "北"})
-        for p in SOUTH:
-            m.ProvinceRegion.objects.update_or_create(province=p, defaults={"region": "南"})
         defaults = {
             **{
                 key: item["default"]
                 for key, item in PUBLIC_AI_CONFIG_REGISTRY.items()
             },
             "welink_enabled": False,
-            "w3_auth_enabled": False,
         }
         for key, value in defaults.items():
             m.Config.objects.update_or_create(key=key, defaults={"value": value})

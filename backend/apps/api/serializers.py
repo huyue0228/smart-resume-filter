@@ -465,7 +465,6 @@ class SchoolSerializer(serializers.ModelSerializer):
             "id",
             "name",
             "platform",
-            "region",
             "province",
             "school_tag",
             "school_tag_name",

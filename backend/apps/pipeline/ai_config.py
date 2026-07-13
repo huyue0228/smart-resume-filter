@@ -1,28 +1,16 @@
 """AI Agent 配置抽象。
 
-管理员保存的模型连接配置（含加密 API Key）优先从 Config 表读取；部署环境变量
-仅在未保存管理员配置时兼容兜底。默认模板和运行参数元数据集中维护在本模块，
-避免散落在 API 和分配服务里。
+模型连接只从管理员在系统设置保存的 Config 记录读取。模型 profile 注册表只为
+配置界面提供可选模板，运行时不读取环境变量或部署文件中的连接信息。
 """
-import json
 import base64
 import hashlib
-import os
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
 from django.conf import settings
-
-try:
-    from dotenv import load_dotenv
-
-    # 本地 runserver/test 可直接读取仓库根目录 .env；容器显式环境变量优先。
-    load_dotenv(Path(__file__).resolve().parents[3] / ".env", override=False)
-except ImportError:
-    # 镜像/部署依赖未更新时仍保持显式环境变量配置可用。
-    pass
-
 
 PUBLIC_AI_CONFIG_REGISTRY = {
     "ai_dispatch_threshold": {
@@ -88,11 +76,8 @@ AI_CONNECTION_CONFIG_KEYS = {
 @dataclass(frozen=True)
 class AIModelConfig:
     profile: str
-    provider: str
     api_style: str
     model_name: str
-    api_key_env: str
-    base_url_env: str
     prompt_version: str
     decision_version: str
     profile_version: str
@@ -111,13 +96,9 @@ class AIRuntimeConfig:
     retry_backoff_seconds: int
 
 
-def _env(key, default=""):
-    return os.environ.get(key) or default
-
-
 def _model_registry():
     default_path = Path(__file__).resolve().parents[2] / "config" / "ai_models.json"
-    path = Path(_env("AI_MODEL_CONFIG_FILE", str(default_path))).expanduser()
+    path = default_path
     try:
         with path.open("r", encoding="utf-8") as file_obj:
             registry = json.load(file_obj)
@@ -152,12 +133,6 @@ def _connection_value(name):
         return None
     value = config.value
     return value.get("value") if isinstance(value, dict) else value
-
-
-def _has_saved_connection_config():
-    from apps.core import models as m
-
-    return m.Config.objects.filter(key__in=AI_CONNECTION_CONFIG_KEYS.values()).exists()
 
 
 def _secret_fernet():
@@ -220,17 +195,18 @@ def save_ai_connection_config(payload):
 
 def get_ai_connection_status():
     registry = _model_registry()
-    current = get_ai_model_config()
+    default_profile_name = registry.get("default_profile", "openai")
+    default_profile = registry["profiles"].get(default_profile_name, {})
     stored_key = _connection_value("api_key")
     return {
-        "profile": current.profile,
-        "api_style": current.api_style,
-        "model_name": current.model_name,
-        "base_url": current.base_url,
-        "api_key_configured": bool(current.api_key),
-        "api_key_source": "system_config" if stored_key else ("environment" if current.api_key else "not_configured"),
+        "profile": _connection_value("profile") or default_profile_name,
+        "api_style": _connection_value("api_style") or default_profile.get("api_style", ""),
+        "model_name": _connection_value("model_name") or default_profile.get("default_model", ""),
+        "base_url": _connection_value("base_url") or default_profile.get("base_url", ""),
+        "api_key_configured": bool(stored_key),
+        "api_key_source": "system_config" if stored_key else "not_configured",
         "profiles": ai_connection_profiles(),
-        "profile_version": current.profile_version,
+        "profile_version": "profile-v1",
     }
 
 
@@ -244,70 +220,35 @@ def is_ai_enabled():
 
 def get_ai_model_config():
     registry = _model_registry()
-    has_saved_connection = _has_saved_connection_config()
-    profile_name = _connection_value("profile") or (
-        registry.get("default_profile", "openai")
-        if has_saved_connection
-        else _env("AI_PROFILE", _env("AI_PROVIDER", registry.get("default_profile", "openai")))
-    )
+    profile_name = _connection_value("profile")
+    api_style = _connection_value("api_style")
+    model_name = _connection_value("model_name")
+    base_url = _connection_value("base_url")
+    if not all(isinstance(value, str) and value.strip() for value in [profile_name, api_style, model_name]):
+        raise ValueError("AI 模型连接尚未完成配置，请由管理员在系统设置中保存")
+    if base_url is None or not isinstance(base_url, str):
+        raise ValueError("AI 模型连接的 API 地址尚未配置")
     try:
         profile = registry["profiles"][profile_name]
     except KeyError as exc:
         available = "、".join(sorted(registry["profiles"]))
-        raise ValueError(
-            f"未知 AI_PROFILE={profile_name}，可选：{available}"
-        ) from exc
-    api_style = _connection_value("api_style") or (
-        profile.get("api_style", "")
-        if has_saved_connection
-        else _env("AI_API_STYLE", profile.get("api_style", ""))
-    )
+        raise ValueError(f"未知模型 profile={profile_name}，可选：{available}") from exc
     if api_style not in ["responses", "chat_json"]:
         raise ValueError(
             f"AI profile {profile_name} 的 api_style 必须是 responses 或 chat_json"
         )
-    api_key_env = (
-        profile.get("api_key_env", "")
-        if has_saved_connection
-        else _env("AI_API_KEY_ENV", profile.get("api_key_env", ""))
-    )
-    base_url_env = (
-        profile.get("base_url_env", "")
-        if has_saved_connection
-        else _env("AI_BASE_URL_ENV", profile.get("base_url_env", ""))
-    )
     saved_api_key = _connection_value("api_key")
     saved_base_url = _connection_value("base_url")
     return AIModelConfig(
         profile=profile_name,
-        provider=profile_name,
         api_style=api_style,
-        model_name=_connection_value("model_name")
-        or (
-            profile.get("default_model", "")
-            if has_saved_connection
-            else _env("AI_MODEL_NAME", _env("OPENAI_MODEL", profile.get("default_model", "")))
-        ),
-        api_key_env=api_key_env,
-        base_url_env=base_url_env,
-        prompt_version=_env("AI_PROMPT_VERSION", "resume-screening-v1"),
-        decision_version=_env("AI_DECISION_VERSION", "decision-v1"),
-        profile_version=_env("AI_PROFILE_VERSION", "profile-v1"),
-        parser_version=_env("AI_PARSER_VERSION", "pypdf-v1"),
-        api_key=(
-            decrypt_api_key(saved_api_key)
-            if saved_api_key
-            else ("" if has_saved_connection else (_env(api_key_env) if api_key_env else ""))
-        ),
-        base_url=(
-            saved_base_url
-            if saved_base_url is not None
-            else (
-                profile.get("base_url", "")
-                if has_saved_connection
-                else (_env(base_url_env, profile.get("base_url", "")) if base_url_env else profile.get("base_url", ""))
-            )
-        ),
+        model_name=model_name,
+        prompt_version="resume-screening-v1",
+        decision_version="decision-v1",
+        profile_version="profile-v1",
+        parser_version="pypdf-v1",
+        api_key=decrypt_api_key(saved_api_key) if saved_api_key else "",
+        base_url=base_url,
     )
 
 

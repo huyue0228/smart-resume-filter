@@ -5,18 +5,6 @@ from . import runner
 
 
 @shared_task
-def execute_run_task(run_id):
-    run = runner.execute_run(run_id)
-    return run.id
-
-
-@shared_task
 def execute_runs_sequence_task(run_ids):
     """同一批候选人的 Rule/AI 任务按顺序运行，保留两份独立任务进度。"""
     return [runner.execute_run(run_id).id for run_id in run_ids]
-
-
-@shared_task
-def run_step_task(step, mode="rule", scope=None):
-    """保留给旧调用方的同步建单包装。"""
-    return runner.run_step(step, mode, scope).id

@@ -37,7 +37,7 @@ function progressOf(run) {
 
 function taskTitle(run) {
   if (run.step === 'resume_process') return '上传后候选人处理'
-  if (run.step === 'step2' || run.step === 'step5') return '简历分类、分配与下发'
+  if (run.step === 'step2') return '简历分类、分配与下发'
   return run.step || '处理任务'
 }
 

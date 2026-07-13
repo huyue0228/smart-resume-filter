@@ -2,7 +2,16 @@
 set -Eeuo pipefail
 
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PACKAGE_DIR="$(cd "$SKILL_DIR/.." && pwd)"
+if [[ -n "${DEPLOY_ROOT:-}" ]]; then
+  PACKAGE_DIR="$(cd "$DEPLOY_ROOT" && pwd)"
+elif [[ -f "$SKILL_DIR/../docker-compose.yml" ]]; then
+  PACKAGE_DIR="$(cd "$SKILL_DIR/.." && pwd)"
+elif [[ -f "$SKILL_DIR/../../docker-compose.yml" ]]; then
+  PACKAGE_DIR="$(cd "$SKILL_DIR/../.." && pwd)"
+else
+  echo "未找到 docker-compose.yml；请设置 DEPLOY_ROOT。"
+  exit 1
+fi
 cd "$PACKAGE_DIR"
 
 PROJECT_NAME="${COMPOSE_PROJECT_NAME:-smart-resume-filter}"
@@ -19,18 +28,19 @@ choose() {
   local title="$1"
   shift
   local answer index=1 option
-  printf '\n[%s]\n' "$title"
-  for option in "$@"; do
-    printf '%d. %s\n' "$index" "$option"
-    ((index++))
-  done
   while true; do
+    index=1
+    printf '\n[%s]\n' "$title"
+    for option in "$@"; do
+      printf '%d. %s\n' "$index" "$option"
+      ((index++))
+    done
     read -r -p "请选择 [1-$#]: " answer || { echo "已取消。"; exit 0; }
     if [[ "$answer" =~ ^[1-9][0-9]*$ ]] && (( answer >= 1 && answer <= $# )); then
       MENU_CHOICE="$answer"
       return
     fi
-    echo "仅接受菜单中的编号。"
+    echo "仅接受菜单中的编号，将重新显示菜单。"
   done
 }
 

@@ -267,7 +267,7 @@ export default function ResumesPage() {
     await refreshUndo()
     await refreshFilterOptions()
     actionRef.current?.reload()
-    if (data?.processing_run) {
+    if (data?.processing_runs?.length) {
       message.success('简历已导入并提交后台处理，可继续操作并在任务中心查看进度')
     }
   }

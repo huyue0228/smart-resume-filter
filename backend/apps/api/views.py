@@ -51,12 +51,6 @@ CONFIG_REGISTRY = {
         "value_type": "boolean",
         "default": False,
     },
-    "w3_auth_enabled": {
-        "label": "W3 认证开关",
-        "description": "预留开关；外部 W3 接口方案确认后再启用真实对接。",
-        "value_type": "boolean",
-        "default": False,
-    },
 }
 
 
@@ -300,11 +294,6 @@ class ImportView(APIView):
                 "detail": "导入完成",
                 "counts": counts,
                 "undo_available": takes_resume,
-                "processing_run": (
-                    serializers.ProcessingRunSerializer(processing_runs[0]).data
-                    if processing_runs
-                    else None
-                ),
                 "processing_runs": serializers.ProcessingRunSerializer(
                     processing_runs, many=True
                 ).data,
@@ -533,8 +522,6 @@ class SchoolViewSet(PermissionedModelViewSet):
                 | Q(school_tag__name__icontains=p["platform"])
                 | Q(school_tag__code__icontains=p["platform"])
             )
-        if p.get("region"):
-            qs = qs.filter(region=p["region"])
         if p.get("province"):
             qs = qs.filter(province__icontains=p["province"])
         return qs
@@ -1026,9 +1013,7 @@ class PipelineRunView(APIView):
 
     def post(self, request):
         step = request.data.get("step", "all")
-        mode = request.data.get("mode", "rule")
-        requested_modes = request.data.get("modes", None)
-        modes = [mode] if requested_modes is None else requested_modes
+        modes = request.data.get("modes")
         if not isinstance(modes, list):
             return Response({"detail": "modes 必须是数组"}, status=status.HTTP_400_BAD_REQUEST)
         if not modes:
@@ -1039,14 +1024,8 @@ class PipelineRunView(APIView):
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         submit_processing_runs(runs)
-        first = runs[0]
-        payload = serializers.ProcessingRunSerializer(first).data
-        payload["run_id"] = first.id
-        payload["processing_runs"] = serializers.ProcessingRunSerializer(
-            runs, many=True
-        ).data
         return Response(
-            payload,
+            {"processing_runs": serializers.ProcessingRunSerializer(runs, many=True).data},
             status=(
                 status.HTTP_202_ACCEPTED
                 if any(run.status in ["pending", "running"] for run in runs)

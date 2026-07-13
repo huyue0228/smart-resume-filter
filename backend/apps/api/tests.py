@@ -44,6 +44,15 @@ def rest_framework_test_settings():
 )
 class AgentDispatchDecisionApiTests(TestCase):
     def setUp(self):
+        ai_config.save_ai_connection_config(
+            {
+                "profile": "openai",
+                "api_style": "responses",
+                "model_name": "gpt-test",
+                "base_url": "",
+                "api_key": "test-key",
+            }
+        )
         self.client = APIClient()
         ensure_rbac_defaults()
         self.user = User.objects.create_user(
@@ -221,7 +230,7 @@ class PipelineRunApiTests(TestCase):
         ):
             response = self.client.post(
                 "/api/pipeline/run/",
-                {"step": "step2", "mode": "rule", "scope": scope},
+                {"step": "step2", "modes": ["rule"], "scope": scope},
                 format="json",
             )
 
@@ -229,7 +238,7 @@ class PipelineRunApiTests(TestCase):
         mock_create.assert_called_once_with(
             "step2", modes=["rule"], scope=scope, created_by=self.user
         )
-        self.assertEqual(response.data["message"], "ok")
+        self.assertEqual(response.data["processing_runs"][0]["message"], "ok")
 
     def test_pipeline_run_forwards_multiple_modes_as_one_sequence(self):
         rule_run = m.ProcessingRun.objects.create(step="step2", mode="rule", status="pending")
@@ -565,27 +574,14 @@ class RbacApiTests(TestCase):
         self.assertTrue(response.data["ok"])
         self.assertNotIn("api_key", response.data)
 
-    def test_saved_connection_does_not_fall_back_to_environment_key_after_clear(self):
+    def test_environment_key_never_enables_ai_connection(self):
         self.client.force_authenticate(self.admin)
         with patch.dict("os.environ", {"DEEPSEEK_API_KEY": "env-secret"}, clear=False):
-            self.client.patch(
-                "/api/ai-connection/",
-                {
-                    "profile": "deepseek",
-                    "api_style": "chat_json",
-                    "model_name": "deepseek-v4-pro",
-                    "base_url": "https://api.deepseek.com",
-                    "api_key": "saved-secret",
-                },
-                format="json",
-            )
-            response = self.client.patch(
-                "/api/ai-connection/", {"clear_api_key": True}, format="json"
-            )
+            response = self.client.get("/api/ai-connection/")
 
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.data["api_key_configured"])
-        self.assertEqual(ai_config.get_ai_model_config().api_key, "")
+        self.assertFalse(ai_config.is_ai_enabled())
 
     def test_permissions_endpoint_returns_tree_for_admin(self):
         self.client.force_authenticate(self.admin)
@@ -1599,10 +1595,10 @@ class ListFilteringPaginationApiTests(TestCase):
         self.assertEqual(inactive_response.data["results"][0]["id"], inactive.id)
 
     def test_school_header_filters_cover_visible_columns(self):
-        m.School.objects.create(name="南京大学", platform="平台A", region="南")
-        m.School.objects.create(name="北京大学", platform="平台B", region="北")
+        m.School.objects.create(name="南京大学", platform="平台A", province="江苏")
+        m.School.objects.create(name="北京大学", platform="平台B", province="北京")
 
-        response = self.client.get("/api/schools/", {"region": "南"})
+        response = self.client.get("/api/schools/", {"province": "江苏"})
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["count"], 1)

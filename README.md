@@ -50,7 +50,7 @@ python manage.py runserver 8000
 `seed_base` 会初始化：
 
 - RBAC 权限点与预置角色。
-- AI、WeLink 等非敏感运行配置；当前可能仍出现的 `w3_auth_enabled` 只是无效占位，不能启用 W3 认证。
+- AI、WeLink 等非敏感运行配置。
 - 多接口人功能测试账号和对应 Contact/Department。
 
 ### 前端
@@ -127,7 +127,7 @@ cp .env.example .env
 - `APP_VERSION`：建议发布时改成明确版本号，如 `2026-07-03-1`，方便回滚和排查。
 - `DOCKER_PLATFORM`：内网服务器是常见 x86_64 Linux 时保持 `linux/amd64`；如果是 ARM 服务器，改成 `linux/arm64` 后重新构建镜像包。
 
-启用 AI 模式前，使用管理员账号进入「系统设置 → AI 模型连接」完成连接配置并执行测试。只要保存任一管理员连接项，系统完全使用数据库配置，绝不读取环境变量；清除已保存 API Key 后即为未配置，也不会回退旧环境变量。模型 profile 注册表和环境变量只在从未保存管理员连接项时作为默认模板/兼容兜底；API Key 只允许写入，服务端加密保存，页面和 API 均不会回显。未配置可用连接时 AI 会写入 `ai_not_configured` 失败决策，不会回退 Rule。
+启用 AI 模式前，使用管理员账号进入「系统设置 → AI 模型连接」完成连接配置并执行测试。模型连接只从系统设置中的数据库配置读取，部署环境变量不会参与模型、Base URL 或 API Key 决定；未配置可用 Key 时 AI 不启用。profile 注册表只用于表单模板。API Key 只允许写入，服务端加密保存，页面和 API 均不会回显。未配置可用连接时 AI 会写入 `ai_not_configured` 失败决策，不会回退 Rule。
 
 `RUN_SEED_BASE` 默认保持 `0`。不要在长期运行环境里把它改成 `1`，否则每次 backend 重启都可能把配置页中的参数重置为种子默认值。首次初始化请使用下一节的一次性 `init` 命令。
 
@@ -319,7 +319,7 @@ tar -czf "backups/$MEDIA_BACKUP.tar.gz" -C backups "$MEDIA_BACKUP"
 
 大模型连接由拥有 `settings.manage_permissions` 的管理员在「系统设置 → AI 模型连接」维护，页面可配置 profile、API 风格、模型名、Base URL 和 API Key，并执行一次最小真实模型测试。API Key 仅可写入；服务端用 Django `SECRET_KEY` 派生的 Fernet 密钥加密存储，GET、前端状态和测试结果都不会返回明文或密文。HR 和接口人不可见、不可调用该配置/测试接口。
 
-只要管理员保存任一连接项，数据库连接即完整接管，运行时不会读取 `AI_PROFILE`、`AI_PROVIDER`、`AI_MODEL_NAME`、`AI_API_STYLE`、API Key 或 Base URL 等环境变量；清除已保存 Key 后仍不会回退旧环境变量。`backend/config/ai_models.json` 继续提供 OpenAI、DeepSeek 等 profile 模板；环境变量只在从未保存管理员连接项时作为默认值或兼容兜底；通常无需为改动模型连接重启 backend/worker。
+模型连接仅由管理员保存的数据库配置决定；运行时不会读取部署环境变量中的模型、Base URL 或 API Key。`backend/config/ai_models.json` 继续提供 OpenAI、DeepSeek 等表单 profile 模板；通常无需为改动模型连接重启 backend/worker。
 
 AI 运行中的连接异常会继续写入 `AgentDispatchDecision.error_code` / `error_message`，但内容仅为稳定错误码和脱敏摘要。第三方 SDK 原始异常不会进入数据库、API 响应或日志；backend 和 worker 标准输出仅记录 profile、model、api_style、错误码和异常类型。排查时执行：
 
@@ -411,25 +411,7 @@ docker compose up -d
 - `ai_retry_backoff_seconds`
 - `welink_enabled`
 
-管理员可在「系统设置 → AI 模型连接」配置模型 profile、API 风格、模型名、Base URL 和 API Key，并执行最小真实模型测试；该入口由 `settings.manage_permissions` 保护，HR/接口人不可访问。Key 仅允许写入、不会被读取接口返回，服务端以由 Django `SECRET_KEY` 派生的 Fernet 密文存储。只要保存任一管理员连接项，配置即完全屏蔽环境变量；清除 Key 后 AI 未配置且不得回退旧环境变量。`backend/config/ai_models.json` 仍声明 profile 模板，并只在从未保存管理员连接项时提供兜底；新增兼容供应商时增加 profile，不需要修改业务流程代码。
-
-当前支持的环境变量：
-
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `AI_PROFILE` | 配置文件的 `default_profile` | 选择 `ai_models.json` 中的模型 profile |
-| `AI_MODEL_CONFIG_FILE` | `backend/config/ai_models.json` | 可选的自定义模型注册表路径 |
-| `AI_PROVIDER` | `openai` | 旧版兼容项；未设置 `AI_PROFILE` 时作为 profile 名 |
-| `AI_API_STYLE` | profile 配置 | 可选覆盖：`responses` / `chat_json` |
-| `AI_MODEL_NAME` | profile 的 `default_model` | 可选覆盖具体模型 ID，并写入决策审计 |
-| `AI_API_KEY_ENV` | profile 配置 | 仅从未保存管理员连接项时的兼容兜底：可选覆盖密钥所在环境变量名 |
-| `AI_BASE_URL_ENV` | profile 配置 | 仅从未保存管理员连接项时的兼容兜底：可选覆盖 Base URL 所在环境变量名 |
-| `AI_PROMPT_VERSION` | `resume-screening-v1` | 提示词版本 |
-| `AI_DECISION_VERSION` | `decision-v1` | 决策 schema / 评分规则版本 |
-| `AI_PROFILE_VERSION` | `profile-v1` | 简历画像 schema 版本 |
-| `AI_PARSER_VERSION` | `pypdf-v1` | PDF 文本解析器版本 |
-
-这些环境变量只适合用于从未保存管理员连接项时的部署默认值或兼容兜底；一旦管理员保存任一连接项，系统不再读取它们。日常修改连接请使用管理员配置页，避免在 shell、文档或工单中传播 API Key。
+管理员可在「系统设置 → AI 模型连接」配置模型 profile、API 风格、模型名、Base URL 和 API Key，并执行最小真实模型测试；该入口由 `settings.manage_permissions` 保护，HR/接口人不可访问。Key 仅允许写入、不会被读取接口返回，服务端以由 Django `SECRET_KEY` 派生的 Fernet 密文存储。运行时只读取该数据库配置；`backend/config/ai_models.json` 仅声明表单 profile 模板。日常修改连接请使用管理员配置页，避免在 shell、文档或工单中传播 API Key。
 
 ## 主要流程
 
@@ -461,7 +443,7 @@ docker compose up -d
 | GET | `/api/candidates/` | 候选人聚合列表 |
 | GET | `/api/candidates/export/` | 按候选人 ID 或当前筛选条件导出单个原文件或 zip |
 | GET/POST/PATCH | `/api/jobs/` `/api/schools/` `/api/departments/` `/api/contacts/` | 主数据维护 |
-| POST | `/api/pipeline/run/` | 按非空 `modes` 数组触发 Rule、AI 任一或两项处理；仅 `modes` 缺失时兼容旧 `mode`，空数组/非数组返回 400；AI 未启用时含 `ai` 的请求被拒绝。生产异步返回 202、本地 `CELERY_TASK_ALWAYS_EAGER=True` 同步完成返回 200，均返回 `processing_runs` 与单数兼容字段 |
+| POST | `/api/pipeline/run/` | 按非空 `modes` 数组触发 Rule、AI 任一或两项处理；缺失、空数组或非数组返回 400；AI 未启用时含 `ai` 的请求被拒绝。生产异步返回 202、本地 `CELERY_TASK_ALWAYS_EAGER=True` 同步完成返回 200，均只返回 `processing_runs` |
 | GET | `/api/pipeline/runs/` | 处理运行记录 |
 | GET | `/api/ai-availability/` | 具有 `pipeline.run` 权限时只返回 AI 是否可用的 `enabled` 布尔值 |
 | GET | `/api/workflow-attempts/` | 分配尝试，后端按登录用户过滤数据范围 |
@@ -497,7 +479,7 @@ npm run build
 
 ## 生产与外部系统预留
 
-- W3 认证：当前未实现，现有 `w3_auth_enabled` 只是无效的 legacy 占位，不属于通用业务配置。待 W3 接口方案确认后，应新增仅管理员可维护的认证适配层，按工号映射到 `User.username`，并继续复用既有 RBAC 角色和 `Contact` 绑定。
+- W3 认证：当前未实现；待接口方案确认后，应新增仅管理员可维护的认证适配层，按工号映射到 `User.username`，并继续复用既有 RBAC 角色和 `Contact` 绑定。
 - WeLink：当前下发流程已保留状态和消息 ID 字段，`welink_enabled` 控制是否启用真实外部下发。真实接口确认后在服务层替换发送实现。
 - 数据库：本地默认 SQLite；生产环境通过 `POSTGRES_DB`、`POSTGRES_USER`、`POSTGRES_PASSWORD`、`POSTGRES_HOST`、`POSTGRES_PORT` 切换 PostgreSQL。
 - Celery：本地默认 `CELERY_TASK_ALWAYS_EAGER=True`；生产环境应配置 Redis broker/backend 并启动 worker。

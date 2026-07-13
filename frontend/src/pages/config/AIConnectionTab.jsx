@@ -96,11 +96,11 @@ export default function AIConnectionTab() {
       </Form>
       <Space wrap>
         <Tag color={connection?.api_key_configured ? 'success' : 'warning'}>
-          {connection?.api_key_configured ? `API Key 已配置（${connection.api_key_source === 'environment' ? '环境变量' : '系统设置'}）` : '未配置 API Key'}
+          {connection?.api_key_configured ? 'API Key 已配置（系统设置）' : '未配置 API Key'}
         </Tag>
         <Button type="primary" loading={saving} onClick={() => save(false)}>保存连接配置</Button>
         <Button loading={testing} disabled={!connection?.api_key_configured} onClick={test}>测试模型连接</Button>
-        {connection?.api_key_configured && connection.api_key_source === 'system_config' && (
+        {connection?.api_key_configured && (
           <Popconfirm title="清除已保存的 API Key？" onConfirm={() => save(true)}>
             <Button danger loading={saving}>清除 API Key</Button>
           </Popconfirm>
