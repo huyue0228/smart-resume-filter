@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import zipfile
 from urllib.parse import quote
 
-from django.contrib.auth.models import Group
+from django.contrib.auth.models import Group, Permission
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 import pandas as pd
@@ -15,7 +15,7 @@ from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
 from apps.accounts.models import User
-from apps.accounts.permissions import ensure_rbac_defaults
+from apps.accounts.permissions import ensure_rbac_defaults, permission_codename
 from apps.core import models as m
 from apps.pipeline import ai_config
 from apps.pipeline.services import classify_school
@@ -44,6 +44,15 @@ def rest_framework_test_settings():
 )
 class AgentDispatchDecisionApiTests(TestCase):
     def setUp(self):
+        ai_config.save_ai_connection_config(
+            {
+                "profile": "openai",
+                "api_style": "responses",
+                "model_name": "gpt-test",
+                "base_url": "",
+                "api_key": "test-key",
+            }
+        )
         self.client = APIClient()
         ensure_rbac_defaults()
         self.user = User.objects.create_user(
@@ -221,7 +230,7 @@ class PipelineRunApiTests(TestCase):
         ):
             response = self.client.post(
                 "/api/pipeline/run/",
-                {"step": "step2", "mode": "rule", "scope": scope},
+                {"step": "step2", "modes": ["rule"], "scope": scope},
                 format="json",
             )
 
@@ -229,7 +238,7 @@ class PipelineRunApiTests(TestCase):
         mock_create.assert_called_once_with(
             "step2", modes=["rule"], scope=scope, created_by=self.user
         )
-        self.assertEqual(response.data["message"], "ok")
+        self.assertEqual(response.data["processing_runs"][0]["message"], "ok")
 
     def test_pipeline_run_forwards_multiple_modes_as_one_sequence(self):
         rule_run = m.ProcessingRun.objects.create(step="step2", mode="rule", status="pending")
@@ -480,6 +489,72 @@ class RbacApiTests(TestCase):
         ids = [item["id"] for item in response.data["results"]]
         self.assertEqual(ids, [self.attempt_a.id])
 
+    def test_rule_and_ai_attempt_lists_return_assignment_reason(self):
+        self.attempt_a.match_reason = "规则：院校准入、专业匹配"
+        self.attempt_a.save(update_fields=["match_reason"])
+        self.attempt_b.source = m.AssignmentAttempt.SOURCE_AI
+        self.attempt_b.match_reason = "AI：简历能力与岗位要求匹配"
+        self.attempt_b.save(update_fields=["source", "match_reason"])
+        self.client.force_authenticate(self.hr)
+
+        rule_response = self.client.get("/api/workflow-attempts/", {"source": "rule"})
+        ai_response = self.client.get("/api/workflow-attempts/", {"source": "ai"})
+
+        self.assertEqual(rule_response.status_code, 200)
+        self.assertEqual(ai_response.status_code, 200)
+        self.assertEqual(rule_response.data["results"][0]["match_reason"], "规则：院校准入、专业匹配")
+        self.assertEqual(ai_response.data["results"][0]["match_reason"], "AI：简历能力与岗位要求匹配")
+
+    def test_workflow_and_attempt_header_filters_match_visible_columns(self):
+        self.attempt_a.match_reason = "院校准入且专业匹配"
+        self.attempt_a.save(update_fields=["match_reason"])
+        workflow = self.attempt_a.workflow
+        workflow.dispatch_strategy = "rule"
+        workflow.save(update_fields=["dispatch_strategy"])
+        self.client.force_authenticate(self.hr)
+
+        workflow_response = self.client.get(
+            "/api/workflows/",
+            {
+                "candidate_name": "张",
+                "current_rank": "1",
+                "current_apply_id": "A1001",
+                "current_position_name": "后端",
+                "dispatch_strategy": "rule",
+            },
+        )
+        attempt_response = self.client.get(
+            "/api/workflow-attempts/",
+            {
+                "candidate_name": "张",
+                "volunteer_rank": "1",
+                "apply_id": "A1001",
+                "position_name": "后端",
+                "department_name": "技术",
+                "contact_name": "技术二级",
+                "sub_contact_name": "技术三级",
+                "match_reason": "专业匹配",
+            },
+        )
+
+        self.assertEqual(workflow_response.status_code, 200)
+        self.assertEqual([item["id"] for item in workflow_response.data["results"]], [workflow.id])
+        self.assertEqual(attempt_response.status_code, 200)
+        self.assertEqual([item["id"] for item in attempt_response.data["results"]], [self.attempt_a.id])
+
+    def test_user_and_role_header_filters(self):
+        self.client.force_authenticate(self.admin)
+
+        user_response = self.client.get(
+            "/api/users/", {"username": "hr", "roles": "HR", "is_active": "true"}
+        )
+        role_response = self.client.get("/api/roles/", {"name": "管理"})
+
+        self.assertEqual(user_response.status_code, 200)
+        self.assertEqual([item["username"] for item in user_response.data["results"]], ["hr"])
+        self.assertEqual(role_response.status_code, 200)
+        self.assertEqual([item["name"] for item in role_response.data["results"]], ["管理员"])
+
     def test_contact_cannot_access_settings(self):
         self.client.force_authenticate(self.secondary_user)
 
@@ -524,7 +599,7 @@ class RbacApiTests(TestCase):
         )
         self.assertEqual(update_response.status_code, 404)
 
-    def test_only_admin_can_save_and_view_redacted_ai_connection(self):
+    def test_only_users_with_ai_connection_permission_can_save_and_view_redacted_connection(self):
         self.client.force_authenticate(self.hr)
         self.assertEqual(self.client.get("/api/ai-connection/").status_code, 403)
 
@@ -548,6 +623,41 @@ class RbacApiTests(TestCase):
         self.assertEqual(model_config.model_name, "deepseek-v4-pro")
         self.assertEqual(model_config.api_key, "sk-test-secret")
 
+    def test_role_granted_ai_connection_permission_can_manage_connection(self):
+        permission = Permission.objects.get(
+            codename=permission_codename("settings.manage_ai_connection")
+        )
+        ai_operator = Group.objects.create(name="AI 模型管理员")
+        ai_operator.permissions.add(permission)
+        user = User.objects.create_user(
+            username="ai-operator", password="pass", role=User.ROLE_HR
+        )
+        user.groups.add(ai_operator)
+        self.client.force_authenticate(user)
+
+        response = self.client.get("/api/ai-connection/")
+
+        self.assertEqual(response.status_code, 200)
+        update_response = self.client.patch(
+            "/api/ai-connection/",
+            {"model_name": "delegated-model"},
+            format="json",
+        )
+        self.assertEqual(update_response.status_code, 200)
+        with patch(
+            "apps.api.views.ai_service.test_model_connection",
+            return_value={
+                "profile": "deepseek",
+                "model_name": "delegated-model",
+                "api_style": "chat_json",
+                "base_url": "https://api.deepseek.com",
+            },
+        ):
+            test_response = self.client.post("/api/ai-connection/test/")
+
+        self.assertEqual(test_response.status_code, 200)
+        self.assertTrue(test_response.data["ok"])
+
     def test_admin_can_test_ai_connection(self):
         self.client.force_authenticate(self.admin)
         with patch(
@@ -565,27 +675,14 @@ class RbacApiTests(TestCase):
         self.assertTrue(response.data["ok"])
         self.assertNotIn("api_key", response.data)
 
-    def test_saved_connection_does_not_fall_back_to_environment_key_after_clear(self):
+    def test_environment_key_never_enables_ai_connection(self):
         self.client.force_authenticate(self.admin)
         with patch.dict("os.environ", {"DEEPSEEK_API_KEY": "env-secret"}, clear=False):
-            self.client.patch(
-                "/api/ai-connection/",
-                {
-                    "profile": "deepseek",
-                    "api_style": "chat_json",
-                    "model_name": "deepseek-v4-pro",
-                    "base_url": "https://api.deepseek.com",
-                    "api_key": "saved-secret",
-                },
-                format="json",
-            )
-            response = self.client.patch(
-                "/api/ai-connection/", {"clear_api_key": True}, format="json"
-            )
+            response = self.client.get("/api/ai-connection/")
 
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.data["api_key_configured"])
-        self.assertEqual(ai_config.get_ai_model_config().api_key, "")
+        self.assertFalse(ai_config.is_ai_enabled())
 
     def test_permissions_endpoint_returns_tree_for_admin(self):
         self.client.force_authenticate(self.admin)
@@ -600,6 +697,7 @@ class RbacApiTests(TestCase):
             for permission in module["children"]
         ]
         self.assertIn("settings.manage_permissions", codes)
+        self.assertIn("settings.manage_ai_connection", codes)
 
 
 class SchoolRuleConfigApiTests(TestCase):
@@ -679,6 +777,37 @@ class SchoolRuleConfigApiTests(TestCase):
 
         self.assertNotIn("first_degree_tags", field_names)
         self.assertNotIn("highest_degree_tags", field_names)
+
+    def test_school_tag_and_rule_header_filters(self):
+        default_tag = m.SchoolTag.objects.create(
+            code="NON_TARGET", name="非目标院校", is_default=True, is_active=True
+        )
+        other_tag = m.SchoolTag.objects.create(
+            code="TARGET", name="目标院校", is_default=False, is_active=True
+        )
+        rule = m.SchoolTagRule.objects.create(name="默认准入规则", priority=8, is_active=True)
+        m.SchoolTagRuleTag.objects.create(
+            rule=rule,
+            school_tag=default_tag,
+            degree_type=m.SchoolTagRuleTag.DEGREE_FIRST,
+        )
+        m.SchoolTagRuleTag.objects.create(
+            rule=rule,
+            school_tag=other_tag,
+            degree_type=m.SchoolTagRuleTag.DEGREE_HIGHEST,
+        )
+
+        tag_response = self.client.get(
+            "/api/school-tags/", {"code": "NON", "is_default": "true"}
+        )
+        rule_response = self.client.get(
+            "/api/school-tag-rules/", {"name": "默认", "priority": "8", "is_active": "true"}
+        )
+
+        self.assertEqual(tag_response.status_code, 200)
+        self.assertEqual([item["id"] for item in tag_response.data["results"]], [default_tag.id])
+        self.assertEqual(rule_response.status_code, 200)
+        self.assertEqual([item["id"] for item in rule_response.data["results"]], [rule.id])
 
 
 class ListFilteringPaginationApiTests(TestCase):
@@ -1599,10 +1728,10 @@ class ListFilteringPaginationApiTests(TestCase):
         self.assertEqual(inactive_response.data["results"][0]["id"], inactive.id)
 
     def test_school_header_filters_cover_visible_columns(self):
-        m.School.objects.create(name="南京大学", platform="平台A", region="南")
-        m.School.objects.create(name="北京大学", platform="平台B", region="北")
+        m.School.objects.create(name="南京大学", platform="平台A", province="江苏")
+        m.School.objects.create(name="北京大学", platform="平台B", province="北京")
 
-        response = self.client.get("/api/schools/", {"region": "南"})
+        response = self.client.get("/api/schools/", {"province": "江苏"})
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["count"], 1)

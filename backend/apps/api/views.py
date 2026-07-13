@@ -51,12 +51,6 @@ CONFIG_REGISTRY = {
         "value_type": "boolean",
         "default": False,
     },
-    "w3_auth_enabled": {
-        "label": "W3 认证开关",
-        "description": "预留开关；外部 W3 接口方案确认后再启用真实对接。",
-        "value_type": "boolean",
-        "default": False,
-    },
 }
 
 
@@ -300,11 +294,6 @@ class ImportView(APIView):
                 "detail": "导入完成",
                 "counts": counts,
                 "undo_available": takes_resume,
-                "processing_run": (
-                    serializers.ProcessingRunSerializer(processing_runs[0]).data
-                    if processing_runs
-                    else None
-                ),
                 "processing_runs": serializers.ProcessingRunSerializer(
                     processing_runs, many=True
                 ).data,
@@ -533,8 +522,6 @@ class SchoolViewSet(PermissionedModelViewSet):
                 | Q(school_tag__name__icontains=p["platform"])
                 | Q(school_tag__code__icontains=p["platform"])
             )
-        if p.get("region"):
-            qs = qs.filter(region=p["region"])
         if p.get("province"):
             qs = qs.filter(province__icontains=p["province"])
         return qs
@@ -551,6 +538,9 @@ class SchoolTagViewSet(PermissionedModelViewSet):
             qs = qs.filter(code__icontains=p["code"])
         if p.get("name"):
             qs = qs.filter(name__icontains=p["name"])
+        is_default = bool_query_value(p.get("is_default"))
+        if is_default is not None:
+            qs = qs.filter(is_default=is_default)
         is_active = bool_query_value(p.get("is_active"))
         if is_active is not None:
             qs = qs.filter(is_active=is_active)
@@ -570,6 +560,8 @@ class MajorCategoryViewSet(PermissionedModelViewSet):
             qs = qs.filter(code__icontains=p["code"])
         if p.get("name"):
             qs = qs.filter(name__icontains=p["name"])
+        if p.get("description"):
+            qs = qs.filter(description__icontains=p["description"])
         is_active = bool_query_value(p.get("is_active"))
         if is_active is not None:
             qs = qs.filter(is_active=is_active)
@@ -606,6 +598,8 @@ class MajorAliasViewSet(PermissionedModelViewSet):
             qs = qs.filter(source=p["source"])
         if p.get("match_type"):
             qs = qs.filter(match_type=p["match_type"])
+        if p.get("note"):
+            qs = qs.filter(note__icontains=p["note"])
         is_active = bool_query_value(p.get("is_active"))
         if is_active is not None:
             qs = qs.filter(is_active=is_active)
@@ -686,6 +680,10 @@ class SchoolTagRuleViewSet(PermissionedModelViewSet):
             "tag_links__school_tag"
         ).order_by("priority", "id")
         p = self.request.query_params
+        if p.get("name"):
+            qs = qs.filter(name__icontains=p["name"])
+        if p.get("priority"):
+            qs = qs.filter(priority=p["priority"])
         if p.get("is_active") in ["true", "false"]:
             qs = qs.filter(is_active=p["is_active"] == "true")
         return qs
@@ -702,6 +700,16 @@ class CandidateWorkflowViewSet(PermissionedReadOnlyModelViewSet):
         p = self.request.query_params
         if p.get("status"):
             qs = qs.filter(status=p["status"])
+        if p.get("candidate_name"):
+            qs = qs.filter(candidate__name__icontains=p["candidate_name"])
+        if p.get("phone"):
+            qs = qs.filter(candidate__phone__icontains=p["phone"])
+        if p.get("current_rank"):
+            qs = qs.filter(current_rank=p["current_rank"])
+        if p.get("current_apply_id"):
+            qs = qs.filter(current_resume__apply_id__icontains=p["current_apply_id"])
+        if p.get("dispatch_strategy"):
+            qs = qs.filter(dispatch_strategy=p["dispatch_strategy"])
         if p.get("search"):
             qs = qs.filter(
                 Q(candidate__name__icontains=p["search"])
@@ -773,6 +781,37 @@ class AssignmentAttemptViewSet(PermissionedReadOnlyModelViewSet):
             qs = qs.filter(sub_contact_id=p["sub_contact"])
         if p.get("department"):
             qs = qs.filter(department_id=p["department"])
+        if p.get("candidate_name"):
+            qs = qs.filter(resume__candidate__name__icontains=p["candidate_name"])
+        if p.get("volunteer_rank"):
+            qs = qs.filter(resume__volunteer_rank=p["volunteer_rank"])
+        if p.get("apply_id"):
+            qs = qs.filter(
+                Q(resume__apply_id__icontains=p["apply_id"])
+                | Q(resume_apply_id_snapshot__icontains=p["apply_id"])
+            )
+        if p.get("position_name"):
+            qs = qs.filter(
+                Q(resume__position_name__icontains=p["position_name"])
+                | Q(position_name_snapshot__icontains=p["position_name"])
+            )
+        if p.get("department_name"):
+            qs = qs.filter(
+                Q(department__name__icontains=p["department_name"])
+                | Q(department_name_snapshot__icontains=p["department_name"])
+            )
+        if p.get("contact_name"):
+            qs = qs.filter(
+                Q(contact__name__icontains=p["contact_name"])
+                | Q(contact_name_snapshot__icontains=p["contact_name"])
+            )
+        if p.get("sub_contact_name"):
+            qs = qs.filter(
+                Q(sub_contact__name__icontains=p["sub_contact_name"])
+                | Q(sub_contact_name_snapshot__icontains=p["sub_contact_name"])
+            )
+        if p.get("match_reason"):
+            qs = qs.filter(match_reason__icontains=p["match_reason"])
         return qs
 
     @action(detail=True, methods=["post"], url_path="dispatch")
@@ -1026,9 +1065,7 @@ class PipelineRunView(APIView):
 
     def post(self, request):
         step = request.data.get("step", "all")
-        mode = request.data.get("mode", "rule")
-        requested_modes = request.data.get("modes", None)
-        modes = [mode] if requested_modes is None else requested_modes
+        modes = request.data.get("modes")
         if not isinstance(modes, list):
             return Response({"detail": "modes 必须是数组"}, status=status.HTTP_400_BAD_REQUEST)
         if not modes:
@@ -1039,14 +1076,8 @@ class PipelineRunView(APIView):
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         submit_processing_runs(runs)
-        first = runs[0]
-        payload = serializers.ProcessingRunSerializer(first).data
-        payload["run_id"] = first.id
-        payload["processing_runs"] = serializers.ProcessingRunSerializer(
-            runs, many=True
-        ).data
         return Response(
-            payload,
+            {"processing_runs": serializers.ProcessingRunSerializer(runs, many=True).data},
             status=(
                 status.HTTP_202_ACCEPTED
                 if any(run.status in ["pending", "running"] for run in runs)
@@ -1066,9 +1097,13 @@ class UserViewSet(PermissionedModelViewSet):
             qs = qs.filter(username__icontains=p["username"])
         if p.get("role"):
             qs = qs.filter(role=p["role"])
+        if p.get("roles"):
+            qs = qs.filter(groups__name=p["roles"])
+        if p.get("contact_name"):
+            qs = qs.filter(contact__name__icontains=p["contact_name"])
         if p.get("is_active") in ["true", "false"]:
             qs = qs.filter(is_active=p["is_active"] == "true")
-        return qs
+        return qs.distinct()
 
     def destroy(self, request, *args, **kwargs):
         user = self.get_object()
@@ -1080,6 +1115,12 @@ class RoleViewSet(PermissionedModelViewSet):
     queryset = Group.objects.prefetch_related("permissions").order_by("id")
     serializer_class = serializers.RoleSerializer
     permission_code = "settings.manage_permissions"
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if self.request.query_params.get("name"):
+            qs = qs.filter(name__icontains=self.request.query_params["name"])
+        return qs
 
 
 class PermissionTreeView(APIView):
@@ -1153,10 +1194,10 @@ class ConfigViewSet(viewsets.ViewSet):
 
 
 class AIConnectionConfigView(APIView):
-    """仅管理员可维护的模型连接配置；API Key 永不回传。"""
+    """由 AI 模型连接权限维护的连接配置；API Key 永不回传。"""
 
     permission_classes = [HasPermissionCode]
-    permission_code = "settings.manage_permissions"
+    permission_code = "settings.manage_ai_connection"
 
     def get(self, request):
         try:
@@ -1183,7 +1224,7 @@ class AIConnectionConfigView(APIView):
 
 class AIConnectionTestView(APIView):
     permission_classes = [HasPermissionCode]
-    permission_code = "settings.manage_permissions"
+    permission_code = "settings.manage_ai_connection"
 
     def post(self, request):
         try:

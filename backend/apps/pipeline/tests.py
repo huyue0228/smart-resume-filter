@@ -12,6 +12,15 @@ from apps.pipeline.services import allocate, classify_school
 
 class AllocationDesignContractTests(TestCase):
     def setUp(self):
+        ai_config.save_ai_connection_config(
+            {
+                "profile": "openai",
+                "api_style": "responses",
+                "model_name": "gpt-test",
+                "base_url": "",
+                "api_key": "test-key",
+            }
+        )
         self.department = m.Department.objects.create(name="技术部", level=2)
         self.contact = m.Contact.objects.create(
             name="二级接口人",
@@ -662,24 +671,25 @@ class AllocationDesignContractTests(TestCase):
         self.assertEqual(handoff.created_by_username_snapshot, "hr-snapshot")
 
     def test_ai_model_versions_come_from_backend_config(self):
-        with patch.dict(
-            "os.environ",
+        ai_config.save_ai_connection_config(
             {
-                "AI_MODEL_NAME": "gpt-test",
-                "AI_PROMPT_VERSION": "prompt-2026-07",
-                "AI_DECISION_VERSION": "decision-2026-07",
-            },
+                "profile": "openai",
+                "api_style": "responses",
+                "model_name": "gpt-test",
+                "base_url": "",
+                "api_key": "test-key",
+            }
+        )
+        with patch(
+            "apps.pipeline.services.allocate.ai_service.screen_resume",
+            return_value=self._ai_result(),
         ):
-            with patch(
-                "apps.pipeline.services.allocate.ai_service.screen_resume",
-                return_value=self._ai_result(),
-            ):
-                allocate.run(mode="ai")
+            allocate.run(mode="ai")
 
         decision = m.AgentDispatchDecision.objects.get()
         self.assertEqual(decision.model_name, "gpt-test")
-        self.assertEqual(decision.prompt_version, "prompt-2026-07")
-        self.assertEqual(decision.decision_version, "decision-2026-07")
+        self.assertEqual(decision.prompt_version, "resume-screening-v1")
+        self.assertEqual(decision.decision_version, "decision-v1")
 
     def test_ai_runtime_config_uses_database_overrides(self):
         m.Config.objects.create(key="ai_timeout_seconds", value=120)

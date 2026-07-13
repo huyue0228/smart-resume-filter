@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 from django.test import TestCase
 
 from apps.core import models as m
+from apps.pipeline import ai_config
 from apps.pipeline.ai import service
 from apps.pipeline.ai.schemas import ResumeScreeningOutput
 
@@ -49,6 +50,15 @@ def screening_output(*, contact_id, department_id, job_id, recommendation="dispa
 
 class AIResumeScreeningServiceTests(TestCase):
     def setUp(self):
+        ai_config.save_ai_connection_config(
+            {
+                "profile": "openai",
+                "api_style": "responses",
+                "model_name": "gpt-5.4-mini",
+                "base_url": "",
+                "api_key": "test-key",
+            }
+        )
         self.department = m.Department.objects.create(name="技术部", level=2)
         self.contact = m.Contact.objects.create(
             name="接口人",
@@ -121,20 +131,9 @@ class AIResumeScreeningServiceTests(TestCase):
 
     def test_missing_key_is_explicit_configuration_failure(self):
         context = service._eligible_context(self.resume, [self.job])
-        with patch.dict(
-            "os.environ",
-            {
-                "AI_PROFILE": "openai",
-                "AI_MODEL_NAME": "gpt-5.4-mini",
-                "AI_API_KEY_ENV": "OPENAI_API_KEY",
-                "AI_BASE_URL_ENV": "OPENAI_BASE_URL",
-                "OPENAI_API_KEY": "",
-                "OPENAI_BASE_URL": "",
-            },
-            clear=False,
-        ):
-            with self.assertRaises(service.AIServiceError) as captured:
-                service._call_model(self.resume, "PDF 正文", context)
+        m.Config.objects.filter(key="ai_connection_api_key").delete()
+        with self.assertRaises(service.AIServiceError) as captured:
+            service._call_model(self.resume, "PDF 正文", context)
 
         self.assertEqual(captured.exception.code, "ai_not_configured")
 
@@ -153,16 +152,7 @@ class AIResumeScreeningServiceTests(TestCase):
 
     def test_client_initialization_exception_is_safely_mapped(self):
         context = service._eligible_context(self.resume, [self.job])
-        with patch.dict(
-            "os.environ",
-            {
-                "AI_PROFILE": "openai",
-                "AI_MODEL_NAME": "gpt-5.4-mini",
-                "AI_API_KEY_ENV": "OPENAI_API_KEY",
-                "OPENAI_API_KEY": "test-key",
-            },
-            clear=False,
-        ), patch(
+        with patch(
             "openai.OpenAI",
             side_effect=RuntimeError("proxy setup failed: sk-secret-must-not-leak"),
         ):
@@ -191,17 +181,16 @@ class AIResumeScreeningServiceTests(TestCase):
             chat=SimpleNamespace(completions=SimpleNamespace(create=create))
         )
         context = service._eligible_context(self.resume, [self.job])
-        with patch.dict(
-            "os.environ",
+        ai_config.save_ai_connection_config(
             {
-                "AI_PROFILE": "deepseek",
-                "AI_MODEL_NAME": "deepseek-v4-pro",
-                "AI_API_KEY_ENV": "DEEPSEEK_API_KEY",
-                "AI_BASE_URL_ENV": "DEEPSEEK_BASE_URL",
-                "DEEPSEEK_API_KEY": "test-key",
-                "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
-            },
-        ), patch("openai.OpenAI", return_value=client) as openai_client:
+                "profile": "deepseek",
+                "api_style": "chat_json",
+                "model_name": "deepseek-v4-pro",
+                "base_url": "https://api.deepseek.com",
+                "api_key": "test-key",
+            }
+        )
+        with patch("openai.OpenAI", return_value=client) as openai_client:
             result = service._call_model(self.resume, "PDF 正文", context)
 
         self.assertEqual(result.decision.job_id, self.job.id)

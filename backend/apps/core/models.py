@@ -69,7 +69,6 @@ class School(models.Model):
 
     name = models.CharField(max_length=128, unique=True, help_text="学校")
     platform = models.CharField(max_length=64, blank=True, help_text="平台标签")
-    region = models.CharField(max_length=16, blank=True, help_text="南/北（户籍缺失兜底）")
     province = models.CharField(max_length=32, blank=True)
     school_tag = models.ForeignKey(
         SchoolTag,
@@ -862,16 +861,6 @@ class Config(models.Model):
 
     def __str__(self):
         return self.key
-
-
-class ProvinceRegion(models.Model):
-    """省份南北字典。"""
-
-    province = models.CharField(max_length=32, primary_key=True)
-    region = models.CharField(max_length=8, help_text="南/北")
-
-    def __str__(self):
-        return f"{self.province}-{self.region}"
 
 
 class ImportSnapshot(models.Model):

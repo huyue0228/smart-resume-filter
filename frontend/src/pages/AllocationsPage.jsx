@@ -32,6 +32,12 @@ import {
 import { useRole } from '../contexts/RoleContext'
 import ResumePreview from '../components/ResumePreview'
 import { downloadBlobFromResponse } from '../utils/download'
+import {
+  normalizeTableFilters,
+  selectColumnFilter,
+  textColumnFilter,
+  useResizableColumns,
+} from '../components/DataTableControls'
 
 const STATUS_ENUM = {
   pending_dispatch: { text: '待下发', status: 'Default' },
@@ -41,12 +47,6 @@ const STATUS_ENUM = {
   passed: { text: '已通过', status: 'Success' },
   rejected: { text: '未通过', status: 'Error' },
   cancelled: { text: '已取消', status: 'Default' },
-}
-
-const SOURCE_TEXT = {
-  rule: '规则',
-  ai: 'AI',
-  manual: '手动',
 }
 
 export default function AllocationsPage({ source = 'rule' }) {
@@ -300,34 +300,70 @@ export default function AllocationsPage({ source = 'rule' }) {
         rejected: STATUS_ENUM.rejected,
       }
     : STATUS_ENUM
-  const columns = [
-    { title: '候选人', dataIndex: 'candidate_name', width: 120, fixed: 'left' },
+  const baseColumns = [
+    {
+      title: '候选人',
+      dataIndex: 'candidate_name',
+      width: 120,
+      fixed: 'left',
+      ...textColumnFilter('筛选候选人'),
+    },
     {
       title: '当前志愿',
       dataIndex: 'volunteer_rank',
       width: 90,
       search: false,
+      ...textColumnFilter('筛选志愿序号'),
       render: (_, record) => record.volunteer_rank || '-',
     },
-    { title: '应聘ID', dataIndex: 'apply_id', width: 120, search: false },
-    { title: '当前投递', dataIndex: 'position_name', ellipsis: true },
     {
-      title: '来源',
-      dataIndex: 'source',
-      width: 80,
+      title: '应聘ID',
+      dataIndex: 'apply_id',
+      width: 120,
       search: false,
-      render: (value) => SOURCE_TEXT[value] || value || '-',
+      ...textColumnFilter('筛选应聘ID'),
     },
-    { title: '分配部门', dataIndex: 'department_name', width: 160 },
-    !isSecondaryContact && { title: '二级接口人', dataIndex: 'contact_name', width: 120 },
-    { title: '三级接口人', dataIndex: 'sub_contact_name', width: 120 },
-    { title: '分配理由', dataIndex: 'match_reason', ellipsis: true, search: false },
+    {
+      title: '当前投递',
+      dataIndex: 'position_name',
+      ellipsis: true,
+      ...textColumnFilter('筛选投递岗位'),
+    },
+    {
+      title: '分配部门',
+      dataIndex: 'department_name',
+      width: 160,
+      ...textColumnFilter('筛选分配部门'),
+    },
+    !isSecondaryContact && {
+      title: '二级接口人',
+      dataIndex: 'contact_name',
+      width: 120,
+      ...textColumnFilter('筛选二级接口人'),
+    },
+    {
+      title: '三级接口人',
+      dataIndex: 'sub_contact_name',
+      width: 120,
+      ...textColumnFilter('筛选三级接口人'),
+    },
+    {
+      title: '分配原因',
+      dataIndex: 'match_reason',
+      width: 240,
+      ellipsis: true,
+      search: false,
+      ...textColumnFilter('筛选分配原因'),
+    },
     {
       title: '状态',
       dataIndex: 'status',
       width: 120,
       valueType: 'select',
       valueEnum: statusValueEnum,
+      ...selectColumnFilter(
+        Object.entries(statusValueEnum).map(([value, item]) => ({ value, text: item.text })),
+      ),
     },
     {
       title: '操作',
@@ -428,6 +464,7 @@ export default function AllocationsPage({ source = 'rule' }) {
       },
     },
   ].filter(Boolean)
+  const { columns, components, scrollX } = useResizableColumns(baseColumns)
 
   return (
     <PageContainer
@@ -444,8 +481,9 @@ export default function AllocationsPage({ source = 'rule' }) {
         actionRef={actionRef}
         rowKey="id"
         columns={columns}
-        scroll={{ x: 1250 }}
-        search={{ labelWidth: 'auto' }}
+        components={components}
+        scroll={{ x: scrollX }}
+        search={false}
         pagination={{ defaultPageSize: 10, showSizeChanger: true }}
         rowSelection={{
           selectedRowKeys,
@@ -505,9 +543,20 @@ export default function AllocationsPage({ source = 'rule' }) {
             </Button>
           ),
         ]}
-        request={async (params) => {
-          const { current, pageSize, status } = params
-          const query = { status, source }
+        request={async (params, _sort, filters) => {
+          const { current, pageSize } = params
+          const tableFilters = normalizeTableFilters(filters, [
+            'candidate_name',
+            'volunteer_rank',
+            'apply_id',
+            'position_name',
+            'department_name',
+            'contact_name',
+            'sub_contact_name',
+            'match_reason',
+            'status',
+          ])
+          const query = { ...tableFilters, source }
           setLastQuery(query)
           try {
             const { data } = await fetchAllocations({
@@ -545,9 +594,6 @@ export default function AllocationsPage({ source = 'rule' }) {
               <Descriptions.Item label="投递岗位">
                 {detailRecord.position_name || detailRecord.position_name_snapshot || '-'}
               </Descriptions.Item>
-              <Descriptions.Item label="来源">
-                {SOURCE_TEXT[detailRecord.source] || detailRecord.source || '-'}
-              </Descriptions.Item>
               <Descriptions.Item label="状态">
                 {STATUS_ENUM[detailRecord.status]?.text || detailRecord.status || '-'}
               </Descriptions.Item>
@@ -564,7 +610,7 @@ export default function AllocationsPage({ source = 'rule' }) {
                   detailRecord.sub_contact_name_snapshot ||
                   '-'}
               </Descriptions.Item>
-              <Descriptions.Item label="分配理由" span={2}>
+              <Descriptions.Item label="分配原因" span={2}>
                 {detailRecord.match_reason || '-'}
               </Descriptions.Item>
               {detailRecord.agent_decision_summary?.summary && (

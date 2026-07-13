@@ -9,7 +9,7 @@ from apps.pipeline import ai_config
 from apps.pipeline.ai import service as ai_service
 
 from ..cancellation import raise_if_cancel_requested
-from ..strategies import get_strategy
+from ..strategies import get_rule_strategy
 from . import classify_school, school_admission
 
 
@@ -446,6 +446,23 @@ def _create_agent_decision(workflow, resume, result):
     )
 
 
+def _ai_audit_versions():
+    """AI 未配置时仍可记录失败决策，但不构造或回退任何模型连接。"""
+    try:
+        config = ai_config.get_ai_model_config()
+    except ValueError:
+        return {
+            "model_name": "",
+            "prompt_version": "resume-screening-v1",
+            "decision_version": "decision-v1",
+        }
+    return {
+        "model_name": config.model_name,
+        "prompt_version": config.prompt_version,
+        "decision_version": config.decision_version,
+    }
+
+
 def _create_agent_failure_decision(
     workflow,
     resume,
@@ -454,7 +471,6 @@ def _create_agent_failure_decision(
     error_message,
     profile=None,
 ):
-    model_config = ai_config.get_ai_model_config()
     return m.AgentDispatchDecision.objects.create(
         workflow=workflow,
         resume=resume,
@@ -475,9 +491,7 @@ def _create_agent_failure_decision(
         risk_flags=[error_code],
         error_code=error_code,
         error_message=error_message,
-        model_name=model_config.model_name,
-        prompt_version=model_config.prompt_version,
-        decision_version=model_config.decision_version,
+        **_ai_audit_versions(),
     )
 
 
@@ -613,7 +627,7 @@ def _create_next_auto_attempt(workflow, rules, mode="rule", processing_run=None)
             jobs=eligible_jobs,
         )
 
-    strategy = get_strategy("rule")
+    strategy = get_rule_strategy()
     had_resume = False
     # 下面三个 gap 标记用于在所有后续志愿都失败时给出更接近真实原因的归档说明。
     saw_job_gap = False

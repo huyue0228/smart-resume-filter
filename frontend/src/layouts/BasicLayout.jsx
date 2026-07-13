@@ -62,6 +62,7 @@ const allRoute = {
       icon: <SettingOutlined />,
       routes: [
         { path: '/config', name: '配置项', icon: <ControlOutlined /> },
+        { path: '/ai-connection', name: 'AI 模型连接', icon: <ControlOutlined /> },
         { path: '/users', name: '用户权限', icon: <SafetyCertificateOutlined /> },
       ],
     },
@@ -77,6 +78,7 @@ function filterRoutesByPermission(routes, hasPermission) {
     '/allocations/rule': ['attempt.view_all', 'attempt.view_received', 'attempt.view_assigned'],
     '/allocations/ai': 'attempt.view_all',
     '/config': 'settings.manage_config',
+    '/ai-connection': 'settings.manage_ai_connection',
     '/users': 'settings.manage_permissions',
   }
   const keepRoute = (route) => {

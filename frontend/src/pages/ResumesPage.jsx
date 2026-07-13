@@ -9,7 +9,6 @@ import {
   message,
   Drawer,
   Descriptions,
-  Table,
   Typography,
   Tooltip,
   Select,
@@ -31,10 +30,13 @@ import {
 } from '../api/services'
 import ImportButton from '../components/ImportButton'
 import ResumePreview from '../components/ResumePreview'
+import ResizableTable from '../components/ResizableTable'
 import { useProcessRunner } from '../components/useProcessRunner'
 import { useRole } from '../contexts/RoleContext'
 import {
   normalizeTableFilters,
+  localSelectColumnFilter,
+  localTextColumnFilter,
   selectColumnFilter,
   textColumnFilter,
   useResizableColumns,
@@ -267,7 +269,7 @@ export default function ResumesPage() {
     await refreshUndo()
     await refreshFilterOptions()
     actionRef.current?.reload()
-    if (data?.processing_run) {
+    if (data?.processing_runs?.length) {
       message.success('简历已导入并提交后台处理，可继续操作并在任务中心查看进度')
     }
   }
@@ -809,7 +811,7 @@ export default function ResumesPage() {
               </Button>
             )}
 
-            <Table
+            <ResizableTable
               style={{ marginTop: 16 }}
               title={() => '投递志愿'}
               rowKey="id"
@@ -817,12 +819,42 @@ export default function ResumesPage() {
               pagination={false}
               dataSource={detailRecord.resumes || []}
               columns={[
-                { title: '志愿', dataIndex: 'volunteer_rank', width: 70 },
-                { title: '应聘ID', dataIndex: 'apply_id', width: 110 },
-                { title: '主体', dataIndex: 'entity', width: 100 },
-                { title: '投递岗位', dataIndex: 'position_name', ellipsis: true },
-                { title: '岗位类别', dataIndex: 'job_category', width: 110 },
-                { title: '应聘状态', dataIndex: 'status', width: 100 },
+                {
+                  title: '志愿',
+                  dataIndex: 'volunteer_rank',
+                  width: 70,
+                  ...localTextColumnFilter('volunteer_rank', '筛选志愿'),
+                },
+                {
+                  title: '应聘ID',
+                  dataIndex: 'apply_id',
+                  width: 110,
+                  ...localTextColumnFilter('apply_id', '筛选应聘ID'),
+                },
+                {
+                  title: '主体',
+                  dataIndex: 'entity',
+                  width: 100,
+                  ...localTextColumnFilter('entity', '筛选主体'),
+                },
+                {
+                  title: '投递岗位',
+                  dataIndex: 'position_name',
+                  ellipsis: true,
+                  ...localTextColumnFilter('position_name', '筛选投递岗位'),
+                },
+                {
+                  title: '岗位类别',
+                  dataIndex: 'job_category',
+                  width: 110,
+                  ...localTextColumnFilter('job_category', '筛选岗位类别'),
+                },
+                {
+                  title: '应聘状态',
+                  dataIndex: 'status',
+                  width: 100,
+                  ...localTextColumnFilter('status', '筛选应聘状态'),
+                },
                 {
                   title: '预览',
                   valueType: 'option',
@@ -846,7 +878,7 @@ export default function ResumesPage() {
               <ResumePreview resume={previewRecord} />
             </div>
 
-            <Table
+            <ResizableTable
               style={{ marginTop: 16 }}
               title={() => '分配尝试'}
               rowKey="id"
@@ -860,15 +892,46 @@ export default function ResumesPage() {
                   title: '来源',
                   dataIndex: 'source',
                   width: 80,
+                  ...localSelectColumnFilter('source', [
+                    { value: 'rule', text: '规则' },
+                    { value: 'ai', text: 'AI' },
+                    { value: 'manual', text: '手动' },
+                  ]),
                   render: (value) => SOURCE_TEXT[value] || value || '-',
                 },
-                { title: '投递岗位', dataIndex: 'position_name', ellipsis: true },
-                { title: '二级接口人', dataIndex: 'contact_name', width: 110 },
-                { title: '三级接口人', dataIndex: 'sub_contact_name', width: 110 },
+                {
+                  title: '投递岗位',
+                  dataIndex: 'position_name',
+                  ellipsis: true,
+                  ...localTextColumnFilter('position_name', '筛选投递岗位'),
+                },
+                {
+                  title: '二级接口人',
+                  dataIndex: 'contact_name',
+                  width: 110,
+                  ...localTextColumnFilter('contact_name', '筛选二级接口人'),
+                },
+                {
+                  title: '三级接口人',
+                  dataIndex: 'sub_contact_name',
+                  width: 110,
+                  ...localTextColumnFilter('sub_contact_name', '筛选三级接口人'),
+                },
                 {
                   title: '原因',
+                  key: 'reason',
                   width: 220,
                   ellipsis: true,
+                  ...textColumnFilter('筛选原因'),
+                  onFilter: (value, attempt) =>
+                    String(
+                      attempt.manual_reason ||
+                        attempt.match_reason ||
+                        attempt.feedback_note ||
+                        '',
+                    )
+                      .toLowerCase()
+                      .includes(String(value).toLowerCase()),
                   render: (_, attempt) =>
                     attempt.manual_reason || attempt.match_reason || attempt.feedback_note || '-',
                 },
@@ -876,6 +939,13 @@ export default function ResumesPage() {
                   title: '状态',
                   dataIndex: 'status',
                   width: 100,
+                  ...localSelectColumnFilter(
+                    'status',
+                    Object.entries(ATTEMPT_STATUS).map(([value, item]) => ({
+                      value,
+                      text: item.text,
+                    })),
+                  ),
                   render: (value) => (
                     <Tag color={ATTEMPT_STATUS[value]?.color || 'default'}>
                       {ATTEMPT_STATUS[value]?.text || value || '-'}
@@ -886,15 +956,24 @@ export default function ResumesPage() {
                   title: '反馈',
                   dataIndex: 'feedback_result',
                   width: 100,
+                  ...localSelectColumnFilter('feedback_result', [
+                    { value: 'passed', text: '通过' },
+                    { value: 'rejected', text: '未通过' },
+                  ]),
                   render: (value) =>
                     value === 'passed' ? '通过' : value === 'rejected' ? '未通过' : '-',
                 },
-                { title: '备注', dataIndex: 'feedback_note', ellipsis: true },
+                {
+                  title: '备注',
+                  dataIndex: 'feedback_note',
+                  ellipsis: true,
+                  ...localTextColumnFilter('feedback_note', '筛选备注'),
+                },
               ]}
             />
 
             {canViewAgentDecisions && (
-              <Table
+              <ResizableTable
                 style={{ marginTop: 16 }}
                 title={() => 'AI 筛选决策'}
                 rowKey="id"
@@ -906,7 +985,18 @@ export default function ResumesPage() {
                 columns={[
                   {
                     title: '结论',
+                    key: 'recommendation',
                     width: 100,
+                    ...selectColumnFilter([
+                      { value: 'error', text: '处理失败' },
+                      { value: 'dispatch', text: '建议下发' },
+                      { value: 'review', text: '人工复核' },
+                      { value: 'archive', text: '建议归档' },
+                    ]),
+                    onFilter: (value, decision) =>
+                      value === 'error'
+                        ? Boolean(decision.error_code)
+                        : !decision.error_code && decision.recommendation === value,
                     render: (_, decision) =>
                       decision.error_code ? (
                         <Tag color="error">处理失败</Tag>
@@ -922,8 +1012,27 @@ export default function ResumesPage() {
                     width: 90,
                     render: (value) => (value == null ? '-' : `${Math.round(value * 100)}%`),
                   },
-                  { title: '推荐岗位', dataIndex: 'recommended_job_name', ellipsis: true },
-                  { title: '摘要/失败原因', width: 300, ellipsis: true, render: (_, decision) => decision.error_message || decision.summary || decision.reason || '-' },
+                  {
+                    title: '推荐岗位',
+                    dataIndex: 'recommended_job_name',
+                    ellipsis: true,
+                    ...localTextColumnFilter('recommended_job_name', '筛选推荐岗位'),
+                  },
+                  {
+                    title: '摘要/失败原因',
+                    key: 'summary',
+                    width: 300,
+                    ellipsis: true,
+                    ...textColumnFilter('筛选摘要或失败原因'),
+                    onFilter: (value, decision) =>
+                      String(
+                        decision.error_message || decision.summary || decision.reason || '',
+                      )
+                        .toLowerCase()
+                        .includes(String(value).toLowerCase()),
+                    render: (_, decision) =>
+                      decision.error_message || decision.summary || decision.reason || '-',
+                  },
                   {
                     title: '操作',
                     width: 145,

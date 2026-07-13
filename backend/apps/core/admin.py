@@ -22,7 +22,6 @@ for model in (
     models.AgentDispatchDecision,
     models.ProcessingRun,
     models.Config,
-    models.ProvinceRegion,
     models.ImportSnapshot,
 ):
     admin.site.register(model)

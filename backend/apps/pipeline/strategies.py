@@ -214,14 +214,5 @@ class RuleStrategy:
         return None, "未匹配", ""
 
 
-class AIStrategy:
-    """兼容旧调用的 fail-fast 策略；正式 AI 流程由 pipeline.ai 服务执行。"""
-
-    mode = "ai"
-
-    def classify(self, resume, jobs):
-        raise RuntimeError("AI 模式必须通过正式 ResumeScreeningService 执行，禁止回退 Rule")
-
-
-def get_strategy(mode):
-    return AIStrategy() if mode == "ai" else RuleStrategy()
+def get_rule_strategy():
+    return RuleStrategy()

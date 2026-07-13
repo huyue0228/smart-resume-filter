@@ -2,7 +2,16 @@
 set -Eeuo pipefail
 
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PACKAGE_DIR="$(cd "$SKILL_DIR/.." && pwd)"
+if [[ -n "${DEPLOY_ROOT:-}" ]]; then
+  PACKAGE_DIR="$(cd "$DEPLOY_ROOT" && pwd)"
+elif [[ -f "$SKILL_DIR/../docker-compose.yml" ]]; then
+  PACKAGE_DIR="$(cd "$SKILL_DIR/.." && pwd)"
+elif [[ -f "$SKILL_DIR/../../docker-compose.yml" ]]; then
+  PACKAGE_DIR="$(cd "$SKILL_DIR/../.." && pwd)"
+else
+  echo "未找到 docker-compose.yml；请设置 DEPLOY_ROOT。"
+  exit 1
+fi
 cd "$PACKAGE_DIR"
 
 PROJECT_NAME="${COMPOSE_PROJECT_NAME:-smart-resume-filter}"
@@ -15,7 +24,16 @@ compose() {
   docker compose --project-name "$PROJECT_NAME" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
+command -v docker >/dev/null || { echo "未找到 docker。"; exit 1; }
+docker compose version >/dev/null || { echo "未找到 Docker Compose v2。"; exit 1; }
+compose config --images >/dev/null
 compose ps
+for service in db redis backend worker frontend; do
+  if ! compose ps --status running --services | grep -Fxq "$service"; then
+    echo "服务未处于运行状态：${service}"
+    exit 1
+  fi
+done
 compose exec -T backend python manage.py check
 compose exec -T frontend nginx -t
 echo "部署验证通过。"

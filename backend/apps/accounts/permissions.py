@@ -54,6 +54,7 @@ PERMISSION_TREE = [
         "children": [
             {"code": "settings.manage_config", "name": "配置项管理"},
             {"code": "settings.manage_permissions", "name": "用户权限管理"},
+            {"code": "settings.manage_ai_connection", "name": "AI 模型连接管理"},
         ],
     },
 ]

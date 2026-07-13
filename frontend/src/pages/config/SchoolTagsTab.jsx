@@ -8,6 +8,12 @@ import {
   updateSchoolTag,
 } from '../../api/services'
 import { useModalRecord } from './useModalRecord'
+import {
+  normalizeTableFilters,
+  selectColumnFilter,
+  textColumnFilter,
+  useResizableColumns,
+} from '../../components/DataTableControls'
 
 export default function SchoolTagsTab() {
   const actionRef = useRef()
@@ -31,19 +37,33 @@ export default function SchoolTagsTab() {
     return true
   }
 
-  const columns = [
-    { title: '编码', dataIndex: 'code', width: 150, fixed: 'left' },
-    { title: '名称', dataIndex: 'name', width: 160 },
+  const baseColumns = [
+    {
+      title: '编码',
+      dataIndex: 'code',
+      width: 150,
+      fixed: 'left',
+      ...textColumnFilter('筛选编码'),
+    },
+    { title: '名称', dataIndex: 'name', width: 160, ...textColumnFilter('筛选名称') },
     {
       title: '默认标签',
       dataIndex: 'is_default',
       width: 100,
+      ...selectColumnFilter([
+        { value: 'true', text: '默认' },
+        { value: 'false', text: '非默认' },
+      ]),
       render: (value) => (value ? <Tag color="blue">默认</Tag> : '-'),
     },
     {
       title: '状态',
       dataIndex: 'is_active',
       width: 90,
+      ...selectColumnFilter([
+        { value: 'true', text: '启用' },
+        { value: 'false', text: '停用' },
+      ]),
       render: (value) =>
         value ? <Tag color="green">启用</Tag> : <Tag color="default">停用</Tag>,
     },
@@ -73,6 +93,7 @@ export default function SchoolTagsTab() {
       ),
     },
   ]
+  const { columns, components, scrollX } = useResizableColumns(baseColumns)
 
   return (
     <>
@@ -81,18 +102,26 @@ export default function SchoolTagsTab() {
         rowKey="id"
         search={false}
         columns={columns}
-        scroll={{ x: 760 }}
+        components={components}
+        scroll={{ x: scrollX }}
         pagination={{ defaultPageSize: 10, showSizeChanger: true }}
         toolBarRender={() => [
           <Button key="create" type="primary" onClick={() => modal.open()}>
             新增标签
           </Button>,
         ]}
-        request={async (params) => {
+        request={async (params, _sort, filters) => {
           const { current, pageSize } = params
+          const tableFilters = normalizeTableFilters(filters, [
+            'code',
+            'name',
+            'is_default',
+            'is_active',
+          ])
           const { data } = await fetchSchoolTags({
             page: current,
             page_size: pageSize,
+            ...tableFilters,
           })
           return {
             data: data?.results || [],

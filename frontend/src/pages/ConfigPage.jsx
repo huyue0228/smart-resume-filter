@@ -4,11 +4,8 @@ import MajorDictionaryTab from './config/MajorDictionaryTab'
 import SchoolAdmissionRulesTab from './config/SchoolAdmissionRulesTab'
 import SchoolTagsTab from './config/SchoolTagsTab'
 import SystemConfigTab from './config/SystemConfigTab'
-import AIConnectionTab from './config/AIConnectionTab'
-import { useRole } from '../contexts/RoleContext'
 
 export default function ConfigPage() {
-  const { hasPermission } = useRole()
   const items = [
     { key: 'configs', label: '系统参数', children: <SystemConfigTab /> },
     { key: 'school-tags', label: '院校标签字典', children: <SchoolTagsTab /> },
@@ -23,9 +20,6 @@ export default function ConfigPage() {
       children: <MajorDictionaryTab />,
     },
   ]
-  if (hasPermission('settings.manage_permissions')) {
-    items.push({ key: 'ai-connection', label: 'AI 模型连接', children: <AIConnectionTab /> })
-  }
   return (
     <PageContainer title="配置项">
       <Tabs items={items} />

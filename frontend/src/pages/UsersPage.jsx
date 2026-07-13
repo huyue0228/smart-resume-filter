@@ -19,6 +19,12 @@ import {
   updateRole,
   updateUser,
 } from '../api/services'
+import {
+  normalizeTableFilters,
+  selectColumnFilter,
+  textColumnFilter,
+  useResizableColumns,
+} from '../components/DataTableControls'
 
 const ROLE_VALUE_ENUM = {
   admin: { text: '管理员' },
@@ -77,18 +83,31 @@ export default function UsersPage() {
   }))
   const allLeafCodes = useMemo(() => leafCodes(permissionTree), [permissionTree])
 
-  const userColumns = [
-    { title: '用户名', dataIndex: 'username', width: 150, fixed: 'left' },
+  const userBaseColumns = [
+    {
+      title: '用户名',
+      dataIndex: 'username',
+      width: 150,
+      fixed: 'left',
+      ...textColumnFilter('筛选用户名'),
+    },
     {
       title: '角色类型',
       dataIndex: 'role',
       width: 130,
       valueEnum: ROLE_VALUE_ENUM,
+      ...selectColumnFilter(
+        Object.entries(ROLE_VALUE_ENUM).map(([value, item]) => ({ value, text: item.text })),
+      ),
     },
     {
       title: 'RBAC 角色',
       dataIndex: 'roles',
       search: false,
+      width: 200,
+      ...selectColumnFilter(
+        roles.map((role) => ({ value: role.name, text: role.name })),
+      ),
       render: (_, record) => (
         <Space wrap>
           {(record.roles || []).map((name) => (
@@ -99,12 +118,22 @@ export default function UsersPage() {
         </Space>
       ),
     },
-    { title: '绑定接口人', dataIndex: 'contact_name', width: 160, search: false },
+    {
+      title: '绑定接口人',
+      dataIndex: 'contact_name',
+      width: 160,
+      search: false,
+      ...textColumnFilter('筛选接口人'),
+    },
     {
       title: '状态',
       dataIndex: 'is_active',
       width: 90,
       search: false,
+      ...selectColumnFilter([
+        { value: 'true', text: '启用' },
+        { value: 'false', text: '停用' },
+      ]),
       render: (value) =>
         value ? <Tag color="green">启用</Tag> : <Tag color="default">停用</Tag>,
     },
@@ -143,8 +172,13 @@ export default function UsersPage() {
     },
   ]
 
-  const roleColumns = [
-    { title: '角色名称', dataIndex: 'name', width: 180 },
+  const roleBaseColumns = [
+    {
+      title: '角色名称',
+      dataIndex: 'name',
+      width: 180,
+      ...textColumnFilter('筛选角色名称'),
+    },
     {
       title: '权限数',
       dataIndex: 'permissions',
@@ -171,6 +205,16 @@ export default function UsersPage() {
       ),
     },
   ]
+  const {
+    columns: userColumns,
+    components: userComponents,
+    scrollX: userScrollX,
+  } = useResizableColumns(userBaseColumns)
+  const {
+    columns: roleColumns,
+    components: roleComponents,
+    scrollX: roleScrollX,
+  } = useResizableColumns(roleBaseColumns)
 
   const saveRolePermissions = async () => {
     if (!activeRole) return
@@ -200,8 +244,9 @@ export default function UsersPage() {
                 actionRef={userActionRef}
                 rowKey="id"
                 columns={userColumns}
-                scroll={{ x: 1000 }}
-                search={{ labelWidth: 'auto' }}
+                components={userComponents}
+                scroll={{ x: userScrollX }}
+                search={false}
                 toolBarRender={() => [
                   <Button
                     key="create"
@@ -211,13 +256,19 @@ export default function UsersPage() {
                     新增用户
                   </Button>,
                 ]}
-                request={async (params) => {
-                  const { current, pageSize, username, role } = params
+                request={async (params, _sort, filters) => {
+                  const { current, pageSize } = params
+                  const tableFilters = normalizeTableFilters(filters, [
+                    'username',
+                    'role',
+                    'roles',
+                    'contact_name',
+                    'is_active',
+                  ])
                   const { data } = await fetchUsers({
                     page: current,
                     page_size: pageSize,
-                    username,
-                    role,
+                    ...tableFilters,
                   })
                   return { data: data?.results || [], total: data?.count || 0, success: true }
                 }}
@@ -232,6 +283,8 @@ export default function UsersPage() {
                 actionRef={roleActionRef}
                 rowKey="id"
                 columns={roleColumns}
+                components={roleComponents}
+                scroll={{ x: roleScrollX }}
                 search={false}
                 toolBarRender={() => [
                   <Button
@@ -242,9 +295,14 @@ export default function UsersPage() {
                     新增角色
                   </Button>,
                 ]}
-                request={async (params) => {
+                request={async (params, _sort, filters) => {
                   const { current, pageSize } = params
-                  const { data } = await fetchRoles({ page: current, page_size: pageSize })
+                  const tableFilters = normalizeTableFilters(filters, ['name'])
+                  const { data } = await fetchRoles({
+                    page: current,
+                    page_size: pageSize,
+                    ...tableFilters,
+                  })
                   setRoles(data?.results || [])
                   return { data: data?.results || [], total: data?.count || 0, success: true }
                 }}

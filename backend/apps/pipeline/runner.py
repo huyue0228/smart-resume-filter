@@ -20,8 +20,6 @@ STEP_FUNCS = {
     "step2": lambda mode, scope, run: allocate.run(scope, mode, processing_run=run),
     "step3": lambda mode, scope, run: classify_school.run(scope),
     "step4": lambda mode, scope, run: demand.run(scope),
-    # 兼容旧 demo 入口。当前设计中分配已经合并进 Step2。
-    "step5": lambda mode, scope, run: allocate.run(scope, mode, processing_run=run),
 }
 
 RESUME_PROCESS_STEP = "resume_process"
@@ -30,7 +28,6 @@ STAGE_LABELS = {
     "step2": "简历分类、分配与下发",
     "step3": "院校分类",
     "step4": "需求数据准备核对",
-    "step5": "简历分类、分配与下发",
 }
 
 # 一键全流程：前置院校分类、需求录入先完成，再执行候选人主流程。
@@ -42,7 +39,7 @@ def _candidate_ids_for_run(step, scope):
     candidate_ids = scope.get("candidate_ids") or []
     if candidate_ids:
         return sorted({int(candidate_id) for candidate_id in candidate_ids})
-    if step in {"step2", "step5", RESUME_PROCESS_STEP}:
+    if step in {"step2", RESUME_PROCESS_STEP}:
         return list(allocate.candidate_ids_for_scope(scope))
     if step == "step1":
         return list(dedup.candidate_ids_for_scope(scope))
@@ -168,7 +165,7 @@ def _run_one_stage(run, stage, mode, scope):
     _heartbeat(run, stage=stage)
     if stage == "step1":
         message = dedup.run(scope, processing_run=run, processing_stage=stage_record)
-    elif stage in {"step2", "step5"}:
+    elif stage == "step2":
         message = allocate.run(
             scope, mode, processing_run=run, processing_stage=stage_record
         )
@@ -236,9 +233,3 @@ def execute_run(run_id):
     run.current_stage = ""
     run.save()
     return run
-
-
-def run_step(step, mode="rule", scope=None):
-    """同步兼容入口；API 生产路径通过 Celery 调用 execute_run。"""
-    scope = scope or {}
-    return execute_run(create_run(step, mode=mode, scope=scope).id)

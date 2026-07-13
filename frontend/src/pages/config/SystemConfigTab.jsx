@@ -2,6 +2,10 @@ import { useEffect, useState } from 'react'
 import { ProTable } from '@ant-design/pro-components'
 import { Button, InputNumber, Space, Switch, Tag, message } from 'antd'
 import { fetchConfigs, updateConfig } from '../../api/services'
+import {
+  localTextColumnFilter,
+  useResizableColumns,
+} from '../../components/DataTableControls'
 
 function ConfigValueEditor({ record, value, onChange }) {
   if (record.value_type === 'boolean') {
@@ -61,15 +65,27 @@ export default function SystemConfigTab() {
     }
   }
 
-  const columns = [
-    { title: '配置项', dataIndex: 'label', width: 180, fixed: 'left' },
+  const baseColumns = [
+    {
+      title: '配置项',
+      dataIndex: 'label',
+      width: 180,
+      fixed: 'left',
+      ...localTextColumnFilter('label', '筛选配置项'),
+    },
     {
       title: '键',
       dataIndex: 'key',
       width: 180,
+      ...localTextColumnFilter('key', '筛选配置键'),
       render: (value) => <Tag color="blue">{value}</Tag>,
     },
-    { title: '说明', dataIndex: 'description', ellipsis: true },
+    {
+      title: '说明',
+      dataIndex: 'description',
+      ellipsis: true,
+      ...localTextColumnFilter('description', '筛选说明'),
+    },
     {
       title: '值',
       dataIndex: 'value',
@@ -103,18 +119,19 @@ export default function SystemConfigTab() {
       ),
     },
   ]
+  const { columns, components, scrollX } = useResizableColumns(baseColumns)
 
   return (
     <Space direction="vertical" style={{ width: '100%' }} size={16}>
       <ProTable
         rowKey="key"
         search={false}
-        options={false}
         loading={loading}
         columns={columns}
+        components={components}
         dataSource={configs}
         pagination={false}
-        scroll={{ x: 900 }}
+        scroll={{ x: scrollX }}
         toolBarRender={() => [
           <Button key="reload" onClick={load}>
             刷新

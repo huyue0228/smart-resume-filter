@@ -16,6 +16,12 @@ import {
   updateSchoolTagRule,
 } from '../../api/services'
 import { useModalRecord } from './useModalRecord'
+import {
+  normalizeTableFilters,
+  selectColumnFilter,
+  textColumnFilter,
+  useResizableColumns,
+} from '../../components/DataTableControls'
 
 function tagIds(tags) {
   return (tags || []).map((tag) => tag.id).filter(Boolean)
@@ -77,13 +83,23 @@ export default function SchoolAdmissionRulesTab() {
     return true
   }
 
-  const columns = [
-    { title: '规则名称', dataIndex: 'name', width: 180, fixed: 'left' },
-    { title: '优先级', dataIndex: 'priority', width: 90 },
+  const baseColumns = [
+    {
+      title: '规则名称',
+      dataIndex: 'name',
+      width: 180,
+      fixed: 'left',
+      ...textColumnFilter('筛选规则名称'),
+    },
+    { title: '优先级', dataIndex: 'priority', width: 90, ...textColumnFilter('筛选优先级') },
     {
       title: '状态',
       dataIndex: 'is_active',
       width: 90,
+      ...selectColumnFilter([
+        { value: 'true', text: '启用' },
+        { value: 'false', text: '停用' },
+      ]),
       render: (value) =>
         value ? <Tag color="green">启用</Tag> : <Tag color="default">停用</Tag>,
     },
@@ -123,6 +139,7 @@ export default function SchoolAdmissionRulesTab() {
       ),
     },
   ]
+  const { columns, components, scrollX } = useResizableColumns(baseColumns)
 
   const initialValues = modal.record
     ? {
@@ -144,18 +161,25 @@ export default function SchoolAdmissionRulesTab() {
         rowKey="id"
         search={false}
         columns={columns}
-        scroll={{ x: 1000 }}
+        components={components}
+        scroll={{ x: scrollX }}
         pagination={{ defaultPageSize: 10, showSizeChanger: true }}
         toolBarRender={() => [
           <Button key="create" type="primary" onClick={() => modal.open()}>
             新增规则
           </Button>,
         ]}
-        request={async (params) => {
+        request={async (params, _sort, filters) => {
           const { current, pageSize } = params
+          const tableFilters = normalizeTableFilters(filters, [
+            'name',
+            'priority',
+            'is_active',
+          ])
           const { data } = await fetchSchoolTagRules({
             page: current,
             page_size: pageSize,
+            ...tableFilters,
           })
           return {
             data: data?.results || [],

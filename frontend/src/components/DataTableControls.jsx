@@ -45,10 +45,10 @@ export function normalizeTableFilters(filters, fields) {
   }, {})
 }
 
-function columnKey(column) {
+function columnKey(column, index) {
   if (column.key) return column.key
   if (Array.isArray(column.dataIndex)) return column.dataIndex.join('.')
-  return column.dataIndex
+  return column.dataIndex || `column-${index}`
 }
 
 function totalWidth(columns) {
@@ -60,16 +60,15 @@ export function useResizableColumns(baseColumns) {
 
   const columns = useMemo(
     () =>
-      baseColumns.map((column) => {
-        const key = columnKey(column)
-        if (!key || column.valueType === 'option') {
-          return column
-        }
+      baseColumns.map((column, index) => {
+        const key = columnKey(column, index)
         const width = widths[key] || column.width || 120
         return {
           ...column,
+          key,
           width,
-          onHeaderCell: () => ({
+          onHeaderCell: (...args) => ({
+            ...(column.onHeaderCell?.(...args) || {}),
             width,
             minWidth: column.minWidth || 72,
             onResize: (nextWidth) =>
@@ -84,5 +83,29 @@ export function useResizableColumns(baseColumns) {
     columns,
     components: { header: { cell: ResizableHeaderCell } },
     scrollX: Math.max(totalWidth(columns), totalWidth(baseColumns)),
+  }
+}
+
+function localValue(record, dataIndex) {
+  if (Array.isArray(dataIndex)) {
+    return dataIndex.reduce((value, key) => value?.[key], record)
+  }
+  return record?.[dataIndex]
+}
+
+export function localTextColumnFilter(dataIndex, placeholder) {
+  return {
+    ...textColumnFilter(placeholder),
+    onFilter: (value, record) =>
+      String(localValue(record, dataIndex) ?? '')
+        .toLowerCase()
+        .includes(String(value).toLowerCase()),
+  }
+}
+
+export function localSelectColumnFilter(dataIndex, options, multiple = false) {
+  return {
+    ...selectColumnFilter(options, multiple),
+    onFilter: (value, record) => String(localValue(record, dataIndex) ?? '') === String(value),
   }
 }

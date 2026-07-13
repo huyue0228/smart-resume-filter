@@ -124,3 +124,41 @@ class MajorDictionaryApiTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("需先删除或迁移别名", response.data["detail"])
         self.assertTrue(m.MajorCategory.objects.filter(id=category.id).exists())
+
+    def test_major_dictionary_header_filters(self):
+        category = m.MajorCategory.objects.create(
+            code="CS_SOFTWARE",
+            name="计算机与软件类",
+            description="软件与人工智能方向",
+            is_active=True,
+        )
+        alias = m.MajorAlias.objects.create(
+            category=category,
+            name="软件工程",
+            normalized_name="软件工程",
+            match_type=m.MajorAlias.MATCH_EXACT,
+            source=m.MajorAlias.SOURCE_USER,
+            note="人工补充",
+            is_active=True,
+        )
+
+        category_response = self.client.get(
+            "/api/major-categories/",
+            {"code": "CS", "description": "人工智能", "is_active": "true"},
+        )
+        alias_response = self.client.get(
+            "/api/major-aliases/",
+            {
+                "category": category.id,
+                "name": "软件",
+                "match_type": "exact",
+                "source": "user",
+                "note": "补充",
+                "is_active": "true",
+            },
+        )
+
+        self.assertEqual(category_response.status_code, 200)
+        self.assertEqual([item["id"] for item in category_response.data["results"]], [category.id])
+        self.assertEqual(alias_response.status_code, 200)
+        self.assertEqual([item["id"] for item in alias_response.data["results"]], [alias.id])

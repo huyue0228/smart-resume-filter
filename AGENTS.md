@@ -80,13 +80,13 @@ Use focused verification for the files changed:
 
 ## Pipeline Notes
 
-- Entry point: `backend/apps/pipeline/runner.py`, `run_step(step, mode, scope)`.
-- The `all` order is intentionally `step3`, `step4`, `step1`, `step2`; do not assume numeric order. Step3/Step4 prepare or verify prerequisite data before the candidate flow. A normal resume upload should run `step1`, then `step2`. `step5` is only a legacy allocation alias, and new frontend/backend work should prefer the Step2 allocation flow.
+- Entry point: `backend/apps/pipeline/runner.py`; API submits `ProcessingRun` records through `create_runs()` and workers execute them through `execute_run()`.
+- The `all` order is intentionally `step3`, `step4`, `step1`, `step2`; do not assume numeric order. Step3/Step4 prepare or verify prerequisite data before the candidate flow. A normal resume upload runs `step1`, then `step2`.
 - Step implementations live in `backend/apps/pipeline/services/`.
-- `strategies.py` owns deterministic Rule matching. Formal AI screening lives under `backend/apps/pipeline/ai/`; `AIStrategy` is only a legacy fail-fast guard and must never fall back to Rule. Model profiles live in `backend/config/ai_models.json`; switch with `AI_PROFILE` and keep real keys only in ignored/deployment environment files. AI mode requires a text-extractable PDF.
+- `strategies.py` owns deterministic Rule matching. Formal AI screening lives under `backend/apps/pipeline/ai/` and must never fall back to Rule. Model profile templates live in `backend/config/ai_models.json`; the only runtime model connection source is the `settings.manage_ai_connection`-protected system settings page. AI mode requires a text-extractable PDF.
 - AI Agent screening is a hard-rule-constrained recommendation flow: it only evaluates the candidate's current effective volunteer, never skips volunteer order or school admission rules, and never automatically falls back to Rule after AI failure.
 - AI failures, timeouts, parse failures, invalid output, missing references, and guardrail blocks should be recorded for HR handling. HR chooses retry AI, switch to Rule, manual assignment, or archive handling.
-- Frontend drives processing by calling `/api/pipeline/run/` step by step via `frontend/src/components/useProcessRunner.jsx`.
+- Frontend submits one `/api/pipeline/run/` request with non-empty `modes` and optional `scope` via `frontend/src/components/useProcessRunner.jsx`; the backend creates independent runs and executes them through the sequential Celery orchestration.
 
 ## API Notes
 
@@ -106,11 +106,11 @@ Use focused verification for the files changed:
 - API wrappers live in `frontend/src/api/`.
 - Layout and permission-code menu filtering live in `frontend/src/layouts/BasicLayout.jsx`.
 - `RoleContext.jsx` holds the current token-backed user, `/api/me/` permissions, roles, contact binding, and data-scope helpers. Do not reintroduce demo role switching.
-- `ModeContext.jsx` stores `rule` / `ai` in localStorage. The allocation page owns the mode switch; switching mode reruns the Step2 allocation flow.
+- Rule/AI selection is made by the resume-processing dialog and submitted as a non-empty `modes` array; allocation subpages only filter existing attempts by source.
 - Import UI is decentralized through `frontend/src/components/ImportButton.jsx`; there is no standalone import page.
 - Shared table header filters and resizable column wiring live in `frontend/src/components/DataTableControls.jsx` and `frontend/src/components/ResizableHeaderCell.jsx`; reuse them for dense data tables instead of rebuilding per page.
 - PDF preview UI lives in `frontend/src/components/ResumePreview.jsx` and supports direct resume previews and assignment-attempt scoped previews.
-- `SchoolsPage.jsx` no longer exposes the legacy `region` filter. The remaining drift is in backend `School.region` / `ProvinceRegion` models and APIs; migrate backend behavior to runtime province-based judgment rather than reintroducing region configuration in the frontend.
+- `SchoolsPage.jsx` exposes the current school name, label and province fields only. North/south judgment is calculated from province at runtime; do not add regional fields or a regional configuration page.
 
 ## Migration Gotchas
 
