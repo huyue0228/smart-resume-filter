@@ -86,7 +86,23 @@ services:
       <<: *backend-env
       RUN_MIGRATIONS: "0"
       RUN_SEED_BASE: "0"
-    command: celery -A config worker -l info
+    command: celery -A config worker -l info -Q default --prefetch-multiplier=1
+    volumes:
+      - media_data:/app/media
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  ai-worker:
+    image: smart-resume-filter-backend:${APP_VERSION:-latest}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    environment:
+      <<: *backend-env
+      RUN_MIGRATIONS: "0"
+      RUN_SEED_BASE: "0"
+    command: celery -A config worker -l info -Q ai --pool=threads --concurrency=${AI_WORKER_CONCURRENCY:-20} --prefetch-multiplier=1
     volumes:
       - media_data:/app/media
     depends_on:

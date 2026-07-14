@@ -48,5 +48,9 @@ def request_cancellation(run_id, user):
         else:
             run.status = "cancelling"
             run.message = "已请求取消，正在等待当前候选人处理结束"
+            if run.mode == "ai" and run.step in {"step2", "resume_process", "all"}:
+                from .tasks import dispatch_ai_run_task
+
+                transaction.on_commit(lambda: dispatch_ai_run_task.delay(run.id))
         run.save()
         return run

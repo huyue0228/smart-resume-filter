@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth.models import Group
+from django.utils import timezone
 
 from apps.accounts.models import User
 from apps.accounts.permissions import (
@@ -1026,6 +1027,7 @@ class AssignmentAttemptSerializer(serializers.ModelSerializer):
 class ProcessingRunSerializer(serializers.ModelSerializer):
     stages = serializers.SerializerMethodField()
     scope_summary = serializers.JSONField(read_only=True)
+    elapsed_seconds = serializers.SerializerMethodField()
 
     class Meta:
         model = m.ProcessingRun
@@ -1035,13 +1037,20 @@ class ProcessingRunSerializer(serializers.ModelSerializer):
             "created_by", "created_by_username_snapshot",
             "celery_task_id", "celery_group_id", "params",
             "total_count", "processed_count", "success_count", "failed_count",
-            "review_count", "dispatch_count", "archive_count",
+            "review_count", "dispatch_count", "archive_count", "skipped_count", "cancelled_count",
             "chunk_size", "chunk_total", "chunk_done", "chunk_failed", "chunk_errors",
+            "ai_concurrency_limit", "ai_effective_concurrency",
+            "ai_retry_count", "ai_rate_limit_count",
             "model_name", "prompt_version", "decision_version",
-            "created_at", "started_at", "finished_at", "undone_at", "undone_by", "error",
+            "created_at", "started_at", "finished_at", "elapsed_seconds",
+            "undone_at", "undone_by", "error",
             "cancel_requested_at", "cancelled_at", "cancelled_by", "cancelled_by_username_snapshot",
             "stages",
         ]
+
+    def get_elapsed_seconds(self, obj):
+        end_at = obj.finished_at or timezone.now()
+        return max(0, int((end_at - obj.created_at).total_seconds()))
 
     def get_stages(self, obj):
         return [
@@ -1056,6 +1065,8 @@ class ProcessingRunSerializer(serializers.ModelSerializer):
                 "review_count": stage.review_count,
                 "dispatch_count": stage.dispatch_count,
                 "archive_count": stage.archive_count,
+                "skipped_count": stage.skipped_count,
+                "cancelled_count": stage.cancelled_count,
                 "message": stage.message,
                 "error": stage.error,
                 "started_at": stage.started_at,

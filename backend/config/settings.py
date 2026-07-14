@@ -127,3 +127,11 @@ CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://localhost:6379/1")
 CELERY_TASK_ALWAYS_EAGER = env_bool("CELERY_TASK_ALWAYS_EAGER", True)
 CELERY_TASK_EAGER_PROPAGATES = True
+CELERY_TASK_DEFAULT_QUEUE = "default"
+CELERY_TASK_ROUTES = {
+    "apps.pipeline.tasks.process_ai_scope_item_task": {"queue": "ai"},
+}
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+# 候选人任务只包含一次模型调用及其有限重试；为 Redis broker 留足可见性窗口，
+# 防止长超时请求尚未结束就被重复投递。worker 丢失仍由 acks_late 立即重投。
+CELERY_BROKER_TRANSPORT_OPTIONS = {"visibility_timeout": 21600}

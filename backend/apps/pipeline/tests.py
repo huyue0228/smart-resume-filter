@@ -6,6 +6,7 @@ from django.test import TestCase
 from apps.accounts.models import User
 from apps.core import models as m
 from apps.pipeline import ai_config, runner
+from apps.pipeline.ai import service as ai_service
 from apps.pipeline.ai.service import AIServiceError
 from apps.pipeline.services import allocate, classify_school
 
@@ -14,10 +15,9 @@ class AllocationDesignContractTests(TestCase):
     def setUp(self):
         ai_config.save_ai_connection_config(
             {
-                "profile": "openai",
                 "api_style": "responses",
                 "model_name": "gpt-test",
-                "base_url": "",
+                "base_url": "https://model.internal/v1",
                 "api_key": "test-key",
             }
         )
@@ -583,6 +583,46 @@ class AllocationDesignContractTests(TestCase):
         self.assertEqual(decision.recommended_contact_name_snapshot, "二级接口人")
         self.assertEqual(decision.recommended_contact_employee_no_snapshot, "L2001")
 
+    def test_ai_allocation_only_passes_current_volunteer_job_to_model(self):
+        unrelated_job = m.Job.objects.create(
+            department=self.department,
+            public_name="产品经理",
+            position_name="产品经理",
+            category="产品类",
+            headcount=1,
+        )
+        m.JobMajor.objects.create(job=unrelated_job, major="工商管理")
+
+        with patch(
+            "apps.pipeline.services.allocate.ai_service.screen_resume",
+            return_value=self._ai_result(),
+        ) as mocked:
+            allocate.run(mode="ai")
+
+        mocked.assert_called_once()
+        self.assertEqual(mocked.call_args.args[0], self.resume)
+        self.assertEqual(mocked.call_args.args[1], self.job)
+
+    def test_ai_current_job_lookup_does_not_load_unrelated_job_majors(self):
+        for index in range(5):
+            unrelated_job = m.Job.objects.create(
+                department=self.department,
+                public_name=f"无关岗位{index}",
+                position_name=f"无关岗位{index}",
+                category="其它类",
+                headcount=1,
+            )
+            m.JobMajor.objects.create(job=unrelated_job, major=f"无关专业{index}")
+
+        with self.assertNumQueries(2):
+            current_job = allocate._current_volunteer_job(self.resume)
+        with self.assertNumQueries(2):
+            context = ai_service._current_job_context(current_job)
+
+        self.assertEqual(current_job, self.job)
+        self.assertEqual(context["id"], self.job.id)
+        self.assertEqual(context["required_majors"], [])
+
     def test_ai_failure_keeps_current_volunteer_and_never_skips_to_next(self):
         m.Resume.objects.create(
             candidate=self.candidate,
@@ -674,10 +714,9 @@ class AllocationDesignContractTests(TestCase):
     def test_ai_model_versions_come_from_backend_config(self):
         ai_config.save_ai_connection_config(
             {
-                "profile": "openai",
                 "api_style": "responses",
                 "model_name": "gpt-test",
-                "base_url": "",
+                "base_url": "https://model.internal/v1",
                 "api_key": "test-key",
             }
         )

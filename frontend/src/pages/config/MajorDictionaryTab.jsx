@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { PlusOutlined } from '@ant-design/icons'
 import {
   ModalForm,
@@ -7,7 +7,6 @@ import {
   ProFormSwitch,
   ProFormText,
   ProFormTextArea,
-  ProTable,
 } from '@ant-design/pro-components'
 import { Button, Popconfirm, Space, Tag, Typography, message } from 'antd'
 import {
@@ -21,12 +20,7 @@ import {
   updateMajorCategory,
 } from '../../api/services'
 import { useModalRecord } from './useModalRecord'
-import {
-  normalizeTableFilters,
-  selectColumnFilter,
-  textColumnFilter,
-  useResizableColumns,
-} from '../../components/DataTableControls'
+import SmartDataTable from '../../components/SmartDataTable'
 
 const matchTypeOptions = [
   { label: '包含匹配', value: 'contains' },
@@ -123,14 +117,14 @@ export default function MajorDictionaryTab() {
       dataIndex: 'code',
       width: 170,
       fixed: 'left',
-      ...textColumnFilter('筛选编码'),
+      filter: { type: 'text', param: 'code', placeholder: '筛选编码' },
     },
-    { title: '名称', dataIndex: 'name', width: 180, ...textColumnFilter('筛选名称') },
+    { title: '名称', dataIndex: 'name', width: 180, filter: { type: 'text', param: 'name', placeholder: '筛选名称' } },
     {
       title: '说明',
       dataIndex: 'description',
       ellipsis: true,
-      ...textColumnFilter('筛选说明'),
+      filter: { type: 'text', param: 'description', placeholder: '筛选说明' },
     },
     { title: '别名数', dataIndex: 'alias_count', width: 90 },
     { title: '排序', dataIndex: 'sort_order', width: 80 },
@@ -138,10 +132,10 @@ export default function MajorDictionaryTab() {
       title: '状态',
       dataIndex: 'is_active',
       width: 90,
-      ...selectColumnFilter([
-        { value: 'true', text: '启用' },
-        { value: 'false', text: '停用' },
-      ]),
+      filter: { type: 'select', param: 'is_active', options: [
+        { value: 'true', label: '启用' },
+        { value: 'false', label: '停用' },
+      ] },
       render: (value) => <StatusTag active={value} />,
     },
     {
@@ -189,30 +183,26 @@ export default function MajorDictionaryTab() {
       dataIndex: 'name',
       width: 180,
       fixed: 'left',
-      ...textColumnFilter('筛选专业名称'),
+      filter: { type: 'text', param: 'name', placeholder: '筛选专业名称' },
     },
     {
       title: '规范化名称',
       dataIndex: 'normalized_name',
       width: 150,
-      ...textColumnFilter('筛选规范化名称'),
+      filter: { type: 'text', param: 'normalized_name', placeholder: '筛选规范化名称' },
     },
     {
       title: '所属大类',
       key: 'category',
       dataIndex: 'category_name',
       width: 180,
-      ...selectColumnFilter(
-        categories.map((category) => ({ value: category.id, text: category.name })),
-      ),
+      filter: { type: 'select', param: 'category', options: categories.map((category) => ({ value: category.id, label: category.name })) },
     },
     {
       title: '匹配方式',
       dataIndex: 'match_type',
       width: 110,
-      ...selectColumnFilter(
-        matchTypeOptions.map((item) => ({ value: item.value, text: item.label })),
-      ),
+      filter: { type: 'select', param: 'match_type', options: matchTypeOptions },
       render: (value) =>
         value === 'exact' ? <Tag color="blue">精确</Tag> : <Tag color="cyan">包含</Tag>,
     },
@@ -220,23 +210,21 @@ export default function MajorDictionaryTab() {
       title: '来源',
       dataIndex: 'source',
       width: 100,
-      ...selectColumnFilter(
-        sourceOptions.map((item) => ({ value: item.value, text: item.label })),
-      ),
+      filter: { type: 'select', param: 'source', options: sourceOptions },
       render: (value) => {
         const option = sourceOptions.find((item) => item.value === value)
         return option?.label || value || '-'
       },
     },
-    { title: '备注', dataIndex: 'note', ellipsis: true, ...textColumnFilter('筛选备注') },
+    { title: '备注', dataIndex: 'note', ellipsis: true, filter: { type: 'text', param: 'note', placeholder: '筛选备注' } },
     {
       title: '状态',
       dataIndex: 'is_active',
       width: 90,
-      ...selectColumnFilter([
-        { value: 'true', text: '启用' },
-        { value: 'false', text: '停用' },
-      ]),
+      filter: { type: 'select', param: 'is_active', options: [
+        { value: 'true', label: '启用' },
+        { value: 'false', label: '停用' },
+      ] },
       render: (value) => <StatusTag active={value} />,
     },
     {
@@ -266,17 +254,6 @@ export default function MajorDictionaryTab() {
       ),
     },
   ]
-  const {
-    columns: categoryColumns,
-    components: categoryComponents,
-    scrollX: categoryScrollX,
-  } = useResizableColumns(categoryBaseColumns)
-  const {
-    columns: aliasColumns,
-    components: aliasComponents,
-    scrollX: aliasScrollX,
-  } = useResizableColumns(aliasBaseColumns)
-
   const categoryInitialValues = categoryModal.record || {
     is_active: true,
     sort_order: 0,
@@ -294,22 +271,26 @@ export default function MajorDictionaryTab() {
         is_active: true,
       }
 
+  const requestAliases = useCallback(
+    (params) => fetchMajorAliases({
+      ...params,
+      category: selectedCategory?.id || params.category,
+    }),
+    [selectedCategory?.id],
+  )
+
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <ProTable
+      <SmartDataTable
+        tableId="major-categories"
         actionRef={categoryActionRef}
         rowKey="id"
-        search={false}
-        columns={categoryColumns}
-        components={categoryComponents}
-        scroll={{ x: categoryScrollX }}
-        pagination={{ defaultPageSize: 10, showSizeChanger: true }}
+        columns={categoryBaseColumns}
+        request={fetchMajorCategories}
         rowClassName={(record) =>
           selectedCategory?.id === record.id ? 'ant-table-row-selected' : ''
         }
-        onRow={(record) => ({
-          onClick: () => setSelectedCategory(record),
-        })}
+        onRowClick={(record) => setSelectedCategory(record)}
         toolBarRender={() => [
           <Button
             icon={<PlusOutlined />}
@@ -320,35 +301,14 @@ export default function MajorDictionaryTab() {
             新增大类
           </Button>,
         ]}
-        request={async (params, _sort, filters) => {
-          const { current, pageSize } = params
-          const tableFilters = normalizeTableFilters(filters, [
-            'code',
-            'name',
-            'description',
-            'is_active',
-          ])
-          const { data } = await fetchMajorCategories({
-            page: current,
-            page_size: pageSize,
-            ...tableFilters,
-          })
-          return {
-            data: data?.results || [],
-            total: data?.count || 0,
-            success: true,
-          }
-        }}
       />
 
-      <ProTable
+      <SmartDataTable
+        tableId="major-aliases"
         actionRef={aliasActionRef}
         rowKey="id"
-        search={false}
-        columns={aliasColumns}
-        components={aliasComponents}
-        scroll={{ x: aliasScrollX }}
-        pagination={{ defaultPageSize: 10, showSizeChanger: true }}
+        columns={aliasBaseColumns}
+        request={requestAliases}
         headerTitle={
           selectedCategory ? (
             <Space>
@@ -370,29 +330,6 @@ export default function MajorDictionaryTab() {
             新增别名
           </Button>,
         ]}
-        request={async (params, _sort, filters) => {
-          const { current, pageSize } = params
-          const tableFilters = normalizeTableFilters(filters, [
-            'category',
-            'name',
-            'normalized_name',
-            'match_type',
-            'source',
-            'note',
-            'is_active',
-          ])
-          const { data } = await fetchMajorAliases({
-            page: current,
-            page_size: pageSize,
-            ...tableFilters,
-            category: selectedCategory?.id || tableFilters.category,
-          })
-          return {
-            data: data?.results || [],
-            total: data?.count || 0,
-            success: true,
-          }
-        }}
       />
 
       <ModalForm

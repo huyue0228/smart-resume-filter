@@ -1,7 +1,17 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Badge, Button, Card, Drawer, Empty, Popconfirm, Progress, Space, Tag, Typography, message } from 'antd'
-import { SyncOutlined } from '@ant-design/icons'
+import { Alert, Badge, Button, Card, Drawer, Empty, Popconfirm, Progress, Space, Tag, Tooltip, Typography, message } from 'antd'
+import {
+  CheckCircleOutlined,
+  ClockCircleOutlined,
+  ExclamationCircleOutlined,
+  ReloadOutlined,
+  RobotOutlined,
+  StopOutlined,
+  SyncOutlined,
+  UserOutlined,
+} from '@ant-design/icons'
 import { cancelPipelineRun, fetchPipelineRuns } from '../api/services'
+import './ProcessingTaskCenter.css'
 
 const ACTIVE_STATUSES = new Set(['pending', 'running', 'waiting_conflict', 'cancelling'])
 const STATUS_META = {
@@ -15,15 +25,29 @@ const STATUS_META = {
   failed: { text: '失败', color: 'error' },
   undone: { text: '已撤销', color: 'default' },
 }
+const FINISHED_STATUSES = new Set(['success', 'partial_failed', 'failed', 'cancelled', 'undone'])
+const ATTENTION_STATUSES = new Set(['partial_failed', 'failed'])
 
 function formatTime(value) {
   return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '-'
 }
 
+function formatDuration(value) {
+  const totalSeconds = Math.max(0, Math.floor(Number(value) || 0))
+  const days = Math.floor(totalSeconds / 86400)
+  const hours = Math.floor((totalSeconds % 86400) / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  if (days) return `${days}天${hours ? `${hours}小时` : ''}`
+  if (hours) return `${hours}小时${minutes ? `${minutes}分` : ''}`
+  if (minutes) return `${minutes}分${seconds ? `${seconds}秒` : ''}`
+  return `${seconds}秒`
+}
+
 function progressOf(run) {
   const stages = run.stages || []
   if (stages.length) {
-    const completed = stages.filter((stage) => ['success', 'partial_failed'].includes(stage.status)).length
+    const completed = stages.filter((stage) => ['success', 'partial_failed', 'cancelled'].includes(stage.status)).length
     const active = stages.find((stage) => stage.status === 'running')
     const activePart = active?.total_count
       ? Math.min(1, Number(active.processed_count || 0) / Number(active.total_count))
@@ -55,30 +79,94 @@ function TaskCard({ run, cancellingId, onCancel }) {
   const stage = (run.stages || []).find((item) => item.step === run.current_stage)
   const status = STATUS_META[run.status] || { text: run.status || '未知', color: 'default' }
   const scopeSummary = scopeSummaryText(run)
+  const hasResults = Boolean(
+    run.success_count || run.failed_count || run.review_count || run.dispatch_count || run.archive_count
+      || run.skipped_count || run.cancelled_count,
+  )
   return (
-    <Card size="small" style={{ marginBottom: 12 }}>
-      <Space direction="vertical" size={6} style={{ width: '100%' }}>
-        <Space style={{ justifyContent: 'space-between', width: '100%' }}>
-          <Typography.Text strong>{taskTitle(run)}</Typography.Text>
-          <Tag color={status.color}>{status.text}</Tag>
-        </Space>
-        <Typography.Text type="secondary">
-          {run.created_by_username_snapshot || '系统'} · {run.mode === 'ai' ? 'AI 分配' : '规则分配'}
-        </Typography.Text>
-        <Progress percent={percent} size="small" status={run.status === 'failed' ? 'exception' : undefined} />
-        <Typography.Text type="secondary">
-          {stage?.label || run.message || '等待任务开始'}
-          {run.total_count ? `：${run.processed_count || 0} / ${run.total_count}` : ''}
-        </Typography.Text>
-        {scopeSummary ? <Typography.Text type="secondary">范围：{scopeSummary}</Typography.Text> : null}
-        {(run.failed_count || run.review_count || run.dispatch_count || run.archive_count) ? (
-          <Typography.Text type="secondary">
-            成功 {run.success_count || 0} · 失败 {run.failed_count || 0} · 待复核 {run.review_count || 0} · 待下发 {run.dispatch_count || 0} · 归档 {run.archive_count || 0}
+    <Card
+      size="small"
+      className={`processing-task-card ${ACTIVE_STATUSES.has(run.status) ? 'is-active' : ''}`}
+    >
+      <Space direction="vertical" size={12} className="processing-task-card-content">
+        <div className="processing-task-heading">
+          <div className="processing-task-title-wrap">
+            <Typography.Text strong className="processing-task-title">
+              {taskTitle(run)}
+            </Typography.Text>
+            <Typography.Text type="secondary" className="processing-task-id">
+              #{run.id}
+            </Typography.Text>
+          </div>
+          <Tag color={status.color} bordered={false} className="processing-task-status">
+            {status.text}
+          </Tag>
+        </div>
+
+        <div className="processing-task-meta">
+          <span><UserOutlined /> {run.created_by_username_snapshot || '系统'}</span>
+          <span><RobotOutlined /> {run.mode === 'ai' ? 'AI 分配' : '规则分配'}</span>
+          <span>提交于 {formatTime(run.created_at)}</span>
+        </div>
+
+        <div className="processing-task-primary-metrics">
+          <div>
+            <span className="processing-task-metric-label">任务耗时</span>
+            <strong><ClockCircleOutlined /> {formatDuration(run.elapsed_seconds)}</strong>
+          </div>
+          <div>
+            <span className="processing-task-metric-label">处理进度</span>
+            <strong>{percent}%</strong>
+          </div>
+        </div>
+
+        <Progress
+          percent={percent}
+          showInfo={false}
+          size="small"
+          status={run.status === 'failed' ? 'exception' : run.status === 'success' ? 'success' : undefined}
+        />
+
+        <div className="processing-task-stage">
+          <Typography.Text>
+            {stage?.label || run.message || '等待任务开始'}
+          </Typography.Text>
+          {run.total_count ? (
+            <Typography.Text type="secondary">
+              {run.processed_count || 0} / {run.total_count}
+            </Typography.Text>
+          ) : null}
+        </div>
+
+        {scopeSummary ? (
+          <Typography.Text type="secondary" className="processing-task-scope">
+            范围：{scopeSummary}
           </Typography.Text>
         ) : null}
-        {run.error ? <Typography.Text type="danger">{run.error}</Typography.Text> : null}
+
+        {hasResults ? (
+          <div className="processing-task-results">
+            <span><strong>{run.success_count || 0}</strong>成功</span>
+            <span className={run.failed_count ? 'is-danger' : ''}><strong>{run.failed_count || 0}</strong>失败</span>
+            <span><strong>{run.review_count || 0}</strong>待复核</span>
+            <span><strong>{run.dispatch_count || 0}</strong>待下发</span>
+            <span><strong>{run.archive_count || 0}</strong>归档</span>
+            <span><strong>{run.skipped_count || 0}</strong>跳过</span>
+            <span><strong>{run.cancelled_count || 0}</strong>取消</span>
+          </div>
+        ) : null}
+
+        {run.mode === 'ai' && run.ai_concurrency_limit ? (
+          <Typography.Text type="secondary" className="processing-task-audit">
+            AI 自适应并发 {run.ai_effective_concurrency || 1}/{run.ai_concurrency_limit}
+            {' · '}模型重试 {run.ai_retry_count || 0}
+            {' · '}429 限流 {run.ai_rate_limit_count || 0}
+          </Typography.Text>
+        ) : null}
+
+        {run.error ? <Alert type="error" showIcon message="任务异常" description={run.error} /> : null}
         {run.cancel_requested_at ? (
-          <Typography.Text type="secondary">
+          <Typography.Text type="secondary" className="processing-task-audit">
             取消请求 {formatTime(run.cancel_requested_at)} · {run.cancelled_at ? `已取消 ${formatTime(run.cancelled_at)}` : '等待安全停止'} · 操作人 {run.cancelled_by_username_snapshot || '系统'}
           </Typography.Text>
         ) : null}
@@ -91,7 +179,7 @@ function TaskCard({ run, cancellingId, onCancel }) {
             okButtonProps={{ danger: true }}
             onConfirm={() => onCancel(run)}
           >
-            <Button danger size="small" loading={cancellingId === run.id}>
+            <Button danger size="small" icon={<StopOutlined />} loading={cancellingId === run.id}>
               取消任务
             </Button>
           </Popconfirm>
@@ -123,11 +211,17 @@ export default function ProcessingTaskCenter() {
   useEffect(() => {
     refresh()
     const timer = window.setInterval(refresh, 2000)
-    return () => window.clearInterval(timer)
+    window.addEventListener('srf:processing-run-created', refresh)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('srf:processing-run-created', refresh)
+    }
   }, [])
 
   const activeRuns = useMemo(() => runs.filter((run) => ACTIVE_STATUSES.has(run.status)), [runs])
   const visibleRuns = useMemo(() => [...activeRuns, ...runs.filter((run) => !ACTIVE_STATUSES.has(run.status))], [activeRuns, runs])
+  const finishedCount = useMemo(() => runs.filter((run) => FINISHED_STATUSES.has(run.status)).length, [runs])
+  const attentionCount = useMemo(() => runs.filter((run) => ATTENTION_STATUSES.has(run.status)).length, [runs])
 
   const cancel = async (run) => {
     setCancellingId(run.id)
@@ -148,14 +242,50 @@ export default function ProcessingTaskCenter() {
         </Button>
       </Badge>
       <Drawer
-        title="处理任务中心"
+        title={(
+          <div className="processing-task-drawer-title">
+            <span>处理任务中心</span>
+            <Typography.Text type="secondary">最近 {runs.length} 条任务</Typography.Text>
+          </div>
+        )}
         open={open}
         onClose={() => setOpen(false)}
         mask={false}
-        width={440}
-        extra={<Button size="small" onClick={refresh} loading={loading}>刷新</Button>}
+        width="min(520px, 100vw)"
+        className="processing-task-drawer"
+        extra={(
+          <Tooltip title="刷新任务">
+            <Button
+              aria-label="刷新任务"
+              icon={<ReloadOutlined />}
+              onClick={refresh}
+              loading={loading}
+            />
+          </Tooltip>
+        )}
       >
-        {visibleRuns.length ? visibleRuns.map((run) => <TaskCard key={run.id} run={run} cancellingId={cancellingId} onCancel={cancel} />) : <Empty description="暂无处理任务" />}
+        <div className="processing-task-summary" aria-label="最近任务概览">
+          <div>
+            <SyncOutlined spin={Boolean(activeRuns.length)} />
+            <span>进行中</span>
+            <strong>{activeRuns.length}</strong>
+          </div>
+          <div>
+            <CheckCircleOutlined />
+            <span>已结束</span>
+            <strong>{finishedCount}</strong>
+          </div>
+          <div className={attentionCount ? 'has-attention' : ''}>
+            <ExclamationCircleOutlined />
+            <span>需关注</span>
+            <strong>{attentionCount}</strong>
+          </div>
+        </div>
+        <div className="processing-task-list">
+          {visibleRuns.length ? visibleRuns.map((run) => (
+            <TaskCard key={run.id} run={run} cancellingId={cancellingId} onCancel={cancel} />
+          )) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无处理任务" />}
+        </div>
       </Drawer>
     </>
   )

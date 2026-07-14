@@ -1,10 +1,202 @@
 """Celery 任务包装。Demo eager 同步执行；生产用 Redis broker 异步。"""
-from celery import shared_task
+import logging
+import random
+import uuid
+from datetime import timedelta
 
-from . import runner
+from celery import shared_task
+from celery.exceptions import MaxRetriesExceededError, Retry
+from django.db import transaction
+from django.utils import timezone
+
+from apps.core import models as m
+
+from . import ai_config, runner
+from .services import allocate
+
+
+logger = logging.getLogger(__name__)
 
 
 @shared_task
 def execute_runs_sequence_task(run_ids):
-    """同一批候选人的 Rule/AI 任务按顺序运行，保留两份独立任务进度。"""
+    """依次领取已创建的运行；当前入口通常只提交全局模式对应的一条运行。"""
     return [runner.execute_run(run_id).id for run_id in run_ids]
+
+
+@shared_task(
+    bind=True,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    max_retries=20,
+)
+def dispatch_ai_run_task(self, run_id):
+    """按有界窗口持续向专用 AI 队列补充候选人任务。"""
+    now = timezone.now()
+    runtime = ai_config.get_ai_runtime_config()
+    stale_before = now - timedelta(seconds=max(300, runtime.timeout_seconds * 2))
+    try:
+        with transaction.atomic():
+            run = m.ProcessingRun.objects.select_for_update().get(pk=run_id)
+            if run.status not in {"running", "cancelling", "waiting_conflict"}:
+                return run.status
+            if run.cancel_requested_at:
+                runner.cancel_unstarted_ai_items(run_id)
+                runner.finalize_ai_run_if_complete(run_id)
+                return "cancelling"
+
+            # 发布后 worker 异常退出可能遗留 queued；令牌保证重复投递仍幂等。
+            run.scope_items.filter(status="queued", queued_at__lt=stale_before).update(
+                status="pending"
+            )
+            window = max(1, runtime.concurrency * 4)
+            active = run.scope_items.filter(
+                status__in=["queued", "processing", "waiting_conflict"]
+            ).count()
+            free = max(0, window - active)
+            items = list(
+                run.scope_items.select_for_update(skip_locked=True)
+                .filter(status="pending")
+                .order_by("candidate_id")[:free]
+            )
+            queued = []
+            for item in items:
+                token = uuid.uuid4()
+                item.status = "queued"
+                item.dispatch_token = token
+                item.queued_at = now
+                item.save(update_fields=["status", "dispatch_token", "queued_at"])
+                # 与状态更新处于同一事务：发布失败会回滚 queued；若进程在发布后
+                # 提交前退出，候选人任务会从 pending 状态接管同一令牌。
+                process_ai_scope_item_task.apply_async(
+                    args=[run_id, item.id, str(token)],
+                    queue="ai",
+                )
+                queued.append((item.id, str(token)))
+            run.last_heartbeat_at = now
+            run.save(update_fields=["last_heartbeat_at"])
+    except Retry:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "AI task dispatch failed run_id=%s error_type=%s",
+            run_id,
+            type(exc).__name__,
+        )
+        if self.request.retries >= 20:
+            now = timezone.now()
+            m.ProcessingRun.objects.filter(pk=run_id).update(
+                status="failed",
+                message="AI 候选人任务无法投递，请检查 Celery broker 和 AI worker",
+                error="ai_task_dispatch_failed",
+                current_stage="",
+                finished_at=now,
+                last_heartbeat_at=now,
+            )
+            m.ProcessingRunStage.objects.filter(
+                run_id=run_id, step="step2", status="running"
+            ).update(
+                status="failed",
+                error="ai_task_dispatch_failed",
+                finished_at=now,
+            )
+            return "failed"
+        raise self.retry(countdown=2)
+
+    if runner.finalize_ai_run_if_complete(run_id):
+        return "finished"
+    return f"queued:{len(queued)}"
+
+
+def _mark_infrastructure_failure(run_id, scope_item_id):
+    with transaction.atomic():
+        item = m.ProcessingRunScopeItem.objects.select_for_update().get(
+            pk=scope_item_id, run_id=run_id
+        )
+        if item.status in allocate.AI_SCOPE_TERMINAL_STATUSES:
+            return {"status": item.status, "already_terminal": True}
+        allocate.release_ai_scope_claim(scope_item_id)
+        item.status = "failed"
+        item.error_code = "task_execution_error"
+        item.error_message = "AI 候选人任务多次异常，请检查 worker 日志后重试"
+        item.finished_at = timezone.now()
+        item.save(
+            update_fields=[
+                "status",
+                "error_code",
+                "error_message",
+                "finished_at",
+            ]
+        )
+        return {"status": "failed"}
+
+
+@shared_task(
+    bind=True,
+    queue="ai",
+    acks_late=True,
+    reject_on_worker_lost=True,
+    max_retries=10000,
+)
+def process_ai_scope_item_task(
+    self,
+    run_id,
+    scope_item_id,
+    dispatch_token,
+    failure_retries=0,
+):
+    """处理一名候选人；同候选人冲突时释放 worker 并延迟重试。"""
+    item = m.ProcessingRunScopeItem.objects.filter(
+        pk=scope_item_id,
+        run_id=run_id,
+    ).first()
+    if item and item.status == "pending":
+        m.ProcessingRunScopeItem.objects.filter(
+            pk=item.id,
+            status="pending",
+        ).update(
+            status="queued",
+            dispatch_token=dispatch_token,
+            queued_at=timezone.now(),
+        )
+        item.refresh_from_db()
+    if not item or str(item.dispatch_token) != str(dispatch_token):
+        return "stale"
+    try:
+        result = allocate.process_ai_scope_item(run_id, scope_item_id)
+        if result.get("status") == "waiting_conflict":
+            raise self.retry(countdown=2 + random.uniform(0, 1))
+    except MaxRetriesExceededError:
+        result = _mark_infrastructure_failure(run_id, scope_item_id)
+        runner.record_ai_scope_outcome(
+            run_id,
+            result,
+            infrastructure_error=f"scope_item={scope_item_id} conflict retries exhausted",
+        )
+    except Retry:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 只记录类型，不记录可能含密钥的原文
+        logger.warning(
+            "AI candidate task failed run_id=%s scope_item_id=%s error_type=%s",
+            run_id,
+            scope_item_id,
+            type(exc).__name__,
+        )
+        allocate.release_ai_scope_claim(scope_item_id)
+        if failure_retries < 5:
+            raise self.retry(
+                countdown=min(30, 2 ** failure_retries),
+                kwargs={"failure_retries": failure_retries + 1},
+            )
+        result = _mark_infrastructure_failure(run_id, scope_item_id)
+        runner.record_ai_scope_outcome(
+            run_id,
+            result,
+            infrastructure_error=f"scope_item={scope_item_id} task_execution_error",
+        )
+    else:
+        runner.record_ai_scope_outcome(run_id, result)
+
+    if not runner.finalize_ai_run_if_complete(run_id):
+        dispatch_ai_run_task.delay(run_id)
+    return result.get("status")

@@ -49,6 +49,9 @@ export function updateAIConnection(body) {
 export function testAIConnection() {
   return client.post('/ai-connection/test/')
 }
+export function fetchAIModels(body) {
+  return client.post('/ai-connection/models/', body)
+}
 export function fetchAllocationMode() {
   return client.get('/allocation-mode/')
 }
@@ -154,6 +157,9 @@ export function exportCandidates(ids, params) {
 export function fetchJobs(params) {
   return client.get('/jobs/', { params })
 }
+export function fetchJobFilterOptions() {
+  return client.get('/jobs/filter-options/')
+}
 export function createJob(body) {
   return client.post('/jobs/', body)
 }
@@ -166,11 +172,17 @@ export function deleteJob(id) {
 export function fetchSchools(params) {
   return client.get('/schools/', { params })
 }
+export function fetchSchoolFilterOptions() {
+  return client.get('/schools/filter-options/')
+}
 export function fetchDepartments(params) {
   return client.get('/departments/', { params })
 }
 export function fetchContacts(params) {
   return client.get('/contacts/', { params })
+}
+export function fetchContactFilterOptions() {
+  return client.get('/contacts/filter-options/')
 }
 export function deleteContact(id) {
   return client.delete(`/contacts/${id}/`)

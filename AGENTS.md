@@ -16,6 +16,8 @@ Tech stack:
 
 The four design documents under `docs/` are the source of truth for product and implementation decisions. Before changing backend, frontend, database models, or workflow behavior, read the relevant design document first and keep implementation aligned with it.
 
+Routine bug fixes, UI polish, tests, and internal refactors do not require an automatic documentation sync. Update the design documents only when the change introduces or changes a product requirement, public API contract, database schema, architecture/workflow behavior, deployment process, or when the user explicitly asks for documentation changes. Do not automatically stage, commit, or push code or documentation; only do so when the user explicitly requests it.
+
 When modifying design documents under `docs/`:
 
 1. Read the current related docs before editing; do not rely on memory.
@@ -23,7 +25,7 @@ When modifying design documents under `docs/`:
 3. Ask the document-sync agent to check and synchronize related wording across `需求描述.md`, `后端设计.md`, `数据库设计.md`, and `前端设计.md`.
 4. Ask the same persistent reviewer agent to review the document changes. Reuse the existing reviewer in the session; only create a new reviewer if the old one is unavailable.
 5. Run `git diff --check -- docs/需求描述.md docs/后端设计.md docs/前端设计.md docs/数据库设计.md` and use `rg` when needed to check for stale wording.
-6. Stage and commit the involved docs after review passes. Do not push unless the user explicitly asks.
+6. Leave the reviewed documentation changes in the working tree unless the user explicitly asks to stage, commit, or push them.
 
 Do not create additional design documents casually. Prefer updating the four established documents to avoid multi-document drift.
 
@@ -61,6 +63,8 @@ docker compose up
 
 Compose uses project Dockerfiles now: backend/worker share `smart-resume-filter-backend:${APP_VERSION:-latest}` based on Python 3.12.3, frontend uses a built React bundle served by Nginx, and db/redis are wrapped as project images for offline deployment. See README for server deployment details.
 
+For an amd64 offline release and external-drive handoff, use the project Skill at `skills/smart-resume-offline-release/SKILL.md`; its single entry point builds, verifies, packages, and copies the release without modifying the current Git worktree.
+
 ## Verification
 
 Use focused verification for the files changed:
@@ -83,7 +87,7 @@ Use focused verification for the files changed:
 - Entry point: `backend/apps/pipeline/runner.py`; API submits `ProcessingRun` records through `create_runs()` and workers execute them through `execute_run()`.
 - The `all` order is intentionally `step3`, `step4`, `step1`, `step2`; do not assume numeric order. Step3/Step4 prepare or verify prerequisite data before the candidate flow. A normal resume upload runs `step1`, then `step2`.
 - Step implementations live in `backend/apps/pipeline/services/`.
-- `strategies.py` owns deterministic Rule matching. Formal AI screening lives under `backend/apps/pipeline/ai/` and must never fall back to Rule. Model profile templates live in `backend/config/ai_models.json`; the only runtime model connection source is the `settings.manage_ai_connection`-protected system settings page. AI mode requires a text-extractable PDF.
+- `strategies.py` owns deterministic Rule matching. Formal AI screening lives under `backend/apps/pipeline/ai/` and must never fall back to Rule. The only runtime model connection source is the `settings.manage_ai_connection`-protected system settings page; the shared intranet Base URL, selectable API style, model ID and optional access token are stored there without provider/Profile templates. The backend reads OpenAI-compatible `GET /models` for model choices while keeping the field directly editable. AI mode requires a text-extractable PDF.
 - AI Agent screening is a hard-rule-constrained recommendation flow: it only evaluates the candidate's current effective volunteer, never skips volunteer order or school admission rules, and never automatically falls back to Rule after AI failure.
 - AI failures, timeouts, parse failures, invalid output, missing references, and guardrail blocks should be recorded for HR handling. HR chooses retry AI, switch to Rule, manual assignment, or archive handling.
 - Frontend submits one `/api/pipeline/run/` request with non-empty `modes` and optional `scope` via `frontend/src/components/useProcessRunner.jsx`; the backend creates independent runs and executes them through the sequential Celery orchestration.

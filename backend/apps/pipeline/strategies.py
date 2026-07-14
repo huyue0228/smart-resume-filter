@@ -192,6 +192,14 @@ class RuleStrategy:
             )
         return sorted(candidates, key=lambda item: item[0])
 
+    def match_current_volunteer_job(self, resume, jobs):
+        """从已按当前志愿定向查询的岗位中稳定选择唯一岗位，不校验专业。"""
+        pos = (resume.position_name or "").strip()
+        if not pos:
+            return None
+        candidates = self._candidate_jobs(resume, jobs, pos)
+        return candidates[0][1] if candidates else None
+
     def _classify_if_major_matched(self, resume, job, name_reason):
         """岗位名命中后再校验专业，不通过则继续尝试下一个岗位。"""
         matched, reason = self._major_match_reason(resume, job)

@@ -1,5 +1,5 @@
 import { useRef } from 'react'
-import { ModalForm, ProFormSwitch, ProFormText, ProTable } from '@ant-design/pro-components'
+import { ModalForm, ProFormSwitch, ProFormText } from '@ant-design/pro-components'
 import { Button, Popconfirm, Space, Tag, message } from 'antd'
 import {
   createSchoolTag,
@@ -8,12 +8,8 @@ import {
   updateSchoolTag,
 } from '../../api/services'
 import { useModalRecord } from './useModalRecord'
-import {
-  normalizeTableFilters,
-  selectColumnFilter,
-  textColumnFilter,
-  useResizableColumns,
-} from '../../components/DataTableControls'
+import SchoolTagBadge from '../../components/SchoolTagBadge'
+import SmartDataTable from '../../components/SmartDataTable'
 
 export default function SchoolTagsTab() {
   const actionRef = useRef()
@@ -43,27 +39,33 @@ export default function SchoolTagsTab() {
       dataIndex: 'code',
       width: 150,
       fixed: 'left',
-      ...textColumnFilter('筛选编码'),
+      filter: { type: 'text', param: 'code', placeholder: '筛选编码' },
     },
-    { title: '名称', dataIndex: 'name', width: 160, ...textColumnFilter('筛选名称') },
+    {
+      title: '名称',
+      dataIndex: 'name',
+      width: 160,
+      filter: { type: 'text', param: 'name', placeholder: '筛选名称' },
+      render: (value) => <SchoolTagBadge value={value} />,
+    },
     {
       title: '默认标签',
       dataIndex: 'is_default',
       width: 100,
-      ...selectColumnFilter([
-        { value: 'true', text: '默认' },
-        { value: 'false', text: '非默认' },
-      ]),
+      filter: { type: 'select', param: 'is_default', options: [
+        { value: 'true', label: '默认' },
+        { value: 'false', label: '非默认' },
+      ] },
       render: (value) => (value ? <Tag color="blue">默认</Tag> : '-'),
     },
     {
       title: '状态',
       dataIndex: 'is_active',
       width: 90,
-      ...selectColumnFilter([
-        { value: 'true', text: '启用' },
-        { value: 'false', text: '停用' },
-      ]),
+      filter: { type: 'select', param: 'is_active', options: [
+        { value: 'true', label: '启用' },
+        { value: 'false', label: '停用' },
+      ] },
       render: (value) =>
         value ? <Tag color="green">启用</Tag> : <Tag color="default">停用</Tag>,
     },
@@ -93,42 +95,19 @@ export default function SchoolTagsTab() {
       ),
     },
   ]
-  const { columns, components, scrollX } = useResizableColumns(baseColumns)
-
   return (
     <>
-      <ProTable
+      <SmartDataTable
+        tableId="school-tags"
         actionRef={actionRef}
         rowKey="id"
-        search={false}
-        columns={columns}
-        components={components}
-        scroll={{ x: scrollX }}
-        pagination={{ defaultPageSize: 10, showSizeChanger: true }}
+        columns={baseColumns}
+        request={fetchSchoolTags}
         toolBarRender={() => [
           <Button key="create" type="primary" onClick={() => modal.open()}>
             新增标签
           </Button>,
         ]}
-        request={async (params, _sort, filters) => {
-          const { current, pageSize } = params
-          const tableFilters = normalizeTableFilters(filters, [
-            'code',
-            'name',
-            'is_default',
-            'is_active',
-          ])
-          const { data } = await fetchSchoolTags({
-            page: current,
-            page_size: pageSize,
-            ...tableFilters,
-          })
-          return {
-            data: data?.results || [],
-            total: data?.count || 0,
-            success: true,
-          }
-        }}
       />
       <ModalForm
         key={modal.record?.id || 'create-tag'}

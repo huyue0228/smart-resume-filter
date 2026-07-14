@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
-import { PageContainer, ProTable } from '@ant-design/pro-components'
+import { PageContainer } from '@ant-design/pro-components'
 import {
   Button,
   Checkbox,
@@ -15,7 +15,13 @@ import {
   Input,
   Popconfirm,
 } from 'antd'
-import { DownloadOutlined, PlayCircleOutlined, UndoOutlined } from '@ant-design/icons'
+import {
+  DeleteOutlined,
+  DownloadOutlined,
+  PlayCircleOutlined,
+  SendOutlined,
+  UndoOutlined,
+} from '@ant-design/icons'
 import {
   deleteCandidate,
   exportCandidates,
@@ -41,18 +47,12 @@ import {
 } from '../api/services'
 import ImportButton from '../components/ImportButton'
 import ResumePreview from '../components/ResumePreview'
-import ResizableTable from '../components/ResizableTable'
+import SchoolTagBadge from '../components/SchoolTagBadge'
+import SmartDataTable from '../components/SmartDataTable'
 import { useProcessRunner } from '../components/useProcessRunner'
 import { useRole } from '../contexts/RoleContext'
-import {
-  normalizeTableFilters,
-  localSelectColumnFilter,
-  localTextColumnFilter,
-  selectColumnFilter,
-  textColumnFilter,
-  useResizableColumns,
-} from '../components/DataTableControls'
 import { downloadBlobFromResponse } from '../utils/download'
+import './ResumesPage.css'
 
 const RESUME_IMPORT_FIELDS = [
   { key: 'resume_list', label: '① 简历信息列表 (.xlsx/.xls/.csv)', accept: '.xlsx,.xls,.csv' },
@@ -85,13 +85,13 @@ const SYSTEM_STATUS_OPTIONS = {
     description: '存在已下发二级/已转派三级尝试，已给业务部门但尚未反馈',
   },
   screening_passed: {
-    text: '筛选通过',
+    text: '通过',
     color: 'success',
     status: 'Success',
     description: '当前流程或最近有效尝试已由业务部门反馈通过',
   },
   screening_rejected: {
-    text: '筛选不通过',
+    text: '不通过',
     color: 'error',
     status: 'Error',
     description: '最近有效尝试已反馈未通过，或全部志愿未通过导致归档',
@@ -135,6 +135,9 @@ export default function ResumesPage() {
   const canViewAgentDecisions = hasPermission('attempt.view_all')
   const canRunPipeline = hasPermission('pipeline.run')
   const canImport = hasPermission('resume.import')
+  const canDispatch = hasPermission('attempt.dispatch')
+  const canExport = hasPermission('resume.view') || hasPermission('attempt.export')
+  const canSelectCandidates = canDispatch || canExport || canImport
   const { run } = useProcessRunner()
   const [undo, setUndo] = useState({ available: false })
   const [detailRecord, setDetailRecord] = useState(null)
@@ -151,9 +154,8 @@ export default function ResumesPage() {
   const [lastQuery, setLastQuery] = useState({})
   const [selectedRowKeys, setSelectedRowKeys] = useState([])
   const [bulkDispatching, setBulkDispatching] = useState(false)
+  const [bulkDeleting, setBulkDeleting] = useState(false)
   const [dispatchingId, setDispatchingId] = useState(null)
-  const [filterOptions, setFilterOptions] = useState({})
-  const [tableFilters, setTableFilters] = useState({})
   const [manualModal, setManualModal] = useState({
     open: false,
     resume: null,
@@ -227,30 +229,14 @@ export default function ResumesPage() {
     }
   }
 
-  const refreshFilterOptions = async () => {
-    try {
-      const { data } = await fetchCandidateFilterOptions()
-      setFilterOptions(data || {})
-    } catch {
-      setFilterOptions({})
-    }
-  }
-
   useEffect(() => {
     if (canImport) refreshUndo()
-    refreshFilterOptions()
     if (canRunPipeline) {
       fetchAllocationMode()
         .then(({ data }) => setAllocationMode(data || { mode: 'rule', ai_enabled: false, ai_ready: false }))
         .catch(() => setAllocationMode({ mode: 'rule', ai_enabled: false, ai_ready: false }))
     }
   }, [canImport, canRunPipeline])
-
-  useEffect(() => {
-    if (Object.keys(tableFilters).length || actionRef.current) {
-      actionRef.current?.reloadAndRest()
-    }
-  }, [tableFilters])
 
   useEffect(() => {
     if (!detailRecord) {
@@ -292,10 +278,11 @@ export default function ResumesPage() {
     setRetryingDecisionId(decision.id)
     try {
       const { data } = await retryAgentDecision(decision.id)
-      setAgentDecisionDetail(data?.decision || null)
+      setAgentDecisionDetail(null)
       await loadAgentDecisions(decision.workflow)
       actionRef.current?.reload()
-      message.success(data?.attempt ? 'AI 已重试并生成分配尝试' : 'AI 已重试，请查看最新决策')
+      window.dispatchEvent(new Event('srf:processing-run-created'))
+      message.success(data?.detail || '已创建 AI 重试任务，请在处理任务中心查看进度')
     } finally {
       setRetryingDecisionId(null)
     }
@@ -349,7 +336,7 @@ export default function ResumesPage() {
       content: selected
         ? `将处理选中的 ${candidateIds.length} 名候选人，仅下发当前有效的待下发记录。`
         : '将按当前简历库筛选条件处理全部候选人，仅下发当前有效的待下发记录。',
-      okText: selected ? '下发选中' : '下发全部',
+      okText: selected ? '下发选中' : '下发当前筛选',
       onOk: async () => {
         setBulkDispatching(true)
         try {
@@ -427,7 +414,7 @@ export default function ResumesPage() {
   // 导入接口已在服务端创建并提交 Step1 → Step2 后台任务，页面无需等待执行完成。
   const handleImported = async (data) => {
     await refreshUndo()
-    await refreshFilterOptions()
+    await actionRef.current?.reloadOptions()
     actionRef.current?.reload()
     if (data?.processing_runs?.length) {
       message.success('简历已导入并提交后台处理，可继续操作并在任务中心查看进度')
@@ -445,7 +432,7 @@ export default function ResumesPage() {
           const { data } = await undoLastImport()
           message.success(data?.detail || '已撤销')
           await refreshUndo()
-          await refreshFilterOptions()
+          await actionRef.current?.reloadOptions()
           actionRef.current?.reload()
         } catch {
           message.error('撤销失败')
@@ -464,7 +451,9 @@ export default function ResumesPage() {
         try {
           await deleteCandidate(record.id)
           message.success('已删除')
-          await refreshFilterOptions()
+          setDetailRecord(null)
+          setSelectedRowKeys((keys) => keys.filter((key) => key !== record.id))
+          await actionRef.current?.reloadOptions()
           actionRef.current?.reload()
         } catch (error) {
           message.error(error?.response?.data?.detail || '删除失败')
@@ -473,14 +462,60 @@ export default function ResumesPage() {
     })
   }
 
-  const handleExport = async () => {
+  const handleBulkDelete = () => {
+    if (!selectedRowKeys.length) return
+    const candidateIds = [...selectedRowKeys]
+    Modal.confirm({
+      title: `删除选中的 ${candidateIds.length} 名候选人？`,
+      content: '系统将逐条校验；已产生分配、反馈、AI 决策或转派历史的候选人会保留并报告失败。',
+      okText: '删除选中',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        setBulkDeleting(true)
+        const failed = []
+        let deleted = 0
+        try {
+          for (const candidateId of candidateIds) {
+            try {
+              await deleteCandidate(candidateId)
+              deleted += 1
+            } catch (error) {
+              failed.push({
+                id: candidateId,
+                detail: error?.response?.data?.detail || '删除失败',
+              })
+            }
+          }
+          setSelectedRowKeys(failed.map((item) => item.id))
+          if (deleted) {
+            await actionRef.current?.reloadOptions()
+            actionRef.current?.reload()
+          }
+          if (failed.length) {
+            message.warning(
+              `已删除 ${deleted} 名，${failed.length} 名未删除：${failed[0].detail}`,
+            )
+          } else {
+            message.success(`已删除 ${deleted} 名候选人`)
+          }
+        } finally {
+          setBulkDeleting(false)
+        }
+      },
+    })
+  }
+
+  const handleExport = async (candidateIds = []) => {
     setExporting(true)
     try {
-      const resp = await exportCandidates(null, lastQuery)
+      const selected = candidateIds.length > 0
+      const resp = await exportCandidates(selected ? candidateIds : null, selected ? {} : lastQuery)
       const count = Number(resp.headers?.['x-export-count'] ?? 0)
       const missing = Number(resp.headers?.['x-export-missing'] ?? 0)
       if (count === 0 && missing === 0) {
-        message.warning('当前筛选结果暂无可导出的简历文件')
+        message.warning(
+          selected ? '选中的候选人暂无可导出的简历文件' : '当前筛选结果暂无可导出的简历文件',
+        )
       } else {
         downloadBlobFromResponse(resp, 'resumes_export.zip')
         message.success(
@@ -533,39 +568,31 @@ export default function ResumesPage() {
     }
   }
 
-  const selectorOptions = (field, labelFormatter = (value) => value) =>
-    (filterOptions[field] || []).map((value) => ({
-      text: labelFormatter(value),
-      value,
-    }))
-  const toFilterValue = (value) =>
-    Array.isArray(value) ? value.join(',') : value
-  const updateTableFilter = (field, values) => {
-    setTableFilters((previous) => {
-      const next = { ...previous }
-      if (values?.length) {
-        next[field] = values
-      } else {
-        delete next[field]
-      }
-      return next
-    })
-  }
-  const controlledFilter = (field) => ({
-    filteredValue: tableFilters[field] || null,
-  })
-
-  const renderCandidateActions = (record) => {
+  const renderDetailActions = (record) => {
     const attempt = record.current_attempt
-    const canDispatch = hasPermission('attempt.dispatch') && attempt?.status === 'pending_dispatch'
+    const canDispatchAttempt = canDispatch && attempt?.status === 'pending_dispatch'
     const canReview = hasPermission('attempt.dispatch') && attempt?.status === 'pending_review'
     const canAssign = isSecondaryContact && attempt && ['dispatched_l2', 'assigned_l3'].includes(attempt.status) && !attempt.feedback_at
     const canFeedback = isTertiaryContact && attempt?.status === 'assigned_l3' && !attempt.feedback_at
     return (
-      <Space>
-        <a onClick={() => setDetailRecord(record)}>详情</a>
-        {attempt && hasPermission('attempt.export') && (
-          <a onClick={() => handleAttemptExport(attempt)}>导出</a>
+      <Space wrap className="resume-detail-actions">
+        {hasPermission('resume.manual_assign') && record.current_resume && (
+          <Button onClick={() => openManualAssign(record.current_resume)}>
+            手动强制分配当前志愿
+          </Button>
+        )}
+        {canExport && (
+          <Button
+            icon={<DownloadOutlined />}
+            loading={exporting}
+            onClick={() => (
+              hasPermission('resume.view')
+                ? handleExport([record.id])
+                : handleAttemptExport(attempt)
+            )}
+          >
+            导出
+          </Button>
         )}
         {canReview && (
           <Popconfirm title="确认采纳 AI 建议？确认后进入待下发。" onConfirm={() => handleConfirmReview(attempt)}>
@@ -575,12 +602,12 @@ export default function ResumesPage() {
         {canReview && hasPermission('resume.manual_assign') && (
           <Button type="link" size="small" style={{ padding: 0 }} onClick={() => openManualAssign(record.current_resume, attempt)}>转人工</Button>
         )}
-        {canDispatch && (
+        {canDispatchAttempt && (
           <Popconfirm title="确认下发该简历到二级接口人？" onConfirm={() => handleDispatch(attempt)}>
             <Button type="link" size="small" style={{ padding: 0 }} loading={dispatchingId === attempt.id}>下发二级</Button>
           </Popconfirm>
         )}
-        {(canReview || canDispatch) && (
+        {(canReview || canDispatchAttempt) && (
           <Popconfirm title={canReview ? '取消该 AI 复核建议？' : '取消该待下发尝试？'} onConfirm={() => handleCancelAttempt(attempt)}>
             <Button type="link" danger size="small" style={{ padding: 0 }}>取消</Button>
           </Popconfirm>
@@ -601,11 +628,19 @@ export default function ResumesPage() {
           </Button>
         )}
         {hasPermission('resume.import') && (
-          <a style={{ color: '#cf1322' }} onClick={() => handleDelete(record)}>删除</a>
+          <Button danger icon={<DeleteOutlined />} onClick={() => handleDelete(record)}>
+            删除
+          </Button>
         )}
       </Space>
     )
   }
+
+  const requestCandidates = useCallback((params) => {
+    const { page: _page, page_size: _pageSize, ...query } = params
+    setLastQuery(query)
+    return fetchCandidates(params)
+  }, [])
 
   const baseColumns = [
     {
@@ -613,50 +648,35 @@ export default function ResumesPage() {
       dataIndex: 'name',
       fixed: 'left',
       width: 100,
-      ...controlledFilter('name'),
-      ...textColumnFilter('筛选姓名/拼音', (values) => updateTableFilter('name', values)),
+      filter: { type: 'text', param: 'name', pinyin: true, placeholder: '筛选姓名/拼音' },
     },
     {
       title: '最高学历专业',
       dataIndex: 'highest_major',
       width: 130,
       ellipsis: true,
-      ...controlledFilter('highest_major'),
-      ...selectColumnFilter(selectorOptions('highest_major'), true, (values) =>
-        updateTableFilter('highest_major', values),
-      ),
+      filter: { type: 'select', param: 'highest_major_in', multiple: true, options: 'highest_major' },
       render: (_, record) => record.highest_major || '-',
     },
     {
       title: '当前志愿',
       dataIndex: 'current_rank',
       width: 90,
-      ...controlledFilter('current_rank'),
-      ...selectColumnFilter(
-        selectorOptions('current_rank', (value) => `第${value}志愿`),
-        true,
-        (values) => updateTableFilter('current_rank', values),
-      ),
+      filter: { type: 'select', param: 'current_rank_in', multiple: true, options: 'current_rank' },
       render: (_, record) => record.current_rank || '-',
     },
     {
       title: '当前应聘ID',
       dataIndex: 'current_apply_id',
       width: 130,
-      ...controlledFilter('current_apply_id'),
-      ...textColumnFilter('筛选应聘ID', (values) =>
-        updateTableFilter('current_apply_id', values),
-      ),
+      filter: { type: 'text', param: 'current_apply_id', placeholder: '筛选应聘ID' },
       render: (value) => value || '-',
     },
     {
       title: '当前主体',
       dataIndex: 'current_entity',
       width: 120,
-      ...controlledFilter('current_entity'),
-      ...selectColumnFilter(selectorOptions('current_entity'), true, (values) =>
-        updateTableFilter('current_entity', values),
-      ),
+      filter: { type: 'select', param: 'current_entity_in', multiple: true, options: 'current_entity' },
       render: (_, record) => record.current_resume?.entity || '-',
     },
     {
@@ -664,10 +684,7 @@ export default function ResumesPage() {
       dataIndex: 'current_position_name',
       width: 180,
       ellipsis: true,
-      ...controlledFilter('current_position_name'),
-      ...selectColumnFilter(selectorOptions('current_position_name'), true, (values) =>
-        updateTableFilter('current_position_name', values),
-      ),
+      filter: { type: 'select', param: 'current_position_name_in', multiple: true, options: 'current_position_name' },
       render: (_, record) => record.current_resume?.position_name || '-',
     },
     {
@@ -675,78 +692,47 @@ export default function ResumesPage() {
       dataIndex: 'job_department_name',
       width: 130,
       ellipsis: true,
-      ...controlledFilter('job_department_name'),
-      ...selectColumnFilter(selectorOptions('job_department_name'), true, (values) =>
-        updateTableFilter('job_department_name', values),
-      ),
+      filter: { type: 'select', param: 'job_department_name_in', multiple: true, options: 'job_department_name' },
       render: (value) => value || '-',
     },
     {
       title: '岗位类别',
       dataIndex: 'current_job_category',
       width: 110,
-      ...controlledFilter('current_job_category'),
-      ...selectColumnFilter(selectorOptions('current_job_category'), true, (values) =>
-        updateTableFilter('current_job_category', values),
-      ),
+      filter: { type: 'select', param: 'current_job_category_in', multiple: true, options: 'current_job_category' },
       render: (_, record) => record.current_resume?.job_category || '-',
     },
     {
       title: '分配来源',
       dataIndex: 'allocation_source',
       width: 100,
-      ...controlledFilter('allocation_source'),
-      ...selectColumnFilter(
-        Object.entries(SOURCE_TEXT).map(([value, text]) => ({ value, text })),
-        true,
-        (values) => updateTableFilter('allocation_source', values),
-      ),
+      filter: { type: 'select', param: 'allocation_source', multiple: true, options: Object.entries(SOURCE_TEXT).map(([value, label]) => ({ value, label })) },
       render: (_, record) => SOURCE_TEXT[record.current_attempt?.source] || '-',
     },
     {
       title: '二级接口人',
       dataIndex: 'contact_name',
       width: 120,
-      ...controlledFilter('contact_name'),
-      ...textColumnFilter('筛选二级接口人', (values) => updateTableFilter('contact_name', values)),
+      filter: { type: 'text', param: 'contact_name', pinyin: true, placeholder: '筛选二级接口人/拼音' },
       render: (_, record) => record.current_attempt?.contact_name || record.current_attempt?.contact_name_snapshot || '-',
     },
     {
       title: '三级接口人',
       dataIndex: 'sub_contact_name',
       width: 120,
-      ...controlledFilter('sub_contact_name'),
-      ...textColumnFilter('筛选三级接口人', (values) => updateTableFilter('sub_contact_name', values)),
+      filter: { type: 'text', param: 'sub_contact_name', pinyin: true, placeholder: '筛选三级接口人/拼音' },
       render: (_, record) => record.current_attempt?.sub_contact_name || record.current_attempt?.sub_contact_name_snapshot || '-',
-    },
-    {
-      title: '分配状态',
-      dataIndex: 'attempt_status',
-      width: 120,
-      ...controlledFilter('attempt_status'),
-      ...selectColumnFilter(
-        Object.entries(ATTEMPT_STATUS).map(([value, item]) => ({ value, text: item.text })),
-        true,
-        (values) => updateTableFilter('attempt_status', values),
-      ),
-      render: (_, record) => {
-        const status = record.current_attempt?.status
-        return status ? <Tag color={ATTEMPT_STATUS[status]?.color || 'default'}>{ATTEMPT_STATUS[status]?.text || status}</Tag> : '-'
-      },
     },
     {
       title: '院校标签',
       dataIndex: 'school_tag',
       width: 110,
-      ...controlledFilter('school_tag'),
-      ...selectColumnFilter(selectorOptions('school_tag'), true, (values) =>
-        updateTableFilter('school_tag', values),
-      ),
+      filter: { type: 'select', param: 'school_tag_in', multiple: true, options: 'school_tag' },
       render: (_, record) =>
-        record.school_tag ? <Tag color="blue">{record.school_tag}</Tag> : '-',
+        record.school_tag ? <SchoolTagBadge value={record.school_tag} /> : '-',
     },
     {
-      title: '系统简历状态',
+      title: '简历状态',
       dataIndex: 'system_status',
       width: 110,
       valueType: 'select',
@@ -756,15 +742,7 @@ export default function ResumesPage() {
           { text: item.text, status: item.status },
         ]),
       ),
-      ...controlledFilter('system_status'),
-      ...selectColumnFilter(
-        Object.entries(SYSTEM_STATUS_OPTIONS).map(([value, item]) => ({
-          text: item.text,
-          value,
-        })),
-        true,
-        (values) => updateTableFilter('system_status', values),
-      ),
+      filter: { type: 'select', param: 'system_status', multiple: true, options: Object.entries(SYSTEM_STATUS_OPTIONS).map(([value, item]) => ({ value, label: item.text })) },
       render: (_, record) => {
         const status = record.system_status
         const item = SYSTEM_STATUS_OPTIONS[status]
@@ -773,31 +751,6 @@ export default function ResumesPage() {
             <Tag color={item.color}>{item.text}</Tag>
           </Tooltip>
         ) : '-'
-      },
-    },
-    {
-      title: '流程状态',
-      dataIndex: 'workflow_status',
-      width: 110,
-      valueType: 'select',
-      valueEnum: Object.fromEntries(
-        Object.entries(WORKFLOW_STATUS).map(([value, item]) => [
-          value,
-          { text: item.text },
-        ]),
-      ),
-      ...controlledFilter('workflow_status'),
-      ...selectColumnFilter(
-        Object.entries(WORKFLOW_STATUS).map(([value, item]) => ({
-          text: item.text,
-          value,
-        })),
-        true,
-        (values) => updateTableFilter('workflow_status', values),
-      ),
-      render: (value) => {
-        const item = WORKFLOW_STATUS[value]
-        return item ? <Tag color={item.color}>{item.text}</Tag> : '-'
       },
     },
     {
@@ -812,65 +765,109 @@ export default function ResumesPage() {
           { text: item.text },
         ]),
       ),
-      ...controlledFilter('reason_type'),
-      ...selectColumnFilter(
-        Object.entries(REASON_TYPE)
-          .filter(([value]) => value !== 'none')
-          .map(([value, item]) => ({
-            text: item.text,
-            value,
-          })),
-        false,
-        (values) => updateTableFilter('reason_type', values),
-      ),
+      filter: { type: 'select', param: 'reason_type', options: Object.entries(REASON_TYPE).filter(([value]) => value !== 'none').map(([value, item]) => ({ value, label: item.text })) },
       render: (_, record) => {
         const type = record.reason_type || 'none'
         const item = REASON_TYPE[type] || REASON_TYPE.none
+        const reasonText = record.reason_text || '-'
         return (
-          <Space size={4}>
-            <Tag color={item.color}>{item.text}</Tag>
-            <Typography.Text ellipsis style={{ maxWidth: 150 }}>
-              {record.reason_text || '-'}
-            </Typography.Text>
-          </Space>
+          <Tooltip title={reasonText}>
+            <Space size={4}>
+              <Tag color={item.color}>{item.text}</Tag>
+              <Typography.Text ellipsis style={{ maxWidth: 150 }}>
+                {reasonText}
+              </Typography.Text>
+            </Space>
+          </Tooltip>
         )
       },
     },
-    {
-      title: '操作',
-      valueType: 'option',
-      width: 260,
-      fixed: 'right',
-      render: (_, record) => renderCandidateActions(record),
-    },
   ]
-  const { columns, components, scrollX } = useResizableColumns(baseColumns)
-
   return (
     <PageContainer
       title="简历库"
-      content="按候选人聚合展示当前有效志愿；点开详情查看全部投递、分配尝试和反馈。"
+      content="按候选人聚合展示当前有效志愿；单击候选人行查看全部投递、分配尝试和反馈。"
     >
-      <ProTable
+      <SmartDataTable
+        tableId="candidates"
         actionRef={actionRef}
         rowKey="id"
-        columns={columns}
-        components={components}
-        scroll={{ x: scrollX }}
-        pagination={{ defaultPageSize: 10, showSizeChanger: true }}
-        search={false}
+        columns={baseColumns}
+        defaultColumnsState={{
+          current_apply_id: { show: false },
+          sub_contact_name: { show: false },
+        }}
+        filterOptionsRequest={fetchCandidateFilterOptions}
         rowSelection={
-          hasPermission('attempt.dispatch')
+          canSelectCandidates
             ? {
                 selectedRowKeys,
                 onChange: (keys) => setSelectedRowKeys(keys),
+                preserveSelectedRowKeys: true,
               }
             : false
         }
-        tableAlertOptionRender={() => (
-          <Space>
-            <a onClick={() => handleBulkDispatch(selectedRowKeys)}>下发选中</a>
-            <a onClick={() => setSelectedRowKeys([])}>取消选择</a>
+        rowClassName="resume-library-row"
+        onRowClick={(record) => setDetailRecord(record)}
+        batchActions={({ clearSelection }) => (
+          <Space wrap className="resume-selection-actions">
+            {canDispatch && (
+              <Button
+                type="link"
+                size="small"
+                icon={<SendOutlined />}
+                loading={bulkDispatching}
+                onClick={() => handleBulkDispatch(selectedRowKeys)}
+              >
+                下发选中
+              </Button>
+            )}
+            {canDispatch && (
+              <Button
+                type="link"
+                size="small"
+                loading={bulkDispatching}
+                onClick={() => handleBulkDispatch([])}
+              >
+                下发当前筛选
+              </Button>
+            )}
+            {canExport && (
+              <Button
+                type="link"
+                size="small"
+                icon={<DownloadOutlined />}
+                loading={exporting}
+                onClick={() => handleExport(selectedRowKeys)}
+              >
+                导出选中
+              </Button>
+            )}
+            {canExport && (
+              <Button
+                type="link"
+                size="small"
+                loading={exporting}
+                onClick={() => handleExport([])}
+              >
+                导出当前筛选
+              </Button>
+            )}
+            {canImport && (
+              <Button
+                type="link"
+                danger
+                size="small"
+                icon={<DeleteOutlined />}
+                loading={bulkDeleting}
+                onClick={handleBulkDelete}
+              >
+                删除选中
+              </Button>
+            )}
+            <Button type="link" size="small" onClick={clearSelection}>
+              取消选择
+            </Button>
           </Space>
         )}
         toolBarRender={() => [
@@ -898,87 +895,8 @@ export default function ResumesPage() {
           >
             撤销上次上传
           </Button>,
-          hasPermission('attempt.dispatch') && <Button
-            key="dispatch-selected"
-            disabled={!selectedRowKeys.length}
-            loading={bulkDispatching}
-            onClick={() => handleBulkDispatch(selectedRowKeys)}
-          >
-            下发选中{selectedRowKeys.length ? `(${selectedRowKeys.length})` : ''}
-          </Button>,
-          hasPermission('attempt.dispatch') && <Button
-            key="dispatch-all"
-            loading={bulkDispatching}
-            onClick={() => handleBulkDispatch([])}
-          >
-            一键全部下发
-          </Button>,
-          (hasPermission('resume.view') || hasPermission('attempt.export')) && <Button
-            key="export"
-            icon={<DownloadOutlined />}
-            loading={exporting}
-            onClick={handleExport}
-          >
-            导出
-          </Button>,
         ].filter(Boolean)}
-        request={async (params) => {
-          const {
-            current,
-            pageSize,
-          } = params
-          const normalizedFilters = normalizeTableFilters(tableFilters, [
-            'name',
-            'highest_major',
-            'current_rank',
-            'current_apply_id',
-            'current_entity',
-            'current_position_name',
-            'job_department_name',
-            'current_job_category',
-            'school_tag',
-            'system_status',
-            'workflow_status',
-            'reason_type',
-            'allocation_source',
-            'contact_name',
-            'sub_contact_name',
-            'attempt_status',
-          ])
-          const query = {
-            system_status: toFilterValue(normalizedFilters.system_status),
-            name: toFilterValue(normalizedFilters.name),
-            highest_major_in: toFilterValue(normalizedFilters.highest_major),
-            current_rank_in: toFilterValue(normalizedFilters.current_rank),
-            current_apply_id: toFilterValue(normalizedFilters.current_apply_id),
-            current_entity_in: toFilterValue(normalizedFilters.current_entity),
-            current_position_name_in: toFilterValue(normalizedFilters.current_position_name),
-            job_department_name_in: toFilterValue(normalizedFilters.job_department_name),
-            current_job_category_in: toFilterValue(normalizedFilters.current_job_category),
-            school_tag_in: toFilterValue(normalizedFilters.school_tag),
-            workflow_status: toFilterValue(normalizedFilters.workflow_status),
-            reason_type: toFilterValue(normalizedFilters.reason_type),
-            allocation_source: toFilterValue(normalizedFilters.allocation_source),
-            contact_name: toFilterValue(normalizedFilters.contact_name),
-            sub_contact_name: toFilterValue(normalizedFilters.sub_contact_name),
-            attempt_status: toFilterValue(normalizedFilters.attempt_status),
-          }
-          setLastQuery(query)
-          try {
-            const { data } = await fetchCandidates({
-              page: current,
-              page_size: pageSize,
-              ...query,
-            })
-            return {
-              data: data?.results || [],
-              total: data?.count || 0,
-              success: true,
-            }
-          } catch {
-            return { data: [], total: 0, success: false }
-          }
-        }}
+        request={requestCandidates}
       />
       <Modal
         title="处理简历"
@@ -994,7 +912,7 @@ export default function ResumesPage() {
       >
         <Space direction="vertical" size="middle" style={{ width: '100%' }}>
           <Typography.Text>
-            选择需要重新处理的系统简历状态。系统会按当前表格的其它筛选条件限定范围，并保留历史分配与反馈记录。
+            选择需要重新处理的简历状态。系统会按当前表格的其它筛选条件限定范围，并保留历史分配与反馈记录。
           </Typography.Text>
           <Space>
             <Typography.Text>当前系统分配模式：</Typography.Text>
@@ -1035,16 +953,16 @@ export default function ResumesPage() {
                 {detailRecord.highest_major || '-'}
               </Descriptions.Item>
               <Descriptions.Item label="第一学历院校">
-                {detailRecord.first_degree_school || '-'}
-              </Descriptions.Item>
-              <Descriptions.Item label="第一学历标签">
-                {detailRecord.first_degree_platform || '-'}
+                <Space size={6} wrap>
+                  <span>{detailRecord.first_degree_school || '-'}</span>
+                  <SchoolTagBadge value={detailRecord.first_degree_platform} />
+                </Space>
               </Descriptions.Item>
               <Descriptions.Item label="最高学历院校">
-                {detailRecord.highest_degree_school || '-'}
-              </Descriptions.Item>
-              <Descriptions.Item label="最高学历标签">
-                {detailRecord.highest_degree_platform || '-'}
+                <Space size={6} wrap>
+                  <span>{detailRecord.highest_degree_school || '-'}</span>
+                  <SchoolTagBadge value={detailRecord.highest_degree_platform} />
+                </Space>
               </Descriptions.Item>
               <Descriptions.Item label="当前志愿">
                 {detailRecord.current_rank || '-'}
@@ -1055,7 +973,7 @@ export default function ResumesPage() {
               <Descriptions.Item label="岗位部门">
                 {detailRecord.job_department_name || '-'}
               </Descriptions.Item>
-              <Descriptions.Item label="系统简历状态">
+              <Descriptions.Item label="简历状态">
                 {detailRecord.system_status_label || '-'}
               </Descriptions.Item>
               <Descriptions.Item label="流程状态">
@@ -1071,71 +989,51 @@ export default function ResumesPage() {
               </Descriptions.Item>
             </Descriptions>
 
-            {hasPermission('resume.manual_assign') && detailRecord.current_resume && (
-              <Button
-                style={{ marginTop: 16 }}
-                onClick={() => openManualAssign(detailRecord.current_resume)}
-              >
-                手动强制分配当前志愿
-              </Button>
-            )}
+            {renderDetailActions(detailRecord)}
 
-            <ResizableTable
+            <SmartDataTable
+              tableId="candidate-resumes"
               style={{ marginTop: 16 }}
               title={() => '投递志愿'}
               rowKey="id"
               size="small"
               pagination={false}
               dataSource={detailRecord.resumes || []}
+              rowClassName={(resume) => [
+                'resume-volunteer-row',
+                previewRecord?.id === resume.id ? 'resume-volunteer-row-active' : '',
+              ].filter(Boolean).join(' ')}
+              onRowClick={(resume) => setPreviewRecord(resume)}
               columns={[
                 {
                   title: '志愿',
                   dataIndex: 'volunteer_rank',
                   width: 70,
-                  ...localTextColumnFilter('volunteer_rank', '筛选志愿'),
                 },
                 {
                   title: '应聘ID',
                   dataIndex: 'apply_id',
                   width: 110,
-                  ...localTextColumnFilter('apply_id', '筛选应聘ID'),
                 },
                 {
                   title: '主体',
                   dataIndex: 'entity',
                   width: 100,
-                  ...localTextColumnFilter('entity', '筛选主体'),
                 },
                 {
                   title: '投递岗位',
                   dataIndex: 'position_name',
                   ellipsis: true,
-                  ...localTextColumnFilter('position_name', '筛选投递岗位'),
                 },
                 {
                   title: '岗位类别',
                   dataIndex: 'job_category',
                   width: 110,
-                  ...localTextColumnFilter('job_category', '筛选岗位类别'),
                 },
                 {
                   title: '应聘状态',
                   dataIndex: 'status',
                   width: 100,
-                  ...localTextColumnFilter('status', '筛选应聘状态'),
-                },
-                {
-                  title: '预览',
-                  valueType: 'option',
-                  width: 70,
-                  render: (_, resume) =>
-                    resume.resume_file ? (
-                      <a onClick={() => setPreviewRecord(resume)}>预览</a>
-                    ) : (
-                      <Tooltip title="该投递暂无简历文件">
-                        <Typography.Text type="secondary">预览</Typography.Text>
-                      </Tooltip>
-                    ),
                 },
               ]}
             />
@@ -1154,7 +1052,8 @@ export default function ResumesPage() {
               />
             </div>
 
-            <ResizableTable
+            <SmartDataTable
+              tableId="candidate-attempts"
               style={{ marginTop: 16 }}
               title={() => '分配尝试'}
               rowKey="id"
@@ -1168,46 +1067,28 @@ export default function ResumesPage() {
                   title: '来源',
                   dataIndex: 'source',
                   width: 80,
-                  ...localSelectColumnFilter('source', [
-                    { value: 'rule', text: '规则' },
-                    { value: 'ai', text: 'AI' },
-                    { value: 'manual', text: '手动' },
-                  ]),
                   render: (value) => SOURCE_TEXT[value] || value || '-',
                 },
                 {
                   title: '投递岗位',
                   dataIndex: 'position_name',
                   ellipsis: true,
-                  ...localTextColumnFilter('position_name', '筛选投递岗位'),
                 },
                 {
                   title: '二级接口人',
                   dataIndex: 'contact_name',
                   width: 110,
-                  ...localTextColumnFilter('contact_name', '筛选二级接口人'),
                 },
                 {
                   title: '三级接口人',
                   dataIndex: 'sub_contact_name',
                   width: 110,
-                  ...localTextColumnFilter('sub_contact_name', '筛选三级接口人'),
                 },
                 {
                   title: '原因',
                   key: 'reason',
                   width: 220,
                   ellipsis: true,
-                  ...textColumnFilter('筛选原因'),
-                  onFilter: (value, attempt) =>
-                    String(
-                      attempt.manual_reason ||
-                        attempt.match_reason ||
-                        attempt.feedback_note ||
-                        '',
-                    )
-                      .toLowerCase()
-                      .includes(String(value).toLowerCase()),
                   render: (_, attempt) =>
                     attempt.manual_reason || attempt.match_reason || attempt.feedback_note || '-',
                 },
@@ -1215,13 +1096,6 @@ export default function ResumesPage() {
                   title: '状态',
                   dataIndex: 'status',
                   width: 100,
-                  ...localSelectColumnFilter(
-                    'status',
-                    Object.entries(ATTEMPT_STATUS).map(([value, item]) => ({
-                      value,
-                      text: item.text,
-                    })),
-                  ),
                   render: (value) => (
                     <Tag color={ATTEMPT_STATUS[value]?.color || 'default'}>
                       {ATTEMPT_STATUS[value]?.text || value || '-'}
@@ -1232,10 +1106,6 @@ export default function ResumesPage() {
                   title: '反馈',
                   dataIndex: 'feedback_result',
                   width: 100,
-                  ...localSelectColumnFilter('feedback_result', [
-                    { value: 'passed', text: '通过' },
-                    { value: 'rejected', text: '未通过' },
-                  ]),
                   render: (value) =>
                     value === 'passed' ? '通过' : value === 'rejected' ? '未通过' : '-',
                 },
@@ -1243,13 +1113,13 @@ export default function ResumesPage() {
                   title: '备注',
                   dataIndex: 'feedback_note',
                   ellipsis: true,
-                  ...localTextColumnFilter('feedback_note', '筛选备注'),
                 },
               ]}
             />
 
             {canViewAgentDecisions && (
-              <ResizableTable
+              <SmartDataTable
+                tableId="candidate-ai-decisions"
                 style={{ marginTop: 16 }}
                 title={() => 'AI 筛选决策'}
                 rowKey="id"
@@ -1263,16 +1133,6 @@ export default function ResumesPage() {
                     title: '结论',
                     key: 'recommendation',
                     width: 100,
-                    ...selectColumnFilter([
-                      { value: 'error', text: '处理失败' },
-                      { value: 'dispatch', text: '建议下发' },
-                      { value: 'review', text: '人工复核' },
-                      { value: 'archive', text: '建议归档' },
-                    ]),
-                    onFilter: (value, decision) =>
-                      value === 'error'
-                        ? Boolean(decision.error_code)
-                        : !decision.error_code && decision.recommendation === value,
                     render: (_, decision) =>
                       decision.error_code ? (
                         <Tag color="error">处理失败</Tag>
@@ -1292,20 +1152,12 @@ export default function ResumesPage() {
                     title: '推荐岗位',
                     dataIndex: 'recommended_job_name',
                     ellipsis: true,
-                    ...localTextColumnFilter('recommended_job_name', '筛选推荐岗位'),
                   },
                   {
                     title: '摘要/失败原因',
                     key: 'summary',
                     width: 300,
                     ellipsis: true,
-                    ...textColumnFilter('筛选摘要或失败原因'),
-                    onFilter: (value, decision) =>
-                      String(
-                        decision.error_message || decision.summary || decision.reason || '',
-                      )
-                        .toLowerCase()
-                        .includes(String(value).toLowerCase()),
                     render: (_, decision) =>
                       decision.error_message || decision.summary || decision.reason || '-',
                   },

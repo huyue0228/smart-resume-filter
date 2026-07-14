@@ -5,7 +5,6 @@ import {
   ProFormSelect,
   ProFormSwitch,
   ProFormText,
-  ProTable,
 } from '@ant-design/pro-components'
 import { Button, Popconfirm, Select, Space, Tabs, Tag, Tree, message } from 'antd'
 import {
@@ -19,12 +18,7 @@ import {
   updateRole,
   updateUser,
 } from '../api/services'
-import {
-  normalizeTableFilters,
-  selectColumnFilter,
-  textColumnFilter,
-  useResizableColumns,
-} from '../components/DataTableControls'
+import SmartDataTable from '../components/SmartDataTable'
 
 const ROLE_VALUE_ENUM = {
   admin: { text: '管理员' },
@@ -89,25 +83,21 @@ export default function UsersPage() {
       dataIndex: 'username',
       width: 150,
       fixed: 'left',
-      ...textColumnFilter('筛选用户名'),
+      filter: { type: 'text', param: 'username', placeholder: '筛选用户名' },
     },
     {
       title: '角色类型',
       dataIndex: 'role',
       width: 130,
       valueEnum: ROLE_VALUE_ENUM,
-      ...selectColumnFilter(
-        Object.entries(ROLE_VALUE_ENUM).map(([value, item]) => ({ value, text: item.text })),
-      ),
+      filter: { type: 'select', param: 'role', options: Object.entries(ROLE_VALUE_ENUM).map(([value, item]) => ({ value, label: item.text })) },
     },
     {
       title: 'RBAC 角色',
       dataIndex: 'roles',
       search: false,
       width: 200,
-      ...selectColumnFilter(
-        roles.map((role) => ({ value: role.name, text: role.name })),
-      ),
+      filter: { type: 'select', param: 'roles_in', multiple: true, options: roles.map((role) => ({ value: role.name, label: role.name })) },
       render: (_, record) => (
         <Space wrap>
           {(record.roles || []).map((name) => (
@@ -123,17 +113,17 @@ export default function UsersPage() {
       dataIndex: 'contact_name',
       width: 160,
       search: false,
-      ...textColumnFilter('筛选接口人'),
+      filter: { type: 'text', param: 'contact_name', pinyin: true, placeholder: '筛选接口人/拼音' },
     },
     {
       title: '状态',
       dataIndex: 'is_active',
       width: 90,
       search: false,
-      ...selectColumnFilter([
-        { value: 'true', text: '启用' },
-        { value: 'false', text: '停用' },
-      ]),
+      filter: { type: 'select', param: 'is_active', options: [
+        { value: 'true', label: '启用' },
+        { value: 'false', label: '停用' },
+      ] },
       render: (value) =>
         value ? <Tag color="green">启用</Tag> : <Tag color="default">停用</Tag>,
     },
@@ -177,7 +167,7 @@ export default function UsersPage() {
       title: '角色名称',
       dataIndex: 'name',
       width: 180,
-      ...textColumnFilter('筛选角色名称'),
+      filter: { type: 'text', param: 'name', placeholder: '筛选角色名称' },
     },
     {
       title: '权限数',
@@ -205,17 +195,6 @@ export default function UsersPage() {
       ),
     },
   ]
-  const {
-    columns: userColumns,
-    components: userComponents,
-    scrollX: userScrollX,
-  } = useResizableColumns(userBaseColumns)
-  const {
-    columns: roleColumns,
-    components: roleComponents,
-    scrollX: roleScrollX,
-  } = useResizableColumns(roleBaseColumns)
-
   const saveRolePermissions = async () => {
     if (!activeRole) return
     setSavingPermissions(true)
@@ -240,13 +219,12 @@ export default function UsersPage() {
             key: 'users',
             label: '用户管理',
             children: (
-              <ProTable
+              <SmartDataTable
+                tableId="users"
                 actionRef={userActionRef}
                 rowKey="id"
-                columns={userColumns}
-                components={userComponents}
-                scroll={{ x: userScrollX }}
-                search={false}
+                columns={userBaseColumns}
+                request={fetchUsers}
                 toolBarRender={() => [
                   <Button
                     key="create"
@@ -256,22 +234,6 @@ export default function UsersPage() {
                     新增用户
                   </Button>,
                 ]}
-                request={async (params, _sort, filters) => {
-                  const { current, pageSize } = params
-                  const tableFilters = normalizeTableFilters(filters, [
-                    'username',
-                    'role',
-                    'roles',
-                    'contact_name',
-                    'is_active',
-                  ])
-                  const { data } = await fetchUsers({
-                    page: current,
-                    page_size: pageSize,
-                    ...tableFilters,
-                  })
-                  return { data: data?.results || [], total: data?.count || 0, success: true }
-                }}
               />
             ),
           },
@@ -279,13 +241,12 @@ export default function UsersPage() {
             key: 'roles',
             label: '角色管理',
             children: (
-              <ProTable
+              <SmartDataTable
+                tableId="roles"
                 actionRef={roleActionRef}
                 rowKey="id"
-                columns={roleColumns}
-                components={roleComponents}
-                scroll={{ x: roleScrollX }}
-                search={false}
+                columns={roleBaseColumns}
+                request={fetchRoles}
                 toolBarRender={() => [
                   <Button
                     key="create"
@@ -295,17 +256,6 @@ export default function UsersPage() {
                     新增角色
                   </Button>,
                 ]}
-                request={async (params, _sort, filters) => {
-                  const { current, pageSize } = params
-                  const tableFilters = normalizeTableFilters(filters, ['name'])
-                  const { data } = await fetchRoles({
-                    page: current,
-                    page_size: pageSize,
-                    ...tableFilters,
-                  })
-                  setRoles(data?.results || [])
-                  return { data: data?.results || [], total: data?.count || 0, success: true }
-                }}
               />
             ),
           },

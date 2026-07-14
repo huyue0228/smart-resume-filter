@@ -33,6 +33,7 @@ urlpatterns = [
     path("allocation-mode/", views.AllocationModeView.as_view()),
     path("permissions/", views.PermissionTreeView.as_view()),
     path("ai-connection/", views.AIConnectionConfigView.as_view()),
+    path("ai-connection/models/", views.AIConnectionModelsView.as_view()),
     path("ai-connection/test/", views.AIConnectionTestView.as_view()),
     path("import/", views.ImportView.as_view()),
     path("import/undo/", views.ImportUndoView.as_view()),

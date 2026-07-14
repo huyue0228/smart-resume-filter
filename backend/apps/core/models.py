@@ -31,6 +31,8 @@ class Contact(models.Model):
     ]
 
     name = models.CharField(max_length=64)
+    name_pinyin = models.CharField(max_length=128, blank=True)
+    name_pinyin_initials = models.CharField(max_length=32, blank=True)
     employee_no = models.CharField(max_length=32, unique=True, help_text="工号")
     department = models.ForeignKey(
         Department, null=True, blank=True, on_delete=models.SET_NULL, related_name="contacts"
@@ -40,6 +42,25 @@ class Contact(models.Model):
     )
     can_delegate = models.BooleanField(default=True, help_text="二级接口人是否可转派")
     is_active = models.BooleanField(default=True)
+
+    def save(self, *args, **kwargs):
+        from .name_pinyin import name_to_pinyin
+
+        self.name_pinyin, self.name_pinyin_initials = name_to_pinyin(self.name)
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None and "name" in update_fields:
+            kwargs["update_fields"] = set(update_fields) | {
+                "name_pinyin",
+                "name_pinyin_initials",
+            }
+        super().save(*args, **kwargs)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["name"]),
+            models.Index(fields=["name_pinyin"]),
+            models.Index(fields=["name_pinyin_initials"]),
+        ]
 
     def __str__(self):
         return f"{self.name}({self.employee_no})"
@@ -68,6 +89,8 @@ class School(models.Model):
     """院校清单。"""
 
     name = models.CharField(max_length=128, unique=True, help_text="学校")
+    name_pinyin = models.CharField(max_length=256, blank=True)
+    name_pinyin_initials = models.CharField(max_length=64, blank=True)
     platform = models.CharField(max_length=64, blank=True, help_text="平台标签")
     province = models.CharField(max_length=32, blank=True)
     school_tag = models.ForeignKey(
@@ -77,6 +100,25 @@ class School(models.Model):
         on_delete=models.SET_NULL,
         related_name="schools",
     )
+
+    def save(self, *args, **kwargs):
+        from .name_pinyin import name_to_pinyin
+
+        self.name_pinyin, self.name_pinyin_initials = name_to_pinyin(self.name)
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None and "name" in update_fields:
+            kwargs["update_fields"] = set(update_fields) | {
+                "name_pinyin",
+                "name_pinyin_initials",
+            }
+        super().save(*args, **kwargs)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["name"]),
+            models.Index(fields=["name_pinyin"]),
+            models.Index(fields=["name_pinyin_initials"]),
+        ]
 
     def __str__(self):
         return self.name
@@ -426,6 +468,15 @@ class CandidateWorkflow(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     revision = models.PositiveIntegerField(default=0)
+    active_processing_scope_item = models.OneToOneField(
+        "ProcessingRunScopeItem",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="active_workflow",
+    )
+    active_processing_token = models.UUIDField(null=True, blank=True, editable=False)
+    active_processing_expires_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         indexes = [
@@ -750,11 +801,17 @@ class ProcessingRun(models.Model):
     review_count = models.PositiveIntegerField(default=0)
     dispatch_count = models.PositiveIntegerField(default=0)
     archive_count = models.PositiveIntegerField(default=0)
+    skipped_count = models.PositiveIntegerField(default=0)
+    cancelled_count = models.PositiveIntegerField(default=0)
     chunk_size = models.PositiveIntegerField(null=True, blank=True)
     chunk_total = models.PositiveIntegerField(null=True, blank=True)
     chunk_done = models.PositiveIntegerField(null=True, blank=True)
     chunk_failed = models.PositiveIntegerField(null=True, blank=True)
     chunk_errors = models.JSONField(default=list, blank=True)
+    ai_concurrency_limit = models.PositiveSmallIntegerField(null=True, blank=True)
+    ai_effective_concurrency = models.PositiveSmallIntegerField(null=True, blank=True)
+    ai_retry_count = models.PositiveIntegerField(default=0)
+    ai_rate_limit_count = models.PositiveIntegerField(default=0)
     model_name = models.CharField(max_length=64, blank=True)
     prompt_version = models.CharField(max_length=32, blank=True)
     decision_version = models.CharField(max_length=32, blank=True)
@@ -815,6 +872,8 @@ class ProcessingRunStage(models.Model):
     review_count = models.PositiveIntegerField(default=0)
     dispatch_count = models.PositiveIntegerField(default=0)
     archive_count = models.PositiveIntegerField(default=0)
+    skipped_count = models.PositiveIntegerField(default=0)
+    cancelled_count = models.PositiveIntegerField(default=0)
     message = models.TextField(blank=True)
     error = models.TextField(blank=True)
     started_at = models.DateTimeField(null=True, blank=True)
@@ -838,11 +897,24 @@ class ProcessingRunScopeItem(models.Model):
     workflow_revision_at_submit = models.PositiveIntegerField(null=True, blank=True)
     status = models.CharField(max_length=32, default="pending")
     skip_reason = models.CharField(max_length=64, blank=True)
+    dispatch_token = models.UUIDField(null=True, blank=True, editable=False)
+    attempt_count = models.PositiveIntegerField(default=0)
+    queued_at = models.DateTimeField(null=True, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    error_code = models.CharField(max_length=64, blank=True)
+    error_message = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         unique_together = ("run", "candidate")
-        indexes = [models.Index(fields=["run", "candidate"])]
+        indexes = [
+            models.Index(fields=["run", "candidate"]),
+            models.Index(
+                fields=["run", "status", "candidate"],
+                name="core_scope_run_st_cand_idx",
+            ),
+        ]
 
 
 class Config(models.Model):

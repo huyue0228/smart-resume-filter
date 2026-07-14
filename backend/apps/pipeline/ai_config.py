@@ -1,13 +1,12 @@
 """AI Agent 配置抽象。
 
-模型连接只从管理员在系统设置保存的 Config 记录读取。模型 profile 注册表只为
-配置界面提供可选模板，运行时不读取环境变量或部署文件中的连接信息。
+模型连接只从管理员在系统设置保存的 Config 记录读取。内网模型共用一套连接
+字段，不区分服务商或 Profile，也不从环境变量或部署文件读取连接信息。
 """
 import base64
 import hashlib
 import json
 from dataclasses import dataclass
-from pathlib import Path
 from urllib.parse import urlparse
 
 from django.conf import settings
@@ -46,10 +45,10 @@ PUBLIC_AI_CONFIG_REGISTRY = {
         "max": 600,
     },
     "ai_concurrency": {
-        "label": "AI 并发数",
-        "description": "后台 AI 任务最大并发数量。",
+        "label": "AI 并发上限",
+        "description": "所有后台任务共享的模型调用并发上限；系统会根据限流情况自动升降。",
         "value_type": "integer",
-        "default": 2,
+        "default": 8,
         "min": 1,
         "max": 20,
     },
@@ -73,7 +72,6 @@ PUBLIC_AI_CONFIG_REGISTRY = {
 
 
 AI_CONNECTION_CONFIG_KEYS = {
-    "profile": "ai_connection_profile",
     "api_style": "ai_connection_api_style",
     "model_name": "ai_connection_model_name",
     "base_url": "ai_connection_base_url",
@@ -86,7 +84,6 @@ AI_CONNECTION_TESTED_AT_KEY = "ai_connection_tested_at"
 
 @dataclass(frozen=True)
 class AIModelConfig:
-    profile: str
     api_style: str
     model_name: str
     prompt_version: str
@@ -105,35 +102,6 @@ class AIRuntimeConfig:
     concurrency: int
     retry_count: int
     retry_backoff_seconds: int
-
-
-def _model_registry():
-    default_path = Path(__file__).resolve().parents[2] / "config" / "ai_models.json"
-    path = default_path
-    try:
-        with path.open("r", encoding="utf-8") as file_obj:
-            registry = json.load(file_obj)
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"无法读取 AI 模型配置文件 {path}: {exc}") from exc
-    profiles = registry.get("profiles")
-    if not isinstance(profiles, dict) or not profiles:
-        raise ValueError("AI 模型配置文件缺少非空 profiles")
-    return registry
-
-
-def ai_connection_profiles():
-    """返回可由管理员选择的模型 profile（不含任何密钥）。"""
-    registry = _model_registry()
-    return [
-        {
-            "key": key,
-            "label": profile.get("label", key),
-            "api_style": profile.get("api_style", ""),
-            "default_model": profile.get("default_model", ""),
-            "base_url": profile.get("base_url", ""),
-        }
-        for key, profile in registry["profiles"].items()
-    ]
 
 
 def _connection_value(name):
@@ -174,35 +142,36 @@ def decrypt_api_key(value):
 @transaction.atomic
 def save_ai_connection_config(payload):
     """保存管理员维护的连接参数；API Key 仅接受写入并以密文保存。"""
-    registry = _model_registry()
-    profile_name = payload["profile"]
-    if profile_name not in registry["profiles"]:
-        raise ValueError("未知模型 profile")
     if payload["api_style"] not in {"responses", "chat_json"}:
         raise ValueError("API 风格必须是 responses 或 chat_json")
     if not isinstance(payload["model_name"], str) or not payload["model_name"].strip():
         raise ValueError("模型名称不能为空")
-    if not isinstance(payload["base_url"], str):
-        raise ValueError("API 地址格式不正确")
-    if payload["base_url"]:
-        parsed = urlparse(payload["base_url"])
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ValueError("API 地址必须是完整的 http(s) 地址")
-    if payload.get("api_key") and not isinstance(payload["api_key"], str):
+    normalized_base_url = validate_ai_base_url(payload["base_url"])
+    api_key_value = payload.get("api_key", "")
+    if api_key_value is not None and not isinstance(api_key_value, str):
         raise ValueError("API Key 格式不正确")
+    api_key_value = (api_key_value or "").strip()
     from apps.core import models as m
 
-    for field in ["profile", "api_style", "model_name", "base_url"]:
+    previous_base_url = _connection_value("base_url")
+    base_url_unchanged = _base_urls_match(previous_base_url, normalized_base_url)
+    for field in ["api_style", "model_name", "base_url"]:
+        value = normalized_base_url if field == "base_url" else payload[field].strip()
         m.Config.objects.update_or_create(
-            key=AI_CONNECTION_CONFIG_KEYS[field], defaults={"value": payload[field].strip()}
+            key=AI_CONNECTION_CONFIG_KEYS[field], defaults={"value": value}
         )
+    # 项目尚未上线，不保留已废弃的服务商/Profile 配置。
+    m.Config.objects.filter(key="ai_connection_profile").delete()
     if payload.get("clear_api_key"):
         m.Config.objects.filter(key=AI_CONNECTION_CONFIG_KEYS["api_key"]).delete()
-    elif payload.get("api_key"):
+    elif api_key_value:
         m.Config.objects.update_or_create(
             key=AI_CONNECTION_CONFIG_KEYS["api_key"],
-            defaults={"value": encrypt_api_key(payload["api_key"].strip())},
+            defaults={"value": encrypt_api_key(api_key_value)},
         )
+    elif not base_url_unchanged:
+        # 访问令牌只绑定原 Base URL，不得在地址变化后静默转发到新服务。
+        m.Config.objects.filter(key=AI_CONNECTION_CONFIG_KEYS["api_key"]).delete()
     invalidate_ai_connection_test(disable_ai=True)
 
 
@@ -210,7 +179,6 @@ def _connection_fingerprint():
     """生成当前完整连接的不可逆指纹，不在任何接口中返回。"""
     config = get_ai_model_config()
     payload = {
-        "profile": config.profile,
         "api_style": config.api_style,
         "model_name": config.model_name,
         "base_url": config.base_url,
@@ -274,22 +242,16 @@ def allocation_mode():
 
 
 def get_ai_connection_status():
-    registry = _model_registry()
-    default_profile_name = registry.get("default_profile", "openai")
-    default_profile = registry["profiles"].get(default_profile_name, {})
     stored_key = _connection_value("api_key")
     tested_at = _connection_value_by_key(AI_CONNECTION_TESTED_AT_KEY) or ""
     return {
-        "profile": _connection_value("profile") or default_profile_name,
-        "api_style": _connection_value("api_style") or default_profile.get("api_style", ""),
-        "model_name": _connection_value("model_name") or default_profile.get("default_model", ""),
-        "base_url": _connection_value("base_url") or default_profile.get("base_url", ""),
+        "api_style": _connection_value("api_style") or "chat_json",
+        "model_name": _connection_value("model_name") or "",
+        "base_url": _connection_value("base_url") or "",
         "api_key_configured": bool(stored_key),
         "api_key_source": "system_config" if stored_key else "not_configured",
         "test_passed": is_ai_connection_tested(),
         "tested_at": tested_at,
-        "profiles": ai_connection_profiles(),
-        "profile_version": "profile-v1",
     }
 
 
@@ -302,28 +264,16 @@ def is_ai_enabled():
 
 
 def get_ai_model_config():
-    registry = _model_registry()
-    profile_name = _connection_value("profile")
     api_style = _connection_value("api_style")
     model_name = _connection_value("model_name")
     base_url = _connection_value("base_url")
-    if not all(isinstance(value, str) and value.strip() for value in [profile_name, api_style, model_name]):
+    if not all(isinstance(value, str) and value.strip() for value in [api_style, model_name, base_url]):
         raise ValueError("AI 模型连接尚未完成配置，请由管理员在系统设置中保存")
-    if base_url is None or not isinstance(base_url, str):
-        raise ValueError("AI 模型连接的 API 地址尚未配置")
-    try:
-        profile = registry["profiles"][profile_name]
-    except KeyError as exc:
-        available = "、".join(sorted(registry["profiles"]))
-        raise ValueError(f"未知模型 profile={profile_name}，可选：{available}") from exc
     if api_style not in ["responses", "chat_json"]:
-        raise ValueError(
-            f"AI profile {profile_name} 的 api_style 必须是 responses 或 chat_json"
-        )
+        raise ValueError("AI 模型连接的 api_style 必须是 responses 或 chat_json")
+    validate_ai_base_url(base_url)
     saved_api_key = _connection_value("api_key")
-    saved_base_url = _connection_value("base_url")
     return AIModelConfig(
-        profile=profile_name,
         api_style=api_style,
         model_name=model_name,
         prompt_version="resume-screening-v1",
@@ -333,6 +283,39 @@ def get_ai_model_config():
         api_key=decrypt_api_key(saved_api_key) if saved_api_key else "",
         base_url=base_url,
     )
+
+
+def validate_ai_base_url(value):
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("Base URL 不能为空")
+    parsed = urlparse(value.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("Base URL 必须是完整的 http(s) 地址")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("Base URL 不能包含账号、密码、查询参数或锚点")
+    return value.strip().rstrip("/")
+
+
+def _base_urls_match(left, right):
+    try:
+        return validate_ai_base_url(left) == validate_ai_base_url(right)
+    except ValueError:
+        return False
+
+
+def get_ai_discovery_config(*, base_url, api_key=""):
+    """返回模型发现所需连接参数；未提交新令牌时复用已保存令牌。"""
+    normalized_base_url = validate_ai_base_url(base_url)
+    if api_key is not None and not isinstance(api_key, str):
+        raise ValueError("API Key 格式不正确")
+    submitted_api_key = (api_key or "").strip()
+    saved_api_key = _connection_value("api_key")
+    saved_base_url = _connection_value("base_url")
+    can_reuse_saved_key = _base_urls_match(saved_base_url, normalized_base_url)
+    effective_api_key = submitted_api_key
+    if not effective_api_key and saved_api_key and can_reuse_saved_key:
+        effective_api_key = decrypt_api_key(saved_api_key)
+    return normalized_base_url, effective_api_key
 
 
 def _config_value(key, default):

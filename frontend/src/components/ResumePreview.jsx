@@ -67,6 +67,20 @@ export default function ResumePreview({ resume, attemptId, height = 520 }) {
     let alive = true
     let revokedUrl = ''
     let pdfDoc = null
+    let loadingTask = null
+    let loadingTaskDestroyed = false
+
+    const destroyLoadingTask = () => {
+      if (!loadingTask || loadingTaskDestroyed) return
+      loadingTaskDestroyed = true
+      try {
+        const result = loadingTask.destroy()
+        result?.catch?.(() => {})
+      } catch {
+        // 组件卸载时只做资源回收，销毁失败不能再次触发页面错误边界。
+      }
+    }
+
     if (!resume?.resume_file) {
       setState({
         loading: false,
@@ -108,13 +122,18 @@ export default function ResumePreview({ resume, attemptId, height = 520 }) {
         revokedUrl = url
         const filename = decodeFilename(headerFilename)
         const isPdf = contentType.includes('pdf') || /\.pdf$/i.test(filename || resume?.resume_file || '')
+        if (!alive) {
+          URL.revokeObjectURL(url)
+          return
+        }
         if (isPdf) {
           const bytes = new Uint8Array(await blob.arrayBuffer())
-          pdfDoc = await pdfjsLib.getDocument({ data: bytes }).promise
+          loadingTask = pdfjsLib.getDocument({ data: bytes })
+          pdfDoc = await loadingTask.promise
         }
         if (!alive) {
           URL.revokeObjectURL(url)
-          if (pdfDoc) pdfDoc.destroy()
+          destroyLoadingTask()
           return
         }
         setState({
@@ -153,7 +172,7 @@ export default function ResumePreview({ resume, attemptId, height = 520 }) {
     return () => {
       alive = false
       if (revokedUrl) URL.revokeObjectURL(revokedUrl)
-      if (pdfDoc) pdfDoc.destroy()
+      destroyLoadingTask()
     }
   }, [attemptId, resume?.id, resume?.resume_file])
 

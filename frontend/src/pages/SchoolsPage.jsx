@@ -1,13 +1,9 @@
 import { useRef } from 'react'
-import { PageContainer, ProTable } from '@ant-design/pro-components'
-import { Tag } from 'antd'
-import { fetchSchools } from '../api/services'
+import { PageContainer } from '@ant-design/pro-components'
+import { fetchSchoolFilterOptions, fetchSchools } from '../api/services'
 import ImportButton from '../components/ImportButton'
-import {
-  normalizeTableFilters,
-  textColumnFilter,
-  useResizableColumns,
-} from '../components/DataTableControls'
+import SchoolTagBadge from '../components/SchoolTagBadge'
+import SmartDataTable from '../components/SmartDataTable'
 
 const IMPORT_FIELDS = [
   { key: 'schools', label: '院校分类 (.xlsx/.xls/.csv)', accept: '.xlsx,.xls,.csv' },
@@ -23,54 +19,37 @@ export default function SchoolsPage() {
       fixed: 'left',
       width: 220,
       ellipsis: true,
-      ...textColumnFilter('筛选学校'),
+      filter: { type: 'text', param: 'name', pinyin: true, placeholder: '筛选学校/拼音' },
     },
     {
       title: '平台标签',
       dataIndex: 'platform',
       width: 160,
-      ...textColumnFilter('筛选平台标签'),
-      render: (_, r) => (r.platform ? <Tag color="blue">{r.platform}</Tag> : '-'),
+      filter: { type: 'select', param: 'platform_in', multiple: true, options: 'platform' },
+      render: (_, r) => (r.platform ? <SchoolTagBadge value={r.platform} /> : '-'),
     },
   ]
-  const { columns, components, scrollX } = useResizableColumns(baseColumns)
-
   return (
     <PageContainer title="院校清单" content="维护院校与院校标签，可导入更新。">
-      <ProTable
+      <SmartDataTable
+        tableId="schools"
         actionRef={actionRef}
         rowKey="id"
-        columns={columns}
-        components={components}
-        scroll={{ x: scrollX }}
-        search={false}
-        pagination={{ defaultPageSize: 10, showSizeChanger: true }}
+        columns={baseColumns}
+        request={fetchSchools}
+        filterOptionsRequest={fetchSchoolFilterOptions}
         toolBarRender={() => [
           <ImportButton
             key="import"
             buttonText="导入院校"
             title="导入院校分类"
             fields={IMPORT_FIELDS}
-            onDone={() => actionRef.current?.reload()}
+            onDone={() => {
+              actionRef.current?.reload()
+              actionRef.current?.reloadOptions()
+            }}
           />,
         ]}
-        request={async (params, _sort, filters) => {
-          const { current, pageSize } = params
-          const tableFilters = normalizeTableFilters(filters, [
-            'name',
-            'platform',
-          ])
-          try {
-            const { data } = await fetchSchools({
-              page: current,
-              page_size: pageSize,
-              ...tableFilters,
-            })
-            return { data: data?.results || [], total: data?.count || 0, success: true }
-          } catch {
-            return { data: [], total: 0, success: false }
-          }
-        }}
       />
     </PageContainer>
   )

@@ -29,6 +29,7 @@ from apps.accounts.permissions import (
 )
 from apps.core import models as m
 from apps.core import candidate_summary, system_status
+from apps.core.name_pinyin import name_to_pinyin
 from apps.ingestion import snapshot
 from apps.ingestion.sources import (
     RESUME_SUBDIR,
@@ -58,6 +59,63 @@ def bool_query_value(value):
     if value in ["true", "false"]:
         return value == "true"
     return None
+
+
+def _query_list_values(params, key):
+    values = params.getlist(key) if hasattr(params, "getlist") else []
+    if not values:
+        value = params.get(key)
+        values = [value] if value is not None else []
+    return [
+        item.strip()
+        for value in values
+        for item in str(value).split(",")
+        if item.strip()
+    ]
+
+
+def _pinyin_text_matches(value, query):
+    query = str(query or "").strip().lower()
+    value = str(value or "")
+    if not query:
+        return True
+    full_pinyin, initials = name_to_pinyin(value)
+    return query in value.lower() or query in full_pinyin or query in initials
+
+
+def _filter_queryset_text_with_pinyin(qs, field, query):
+    if not query:
+        return qs
+    matching_ids = [
+        obj.id
+        for obj in qs.select_related(None).only("id", field)
+        if _pinyin_text_matches(getattr(obj, field), query)
+    ]
+    return qs.filter(id__in=matching_ids)
+
+
+def _filter_indexed_name(qs, field_prefix, query):
+    """Use persisted pinyin columns for person/school name filters."""
+    if not query:
+        return qs
+    normalized = str(query).strip().lower()
+    prefix = f"{field_prefix}__" if field_prefix else ""
+    return qs.filter(
+        Q(**{f"{prefix}name__icontains": query})
+        | Q(**{f"{prefix}name_pinyin__icontains": normalized})
+        | Q(**{f"{prefix}name_pinyin_initials__icontains": normalized})
+    )
+
+
+def _filter_option(value, *, option_value=None):
+    full_pinyin, initials = name_to_pinyin(value)
+    return {
+        "label": value,
+        "value": value if option_value is None else option_value,
+        "search_text": " ".join(
+            item for item in [value.lower(), full_pinyin, initials] if item
+        ),
+    }
 
 
 def submit_processing_runs(runs):
@@ -484,9 +542,11 @@ class CandidateViewSet(PermissionedModelViewSet):
                 continue
             if status_values and attempt.status not in status_values:
                 continue
-            if contact_name and contact_name not in visible_contact_name:
+            if contact_name and not _pinyin_text_matches(visible_contact_name, contact_name):
                 continue
-            if sub_contact_name and sub_contact_name not in visible_sub_contact_name:
+            if sub_contact_name and not _pinyin_text_matches(
+                visible_sub_contact_name, sub_contact_name
+            ):
                 continue
             ids.append(candidate.id)
         return qs.filter(id__in=ids)
@@ -503,9 +563,14 @@ class CandidateViewSet(PermissionedModelViewSet):
     @action(detail=False, methods=["get"], url_path="export")
     def export_resumes(self, request):
         permissions = user_permission_codes(request.user)
+        ids = request.query_params.get("ids")
+        qs = self.get_queryset()
+        if ids:
+            id_list = [int(item) for item in ids.split(",") if item.strip().isdigit()]
+            qs = qs.filter(id__in=id_list)
         if "resume.view" not in permissions:
             attempt_ids = []
-            for candidate in self.get_queryset():
+            for candidate in qs:
                 attempt = serializers.visible_candidate_attempt(candidate, request.user)
                 if attempt:
                     attempt_ids.append(attempt.id)
@@ -513,17 +578,60 @@ class CandidateViewSet(PermissionedModelViewSet):
                 "resume__candidate"
             )
             return resume_zip_response([attempt.resume for attempt in attempts])
-        ids = request.query_params.get("ids")
-        qs = self.get_queryset()
-        if ids:
-            id_list = [int(x) for x in ids.split(",") if x.strip().isdigit()]
-            qs = qs.filter(id__in=id_list)
         resumes = (
             m.Resume.objects.select_related("candidate")
             .filter(candidate__in=qs)
             .order_by("candidate_id", "volunteer_rank", "id")
         )
         return resume_zip_response(resumes)
+
+    def destroy(self, request, *args, **kwargs):
+        """只允许清理尚未产生流程历史的候选人。"""
+        with transaction.atomic():
+            candidate = self.get_object()
+            candidate = m.Candidate.objects.select_for_update().get(pk=candidate.pk)
+            workflow = (
+                m.CandidateWorkflow.objects.select_for_update()
+                .filter(candidate=candidate)
+                .first()
+            )
+
+            protected_history = []
+            if m.ProcessingRunScopeItem.objects.filter(
+                candidate=candidate,
+                status__in=["pending", "queued", "processing", "waiting_conflict"],
+            ).exists():
+                protected_history.append("正在执行的 AI 处理任务")
+            if workflow and m.AssignmentAttempt.objects.filter(workflow=workflow).exists():
+                protected_history.append("分配尝试或反馈")
+            if m.AgentDispatchDecision.objects.filter(
+                Q(workflow__candidate=candidate) | Q(resume__candidate=candidate)
+            ).exists():
+                protected_history.append("AI 决策")
+            if m.AssignmentHandoff.objects.filter(
+                attempt__workflow__candidate=candidate
+            ).exists():
+                protected_history.append("转派历史")
+
+            if protected_history:
+                return Response(
+                    {
+                        "detail": (
+                            "无法删除候选人：已存在受保护历史（"
+                            f"{'、'.join(protected_history)}）"
+                        )
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            try:
+                candidate.delete()
+            except ProtectedError:
+                return Response(
+                    {"detail": "无法删除候选人：已存在受保护的关联记录"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=False, methods=["post"], url_path="bulk-dispatch")
     def bulk_dispatch(self, request):
@@ -593,6 +701,7 @@ class JobViewSet(PermissionedModelViewSet):
         "update": "job.manage",
         "partial_update": "job.manage",
         "destroy": "job.manage",
+        "filter_options": "job.view",
     }
 
     def get_queryset(self):
@@ -603,21 +712,39 @@ class JobViewSet(PermissionedModelViewSet):
             qs = qs.filter(is_active=True)
         else:
             qs = qs.filter(is_active=is_active)
-        if p.get("entity"):
+        entity_values = _query_list_values(p, "entity_in")
+        if entity_values:
+            qs = qs.filter(entity__in=entity_values)
+        elif p.get("entity"):
             qs = qs.filter(entity__icontains=p["entity"])
         if p.get("public_name"):
-            qs = qs.filter(public_name__icontains=p["public_name"])
+            qs = _filter_queryset_text_with_pinyin(qs, "public_name", p["public_name"])
         if p.get("position_name"):
-            qs = qs.filter(position_name__icontains=p["position_name"])
-        if p.get("category"):
+            qs = _filter_queryset_text_with_pinyin(qs, "position_name", p["position_name"])
+        category_values = _query_list_values(p, "category_in")
+        if category_values:
+            qs = qs.filter(category__in=category_values)
+        elif p.get("category"):
             qs = qs.filter(category__icontains=p["category"])
-        if p.get("job_family"):
+        job_family_values = _query_list_values(p, "job_family_in")
+        if job_family_values:
+            qs = qs.filter(job_family__in=job_family_values)
+        elif p.get("job_family"):
             qs = qs.filter(job_family__icontains=p["job_family"])
-        if p.get("department_name"):
+        department_values = _query_list_values(p, "department_name_in")
+        if department_values:
+            qs = qs.filter(department__name__in=department_values)
+        elif p.get("department_name"):
             qs = qs.filter(department__name__icontains=p["department_name"])
-        if p.get("location"):
+        location_values = _query_list_values(p, "location_in")
+        if location_values:
+            qs = qs.filter(location__in=location_values)
+        elif p.get("location"):
             qs = qs.filter(location__icontains=p["location"])
-        if p.get("education"):
+        education_values = _query_list_values(p, "education_in")
+        if education_values:
+            qs = qs.filter(education__in=education_values)
+        elif p.get("education"):
             qs = qs.filter(education__icontains=p["education"])
         if p.get("headcount"):
             qs = qs.filter(headcount=p["headcount"])
@@ -625,6 +752,36 @@ class JobViewSet(PermissionedModelViewSet):
         if is_public is not None:
             qs = qs.filter(is_public=is_public)
         return qs
+
+    @action(detail=False, methods=["get"], url_path="filter-options")
+    def filter_options(self, request):
+        """返回岗位要求表头选择器候选值及拼音搜索文本。"""
+        jobs = m.Job.objects.filter(is_active=True).select_related("department")
+
+        def options(values):
+            return [
+                _filter_option(value)
+                for value in sorted(
+                    {
+                        str(item).strip()
+                        for item in values
+                        if item is not None and str(item).strip()
+                    }
+                )
+            ]
+
+        return Response(
+            {
+                "entity": options(jobs.values_list("entity", flat=True)),
+                "category": options(jobs.values_list("category", flat=True)),
+                "job_family": options(jobs.values_list("job_family", flat=True)),
+                "department_name": options(
+                    jobs.values_list("department__name", flat=True)
+                ),
+                "location": options(jobs.values_list("location", flat=True)),
+                "education": options(jobs.values_list("education", flat=True)),
+            }
+        )
 
     def destroy(self, request, *args, **kwargs):
         job = self.get_object()
@@ -642,14 +799,18 @@ class SchoolViewSet(PermissionedModelViewSet):
         "update": "school.manage",
         "partial_update": "school.manage",
         "destroy": "school.manage",
+        "filter_options": "school.view",
     }
 
     def get_queryset(self):
         qs = m.School.objects.select_related("school_tag").order_by("name")
         p = self.request.query_params
         if p.get("name"):
-            qs = qs.filter(name__icontains=p["name"])
-        if p.get("platform"):
+            qs = _filter_indexed_name(qs, "", p["name"])
+        platform_values = _query_list_values(p, "platform_in")
+        if platform_values:
+            qs = qs.filter(platform__in=platform_values)
+        elif p.get("platform"):
             qs = qs.filter(
                 Q(platform__icontains=p["platform"])
                 | Q(school_tag__name__icontains=p["platform"])
@@ -658,6 +819,22 @@ class SchoolViewSet(PermissionedModelViewSet):
         if p.get("province"):
             qs = qs.filter(province__icontains=p["province"])
         return qs
+
+    @action(detail=False, methods=["get"], url_path="filter-options")
+    def filter_options(self, request):
+        values = (
+            m.School.objects.exclude(platform="")
+            .values_list("platform", flat=True)
+            .distinct()
+        )
+        return Response(
+            {
+                "platform": [
+                    _filter_option(value)
+                    for value in sorted({str(value).strip() for value in values})
+                ]
+            }
+        )
 
 
 class SchoolTagViewSet(PermissionedModelViewSet):
@@ -767,6 +944,7 @@ class ContactViewSet(PermissionedModelViewSet):
         "update": "department.manage",
         "partial_update": "department.manage",
         "destroy": "department.manage",
+        "filter_options": "department.view",
     }
 
     def get_queryset(self):
@@ -778,10 +956,13 @@ class ContactViewSet(PermissionedModelViewSet):
         else:
             qs = qs.filter(is_active=is_active)
         if p.get("name"):
-            qs = qs.filter(name__icontains=p["name"])
+            qs = _filter_indexed_name(qs, "", p["name"])
         if p.get("employee_no"):
             qs = qs.filter(employee_no__icontains=p["employee_no"])
-        if p.get("department_name"):
+        department_values = _query_list_values(p, "department_in")
+        if department_values:
+            qs = qs.filter(department_id__in=department_values)
+        elif p.get("department_name"):
             qs = qs.filter(department__name__icontains=p["department_name"])
         if p.get("department_level"):
             qs = qs.filter(department__level=p["department_level"])
@@ -797,6 +978,22 @@ class ContactViewSet(PermissionedModelViewSet):
         if p.get("entity"):
             qs = qs.filter(department__entity__icontains=p["entity"])
         return qs
+
+    @action(detail=False, methods=["get"], url_path="filter-options")
+    def filter_options(self, request):
+        departments = (
+            m.Department.objects.filter(contacts__isnull=False)
+            .order_by("name", "id")
+            .distinct()
+        )
+        return Response(
+            {
+                "department": [
+                    _filter_option(department.name, option_value=department.id)
+                    for department in departments
+                ]
+            }
+        )
 
     def destroy(self, request, *args, **kwargs):
         contact = self.get_object()
@@ -935,14 +1132,30 @@ class AssignmentAttemptViewSet(PermissionedReadOnlyModelViewSet):
                 | Q(department_name_snapshot__icontains=p["department_name"])
             )
         if p.get("contact_name"):
+            query = p["contact_name"]
+            snapshot_ids = [
+                attempt.id
+                for attempt in qs
+                if _pinyin_text_matches(attempt.contact_name_snapshot, query)
+            ]
             qs = qs.filter(
-                Q(contact__name__icontains=p["contact_name"])
-                | Q(contact_name_snapshot__icontains=p["contact_name"])
+                Q(contact__name__icontains=query)
+                | Q(contact__name_pinyin__icontains=query.lower())
+                | Q(contact__name_pinyin_initials__icontains=query.lower())
+                | Q(id__in=snapshot_ids)
             )
         if p.get("sub_contact_name"):
+            query = p["sub_contact_name"]
+            snapshot_ids = [
+                attempt.id
+                for attempt in qs
+                if _pinyin_text_matches(attempt.sub_contact_name_snapshot, query)
+            ]
             qs = qs.filter(
-                Q(sub_contact__name__icontains=p["sub_contact_name"])
-                | Q(sub_contact_name_snapshot__icontains=p["sub_contact_name"])
+                Q(sub_contact__name__icontains=query)
+                | Q(sub_contact__name_pinyin__icontains=query.lower())
+                | Q(sub_contact__name_pinyin_initials__icontains=query.lower())
+                | Q(id__in=snapshot_ids)
             )
         if p.get("match_reason"):
             qs = qs.filter(match_reason__icontains=p["match_reason"])
@@ -1182,19 +1395,27 @@ class AgentDispatchDecisionViewSet(PermissionedReadOnlyModelViewSet):
             )
         decision = self.get_object()
         try:
-            new_decision, attempt = allocate_service.retry_agent_decision(decision)
+            allocate_service.validate_agent_decision_retry(decision)
+            run = runner.create_run(
+                "step2",
+                mode="ai",
+                scope={
+                    "candidate_ids": [decision.workflow.candidate_id],
+                    "source": "ai_retry",
+                    "retry_decision_id": decision.id,
+                    "retry_resume_id": decision.resume_id,
+                },
+                created_by=request.user,
+            )
+            submit_processing_runs([run])
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(
             {
-                "detail": "已重新发起 AI 处理",
-                "decision": serializers.AgentDispatchDecisionSerializer(new_decision).data,
-                "attempt": (
-                    serializers.AssignmentAttemptSerializer(attempt).data
-                    if attempt
-                    else None
-                ),
-            }
+                "detail": "已创建 AI 重试任务，可在处理任务中心查看进度",
+                "run": serializers.ProcessingRunSerializer(run).data,
+            },
+            status=status.HTTP_202_ACCEPTED,
         )
 
 
@@ -1233,6 +1454,17 @@ class PipelineRunView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         scope = request.data.get("scope") or {}
+        if not isinstance(scope, dict):
+            return Response(
+                {"detail": "处理范围 scope 必须是对象"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        retry_scope_fields = {"source", "retry_decision_id", "retry_resume_id"}
+        if retry_scope_fields.intersection(scope):
+            return Response(
+                {"detail": "AI 重试只能从简历详情中的重试入口发起"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         try:
             run = runner.create_configured_run(step, scope=scope, created_by=request.user)
         except ValueError as exc:
@@ -1260,10 +1492,13 @@ class UserViewSet(PermissionedModelViewSet):
             qs = qs.filter(username__icontains=p["username"])
         if p.get("role"):
             qs = qs.filter(role=p["role"])
-        if p.get("roles"):
+        role_values = _query_list_values(p, "roles_in")
+        if role_values:
+            qs = qs.filter(groups__name__in=role_values)
+        elif p.get("roles"):
             qs = qs.filter(groups__name=p["roles"])
         if p.get("contact_name"):
-            qs = qs.filter(contact__name__icontains=p["contact_name"])
+            qs = _filter_indexed_name(qs, "contact", p["contact_name"])
         if p.get("is_active") in ["true", "false"]:
             qs = qs.filter(is_active=p["is_active"] == "true")
         return qs.distinct()
@@ -1377,7 +1612,6 @@ class AIConnectionConfigView(APIView):
         try:
             current = ai_config.get_ai_connection_status()
             payload = {
-                "profile": request.data.get("profile", current["profile"]),
                 "api_style": request.data.get("api_style", current["api_style"]),
                 "model_name": request.data.get("model_name", current["model_name"]),
                 "base_url": request.data.get("base_url", current["base_url"]),
@@ -1412,3 +1646,22 @@ class AIConnectionTestView(APIView):
                 **result,
             }
         )
+
+
+class AIConnectionModelsView(APIView):
+    """通过管理员填写的 Base URL 查询 OpenAI 兼容模型列表。"""
+
+    permission_classes = [HasPermissionCode]
+    permission_code = "settings.manage_ai_connection"
+
+    def post(self, request):
+        try:
+            models = ai_service.list_available_models(
+                base_url=request.data.get("base_url", ""),
+                api_key=request.data.get("api_key", ""),
+            )
+        except ai_service.AIServiceError as exc:
+            return Response({"models": [], "code": exc.code, "detail": exc.message})
+        except (RuntimeError, ValueError) as exc:
+            return Response({"models": [], "code": "ai_not_configured", "detail": str(exc)})
+        return Response({"models": models})

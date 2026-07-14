@@ -23,6 +23,18 @@ body {
   user-select: none;
 }
 
+.srf-table-filter {
+  display: flex;
+  width: 260px;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+}
+
+.srf-table-filter .ant-select {
+  width: 100%;
+}
+
 .srf-column-resize-handle:hover {
   background: rgba(22, 119, 255, 0.18);
 }

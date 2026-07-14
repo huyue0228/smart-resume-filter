@@ -5,7 +5,6 @@ import {
   ProFormSelect,
   ProFormSwitch,
   ProFormText,
-  ProTable,
 } from '@ant-design/pro-components'
 import { Button, Popconfirm, Space, Tag, message } from 'antd'
 import {
@@ -16,25 +15,19 @@ import {
   updateSchoolTagRule,
 } from '../../api/services'
 import { useModalRecord } from './useModalRecord'
-import {
-  normalizeTableFilters,
-  selectColumnFilter,
-  textColumnFilter,
-  useResizableColumns,
-} from '../../components/DataTableControls'
+import SchoolTagBadge from '../../components/SchoolTagBadge'
+import SmartDataTable from '../../components/SmartDataTable'
 
 function tagIds(tags) {
   return (tags || []).map((tag) => tag.id).filter(Boolean)
 }
 
-function TagList({ tags = [], color }) {
+function TagList({ tags = [] }) {
   if (!tags.length) return '-'
   return (
     <Space wrap>
       {tags.map((tag) => (
-        <Tag color={color} key={tag.id}>
-          {tag.name}
-        </Tag>
+        <SchoolTagBadge value={tag.name} key={tag.id} />
       ))}
     </Space>
   )
@@ -89,17 +82,17 @@ export default function SchoolAdmissionRulesTab() {
       dataIndex: 'name',
       width: 180,
       fixed: 'left',
-      ...textColumnFilter('筛选规则名称'),
+      filter: { type: 'text', param: 'name', placeholder: '筛选规则名称' },
     },
-    { title: '优先级', dataIndex: 'priority', width: 90, ...textColumnFilter('筛选优先级') },
+    { title: '优先级', dataIndex: 'priority', width: 90, filter: { type: 'text', param: 'priority', placeholder: '筛选优先级' } },
     {
       title: '状态',
       dataIndex: 'is_active',
       width: 90,
-      ...selectColumnFilter([
-        { value: 'true', text: '启用' },
-        { value: 'false', text: '停用' },
-      ]),
+      filter: { type: 'select', param: 'is_active', options: [
+        { value: 'true', label: '启用' },
+        { value: 'false', label: '停用' },
+      ] },
       render: (value) =>
         value ? <Tag color="green">启用</Tag> : <Tag color="default">停用</Tag>,
     },
@@ -111,7 +104,7 @@ export default function SchoolAdmissionRulesTab() {
     {
       title: '最高学历允许标签',
       dataIndex: 'highest_degree_tags',
-      render: (tags) => <TagList tags={tags} color="blue" />,
+      render: (tags) => <TagList tags={tags} />,
     },
     {
       title: '操作',
@@ -139,8 +132,6 @@ export default function SchoolAdmissionRulesTab() {
       ),
     },
   ]
-  const { columns, components, scrollX } = useResizableColumns(baseColumns)
-
   const initialValues = modal.record
     ? {
         ...modal.record,
@@ -156,37 +147,17 @@ export default function SchoolAdmissionRulesTab() {
 
   return (
     <>
-      <ProTable
+      <SmartDataTable
+        tableId="school-admission-rules"
         actionRef={actionRef}
         rowKey="id"
-        search={false}
-        columns={columns}
-        components={components}
-        scroll={{ x: scrollX }}
-        pagination={{ defaultPageSize: 10, showSizeChanger: true }}
+        columns={baseColumns}
+        request={fetchSchoolTagRules}
         toolBarRender={() => [
           <Button key="create" type="primary" onClick={() => modal.open()}>
             新增规则
           </Button>,
         ]}
-        request={async (params, _sort, filters) => {
-          const { current, pageSize } = params
-          const tableFilters = normalizeTableFilters(filters, [
-            'name',
-            'priority',
-            'is_active',
-          ])
-          const { data } = await fetchSchoolTagRules({
-            page: current,
-            page_size: pageSize,
-            ...tableFilters,
-          })
-          return {
-            data: data?.results || [],
-            total: data?.count || 0,
-            success: true,
-          }
-        }}
       />
       <ModalForm
         key={modal.record?.id || 'create-rule'}

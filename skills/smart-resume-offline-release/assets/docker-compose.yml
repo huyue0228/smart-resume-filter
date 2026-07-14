@@ -1,0 +1,113 @@
+x-backend-env: &backend-env
+  DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?Set DJANGO_SECRET_KEY in .env}
+  DJANGO_DEBUG: ${DJANGO_DEBUG:-False}
+  DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:?Set DJANGO_ALLOWED_HOSTS in .env}
+  POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+  POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+  POSTGRES_HOST: db
+  POSTGRES_PORT: 5432
+  CELERY_BROKER_URL: redis://redis:6379/0
+  CELERY_RESULT_BACKEND: redis://redis:6379/1
+  CELERY_TASK_ALWAYS_EAGER: "False"
+  FILE_UPLOAD_TEMP_DIR: ${FILE_UPLOAD_TEMP_DIR:-/app/media/tmp_uploads}
+
+services:
+  db:
+    image: smart-resume-filter-postgres:${POSTGRES_VERSION:-16}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:?Set POSTGRES_USER in .env} -d ${POSTGRES_DB:?Set POSTGRES_DB in .env}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: smart-resume-filter-redis:${REDIS_VERSION:-7}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    ports:
+      - "${REDIS_BIND:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    image: smart-resume-filter-backend:${APP_VERSION:-latest}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    environment:
+      <<: *backend-env
+      RUN_MIGRATIONS: ${RUN_MIGRATIONS:-1}
+      RUN_SEED_BASE: ${RUN_SEED_BASE:-0}
+    command: gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers ${GUNICORN_WORKERS:-3} --timeout ${GUNICORN_TIMEOUT:-1800}
+    ports:
+      - "${BACKEND_BIND:-127.0.0.1}:${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - media_data:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket; s=socket.create_connection(('127.0.0.1', 8000), 3); s.close()\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  worker:
+    image: smart-resume-filter-backend:${APP_VERSION:-latest}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    environment:
+      <<: *backend-env
+      RUN_MIGRATIONS: "0"
+      RUN_SEED_BASE: "0"
+    command: celery -A config worker -l info
+    volumes:
+      - media_data:/app/media
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  init:
+    profiles: ["init"]
+    image: smart-resume-filter-backend:${APP_VERSION:-latest}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    environment:
+      <<: *backend-env
+      RUN_MIGRATIONS: "1"
+      RUN_SEED_BASE: "1"
+    command: python manage.py check
+    volumes:
+      - media_data:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    image: smart-resume-filter-frontend:${APP_VERSION:-latest}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    ports:
+      - "${FRONTEND_BIND:-0.0.0.0}:${FRONTEND_PORT:-5173}:80"
+    volumes:
+      - media_data:/usr/share/nginx/media:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  media_data:

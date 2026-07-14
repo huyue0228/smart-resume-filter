@@ -21,7 +21,7 @@
 - 后端：Django 4.2、Django REST Framework、Celery。
 - 前端：Vite、React 18、Ant Design Pro、JavaScript `.jsx`。
 - 本地开发：SQLite + Celery eager，同步执行任务，不依赖 Redis。
-- 生产预期：PostgreSQL + Redis + Celery worker。
+- 生产预期：PostgreSQL + Redis + Celery `default` worker + threads `ai` worker。
 
 ## 目录结构
 
@@ -70,7 +70,7 @@ npm run dev
 - PostgreSQL：业务数据库。
 - Redis：Celery broker/result backend。
 - Django backend 镜像：基于 `python:3.12.3-slim`，内置后端源码、Python 依赖、Gunicorn、PostgreSQL/Redis 客户端。
-- Celery worker：复用 backend 镜像，执行异步任务。
+- Celery workers：复用 backend 镜像；普通 worker 消费 `default` 队列，threads AI worker 消费 `ai` 队列。
 - Nginx frontend 镜像：先用 Node 构建 React，再用 Nginx 托管静态资源并反代 `/api` 到 backend。
 
 当前 `docker-compose.yml` 适合内网试运行、验收和单机部署。正式公网生产建议在前面再加 HTTPS/WAF 或企业统一网关；项目内置的 frontend 容器已经使用 Nginx 托管前端静态资源。
@@ -127,7 +127,7 @@ cp .env.example .env
 - `APP_VERSION`：建议发布时改成明确版本号，如 `2026-07-03-1`，方便回滚和排查。
 - `DOCKER_PLATFORM`：内网服务器是常见 x86_64 Linux 时保持 `linux/amd64`；如果是 ARM 服务器，改成 `linux/arm64` 后重新构建镜像包。
 
-启用 AI 模式前，使用管理员账号进入「系统设置 → AI 模型连接」完成连接配置并执行测试。模型连接只从系统设置中的数据库配置读取，部署环境变量不会参与模型、Base URL 或 API Key 决定；未配置可用 Key 时 AI 不启用。profile 注册表只用于表单模板。API Key 只允许写入，服务端加密保存，页面和 API 均不会回显。未配置可用连接时 AI 会写入 `ai_not_configured` 失败决策，不会回退 Rule。
+启用 AI 模式前，使用管理员账号进入「系统设置 → AI 模型连接」完成连接配置并执行测试。内网 DeepSeek V4 与 GLM 4.7 共用同一地址；页面配置 Base URL、可选访问令牌和 API 风格，并通过该地址的 OpenAI-compatible `GET /models` 获取模型 ID（也可直接输入），不配置服务商/Profile。模型连接只从系统设置中的数据库配置读取，部署环境变量不会参与决定。API Key 非空时仅允许写入并加密保存，页面和 API 均不会回显；无鉴权内网服务可留空。未配置可用连接时 AI 会写入 `ai_not_configured` 失败决策，不会回退 Rule。
 
 `RUN_SEED_BASE` 默认保持 `0`。不要在长期运行环境里把它改成 `1`，否则每次 backend 重启都可能把配置页中的参数重置为种子默认值。首次初始化请使用下一节的一次性 `init` 命令。
 
@@ -313,19 +313,20 @@ tar -czf "backups/$MEDIA_BACKUP.tar.gz" -C backups "$MEDIA_BACKUP"
 - `ai_dispatch_threshold`
 - `ai_review_threshold`
 - `ai_timeout_seconds`
-- `ai_concurrency`
+- `ai_concurrency`（所有 worker/运行共享的自适应并发上限，默认 8，范围 1–20）
 - `ai_retry_count`
 - `ai_retry_backoff_seconds`
 
-大模型连接由拥有 `settings.manage_ai_connection` 的角色在「系统设置 → AI 模型连接」维护；管理员角色默认拥有该权限，也可在「用户权限」按角色授予。页面可配置 profile、API 风格、模型名、Base URL 和 API Key，并执行一次最小真实模型测试。API Key 仅可写入；服务端用 Django `SECRET_KEY` 派生的 Fernet 密钥加密存储，GET、前端状态和测试结果都不会返回明文或密文。未获授权的 HR 和接口人不可见、不可调用该配置/测试接口。
+大模型连接由拥有 `settings.manage_ai_connection` 的角色在「系统设置 → AI 模型连接」维护；管理员角色默认拥有该权限，也可在「用户权限」按角色授予。页面配置共享内网 Base URL、API 风格和可选 API Key，通过 `GET /models` 获取模型 ID，同时允许直接输入模型 ID，并执行一次最小真实模型测试，不展示服务商/Profile。API Key 非空时仅可写入；服务端用 Django `SECRET_KEY` 派生的 Fernet 密钥加密存储，GET、前端状态和测试结果都不会返回明文或密文。未获授权的 HR 和接口人不可见、不可调用相关配置、模型发现和测试接口。
 
-模型连接仅由管理员保存的数据库配置决定；运行时不会读取部署环境变量中的模型、Base URL 或 API Key。`backend/config/ai_models.json` 继续提供 OpenAI、DeepSeek 等表单 profile 模板；通常无需为改动模型连接重启 backend/worker。
+模型连接仅由管理员保存的数据库配置决定；运行时不会读取部署环境变量中的 API 风格、模型、Base URL 或 API Key，也不读取模型服务商/Profile 模板。通常无需为改动模型连接重启 backend/worker。
 
-AI 运行中的连接异常会继续写入 `AgentDispatchDecision.error_code` / `error_message`，但内容仅为稳定错误码和脱敏摘要。第三方 SDK 原始异常不会进入数据库、API 响应或日志；backend 和 worker 标准输出仅记录 profile、model、api_style、错误码和异常类型。排查时执行：
+AI 运行中的连接异常会继续写入 `AgentDispatchDecision.error_code` / `error_message`，但内容仅为稳定错误码和脱敏摘要。第三方 SDK 原始异常不会进入数据库、API 响应或日志；backend 和 worker 标准输出仅记录 model、api_style、错误码和异常类型。排查时执行：
 
 ```bash
 docker compose logs --tail=200 backend
 docker compose logs --tail=200 worker
+docker compose logs --tail=200 ai-worker
 ```
 
 ### 11. 服务器安全检查
@@ -406,18 +407,18 @@ docker compose up -d
 - `ai_dispatch_threshold`
 - `ai_review_threshold`
 - `ai_timeout_seconds`
-- `ai_concurrency`
+- `ai_concurrency`（所有 worker/运行共享的自适应并发上限，默认 8，范围 1–20）
 - `ai_retry_count`
 - `ai_retry_backoff_seconds`
 - `welink_enabled`
 
-拥有 `settings.manage_ai_connection` 的角色可在「系统设置 → AI 模型连接」配置模型 profile、API 风格、模型名、Base URL 和 API Key，并执行最小真实模型测试；管理员角色默认拥有该权限，HR/接口人未被授权时不可访问。Key 仅允许写入、不会被读取接口返回，服务端以由 Django `SECRET_KEY` 派生的 Fernet 密文存储。运行时只读取该数据库配置；`backend/config/ai_models.json` 仅声明表单 profile 模板。日常修改连接请使用授权角色的配置页，避免在 shell、文档或工单中传播 API Key。
+拥有 `settings.manage_ai_connection` 的角色可在「系统设置 → AI 模型连接」配置共享内网 Base URL、API 风格和可选 API Key，通过 `GET /models` 选择或直接输入模型 ID，并执行最小真实模型测试；管理员角色默认拥有该权限，HR/接口人未被授权时不可访问。页面不展示服务商/Profile。Key 非空时仅允许写入、不会被读取接口返回，服务端以由 Django `SECRET_KEY` 派生的 Fernet 密文存储。运行时只读取该数据库配置。日常修改连接请使用授权角色的配置页，避免在 shell、文档或工单中传播 API Key。
 
 ## 主要流程
 
 1. 使用 `admin` 或 `hr` 登录。
 2. 在简历库、岗位需求、院校清单、部门接口人页面导入对应 Excel/简历包；也可先执行 `gen_sample` 和 `load_sample`。
-3. 简历上传含候选人时固定创建 Rule 运行；AI 可用时额外创建 AI 运行。两条 `ProcessingRun` 独立可见，但由同一顺序任务先执行 Rule、后执行 AI，均完成 Step1→Step2。使用 AI 模式前由管理员在「系统设置 → AI 模型连接」配置并测试模型，再用少量真实脱敏样本验收评分与护栏。
+3. 简历上传含候选人时按全局 `ai_enabled` 只创建当前模式的一条 `ProcessingRun`，并完成 Step1→Step2。Rule 模式按确定性规则执行；生产 AI 模式由有界调度器把候选人任务投递到专用 `ai` 队列，所有 AI worker 共享 Redis 自适应并发上限。使用 AI 模式前由管理员在「系统设置 → AI 模型连接」配置并测试模型，再用少量真实脱敏样本验收评分、护栏与并发吞吐。
 4. HR 在「简历分配」查看待下发、待复核、已下发等分配尝试。
 5. HR 单条、批量或一键全部下发给二级接口人。
 6. 二级接口人登录后仅看到自己的分配，可导出简历并转派本部门三级接口人。
@@ -443,7 +444,7 @@ docker compose up -d
 | GET | `/api/candidates/` | 候选人聚合列表 |
 | GET | `/api/candidates/export/` | 按候选人 ID 或当前筛选条件导出单个原文件或 zip |
 | GET/POST/PATCH | `/api/jobs/` `/api/schools/` `/api/departments/` `/api/contacts/` | 主数据维护 |
-| POST | `/api/pipeline/run/` | 按非空 `modes` 数组触发 Rule、AI 任一或两项处理；缺失、空数组或非数组返回 400；AI 未启用时含 `ai` 的请求被拒绝。生产异步返回 202、本地 `CELERY_TASK_ALWAYS_EAGER=True` 同步完成返回 200，均只返回 `processing_runs` |
+| POST | `/api/pipeline/run/` | 提交 `step + scope`，由后端按全局 `ai_enabled` 创建唯一 Rule 或 AI 运行；请求携带 `mode` / `modes` 返回 400。生产异步返回 202，本地 `CELERY_TASK_ALWAYS_EAGER=True` 同步完成返回 200，均返回 `processing_runs` |
 | GET | `/api/pipeline/runs/` | 处理运行记录 |
 | GET | `/api/ai-availability/` | 具有 `pipeline.run` 权限时只返回 AI 是否可用的 `enabled` 布尔值 |
 | GET | `/api/workflow-attempts/` | 分配尝试，后端按登录用户过滤数据范围 |
@@ -482,4 +483,4 @@ npm run build
 - W3 认证：当前未实现；待接口方案确认后，应新增仅管理员可维护的认证适配层，按工号映射到 `User.username`，并继续复用既有 RBAC 角色和 `Contact` 绑定。
 - WeLink：当前下发流程已保留状态和消息 ID 字段，`welink_enabled` 控制是否启用真实外部下发。真实接口确认后在服务层替换发送实现。
 - 数据库：本地默认 SQLite；生产环境通过 `POSTGRES_DB`、`POSTGRES_USER`、`POSTGRES_PASSWORD`、`POSTGRES_HOST`、`POSTGRES_PORT` 切换 PostgreSQL。
-- Celery：本地默认 `CELERY_TASK_ALWAYS_EAGER=True`；生产环境应配置 Redis broker/backend 并启动 worker。
+- Celery：本地默认 `CELERY_TASK_ALWAYS_EAGER=True`；生产环境应配置 Redis broker/backend，并同时启动 `default` worker 与 threads `ai` worker。

@@ -1,11 +1,7 @@
 import { useEffect, useState } from 'react'
-import { ProTable } from '@ant-design/pro-components'
 import { Button, InputNumber, Space, Switch, Tag, message } from 'antd'
 import { fetchConfigs, updateConfig } from '../../api/services'
-import {
-  localTextColumnFilter,
-  useResizableColumns,
-} from '../../components/DataTableControls'
+import SmartDataTable from '../../components/SmartDataTable'
 
 function ConfigValueEditor({ record, value, onChange }) {
   if (record.value_type === 'boolean') {
@@ -74,20 +70,20 @@ export default function SystemConfigTab() {
       dataIndex: 'label',
       width: 180,
       fixed: 'left',
-      ...localTextColumnFilter('label', '筛选配置项'),
+      filter: { type: 'text', placeholder: '筛选配置项' },
     },
     {
       title: '键',
       dataIndex: 'key',
       width: 180,
-      ...localTextColumnFilter('key', '筛选配置键'),
+      filter: { type: 'text', placeholder: '筛选配置键' },
       render: (value) => <Tag color="blue">{value}</Tag>,
     },
     {
       title: '说明',
       dataIndex: 'description',
       ellipsis: true,
-      ...localTextColumnFilter('description', '筛选说明'),
+      filter: { type: 'text', placeholder: '筛选说明' },
     },
     {
       title: '值',
@@ -122,19 +118,15 @@ export default function SystemConfigTab() {
       ),
     },
   ]
-  const { columns, components, scrollX } = useResizableColumns(baseColumns)
-
   return (
     <Space direction="vertical" style={{ width: '100%' }} size={16}>
-      <ProTable
+      <SmartDataTable
+        tableId="system-config"
         rowKey="key"
-        search={false}
         loading={loading}
-        columns={columns}
-        components={components}
+        columns={baseColumns}
         dataSource={configs}
         pagination={false}
-        scroll={{ x: scrollX }}
         toolBarRender={() => [
           <Button key="reload" onClick={load}>
             刷新

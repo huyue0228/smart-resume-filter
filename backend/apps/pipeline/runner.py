@@ -1,10 +1,12 @@
 """流水线编排：单步、上传后主流程或一键全流程，记录共享 ProcessingRun。"""
 from copy import deepcopy
 
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
 from apps.core.models import (
+    Candidate,
     CandidateWorkflow,
     ProcessingRun,
     ProcessingRunScopeItem,
@@ -168,6 +170,210 @@ def _run_one_stage(run, stage, mode, scope):
     return message
 
 
+AI_SCOPE_TERMINAL_STATUSES = [
+    "success",
+    "failed",
+    "skipped_manual_change",
+    "cancelled",
+]
+
+
+def prepare_ai_stage(run, scope):
+    """初始化 AI 阶段并补齐院校标签；候选人模型调用由独立任务执行。"""
+    raise_if_cancel_requested(run)
+    stage = run.stages.get(step="step2")
+    now = timezone.now()
+    candidate_ids = list(
+        run.scope_items.order_by("candidate_id").values_list("candidate_id", flat=True)
+    )
+    candidates = list(
+        Candidate.objects.filter(id__in=candidate_ids).order_by("id")
+    )
+    classify_school.classify_candidates(candidates, overwrite=False)
+    concurrency_limit = ai_config.get_ai_runtime_config().concurrency
+    run.current_stage = "step2"
+    run.total_count = len(candidate_ids)
+    run.processed_count = 0
+    run.success_count = 0
+    run.failed_count = 0
+    run.review_count = 0
+    run.dispatch_count = 0
+    run.archive_count = 0
+    run.skipped_count = 0
+    run.cancelled_count = 0
+    run.chunk_size = 1
+    run.chunk_total = len(candidate_ids)
+    run.chunk_done = 0
+    run.chunk_failed = 0
+    run.chunk_errors = []
+    run.ai_concurrency_limit = concurrency_limit
+    run.ai_effective_concurrency = (
+        1 if settings.CELERY_TASK_ALWAYS_EAGER else min(2, concurrency_limit)
+    )
+    run.last_heartbeat_at = now
+    run.save()
+    stage.status = "running"
+    stage.started_at = stage.started_at or now
+    stage.total_count = len(candidate_ids)
+    stage.processed_count = 0
+    stage.success_count = 0
+    stage.failed_count = 0
+    stage.review_count = 0
+    stage.dispatch_count = 0
+    stage.archive_count = 0
+    stage.skipped_count = 0
+    stage.cancelled_count = 0
+    stage.save()
+    return stage
+
+
+def record_ai_scope_outcome(run_id, result, *, infrastructure_error=""):
+    """只为首次进入终态的 ScopeItem 累计一次进度。"""
+    if result.get("already_terminal"):
+        return
+    status = result.get("status")
+    if status not in AI_SCOPE_TERMINAL_STATUSES:
+        return
+    from django.db.models import F
+
+    run_updates = {
+        "processed_count": F("processed_count") + 1,
+        "chunk_done": F("chunk_done") + 1,
+        "last_heartbeat_at": timezone.now(),
+    }
+    stage_updates = {"processed_count": F("processed_count") + 1}
+    outcome_field = {
+        "success": "success_count",
+        "failed": "failed_count",
+        "skipped_manual_change": "skipped_count",
+        "cancelled": "cancelled_count",
+    }[status]
+    run_updates[outcome_field] = F(outcome_field) + 1
+    stage_updates[outcome_field] = F(outcome_field) + 1
+    recommendation = result.get("recommendation")
+    recommendation_field = {
+        "review": "review_count",
+        "dispatch": "dispatch_count",
+        "archive": "archive_count",
+    }.get(recommendation)
+    if recommendation_field:
+        run_updates[recommendation_field] = F(recommendation_field) + 1
+        stage_updates[recommendation_field] = F(recommendation_field) + 1
+    if infrastructure_error:
+        run_updates["chunk_failed"] = F("chunk_failed") + 1
+    updated = ProcessingRun.objects.filter(
+        pk=run_id,
+        status__in=["running", "waiting_conflict", "cancelling"],
+    ).update(**run_updates)
+    if updated:
+        ProcessingRunStage.objects.filter(run_id=run_id, step="step2").update(
+            **stage_updates
+        )
+    if infrastructure_error and updated:
+        with transaction.atomic():
+            run = ProcessingRun.objects.select_for_update().get(pk=run_id)
+            errors = list(run.chunk_errors or [])
+            errors.append(infrastructure_error[:300])
+            run.chunk_errors = errors[-50:]
+            run.save(update_fields=["chunk_errors"])
+
+
+def cancel_unstarted_ai_items(run_id):
+    now = timezone.now()
+    qs = ProcessingRunScopeItem.objects.filter(
+        run_id=run_id,
+        status__in=["pending", "queued", "waiting_conflict"],
+    )
+    count = qs.update(status="cancelled", finished_at=now)
+    if count:
+        from django.db.models import F
+
+        ProcessingRun.objects.filter(pk=run_id).update(
+            processed_count=F("processed_count") + count,
+            cancelled_count=F("cancelled_count") + count,
+            chunk_done=F("chunk_done") + count,
+            last_heartbeat_at=now,
+        )
+        ProcessingRunStage.objects.filter(run_id=run_id, step="step2").update(
+            processed_count=F("processed_count") + count,
+            cancelled_count=F("cancelled_count") + count,
+        )
+    return count
+
+
+def finalize_ai_run_if_complete(run_id):
+    """以 ScopeItem 为权威来源收口运行；未全部终态时保持运行中。"""
+    with transaction.atomic():
+        run = ProcessingRun.objects.select_for_update().get(pk=run_id)
+        total = run.scope_items.count()
+        terminal = run.scope_items.filter(status__in=AI_SCOPE_TERMINAL_STATUSES).count()
+        if terminal < total:
+            return False
+        success = run.scope_items.filter(status="success").count()
+        failed = run.scope_items.filter(status="failed").count()
+        skipped = run.scope_items.filter(status="skipped_manual_change").count()
+        cancelled = run.scope_items.filter(status="cancelled").count()
+        review = run.agent_decisions.filter(recommendation="review").count()
+        dispatch = run.agent_decisions.filter(recommendation="dispatch").count()
+        archive = run.agent_decisions.filter(recommendation="archive").count()
+        run.total_count = total
+        run.processed_count = terminal
+        run.success_count = success
+        run.failed_count = failed
+        run.skipped_count = skipped
+        run.cancelled_count = cancelled
+        run.review_count = review
+        run.dispatch_count = dispatch
+        run.archive_count = archive
+        run.chunk_done = terminal
+        now = timezone.now()
+        if run.cancel_requested_at:
+            run.status = "cancelled"
+            run.cancelled_at = run.cancelled_at or now
+            run.message = "任务已取消；已完成的候选人处理结果已保留"
+        else:
+            run.status = "partial_failed" if failed else "success"
+            run.message = (
+                f"AI 并发处理完成：成功 {success}，失败 {failed}，"
+                f"跳过 {skipped}，取消 {cancelled}"
+            )
+        run.current_stage = ""
+        run.finished_at = now
+        run.last_heartbeat_at = now
+        run.save()
+        stage = ProcessingRunStage.objects.select_for_update().get(
+            run=run, step="step2"
+        )
+        stage.total_count = total
+        stage.processed_count = terminal
+        stage.success_count = success
+        stage.failed_count = failed
+        stage.skipped_count = skipped
+        stage.cancelled_count = cancelled
+        stage.review_count = review
+        stage.dispatch_count = dispatch
+        stage.archive_count = archive
+        stage.status = (
+            "cancelled"
+            if run.status == "cancelled"
+            else "partial_failed"
+            if failed
+            else "success"
+        )
+        stage.message = run.message
+        stage.finished_at = now
+        stage.save()
+        return True
+
+
+def _execute_ai_eager(run):
+    """SQLite/eager 开发模式沿用同步语义，但复用候选人级幂等处理。"""
+    for item_id in run.scope_items.order_by("candidate_id").values_list("id", flat=True):
+        result = allocate.process_ai_scope_item(run.id, item_id)
+        record_ai_scope_outcome(run.id, result)
+    finalize_ai_run_if_complete(run.id)
+
+
 def execute_run(run_id):
     # 只由第一个成功领取 pending 任务的 worker 运行，避免取消请求与 worker
     # 启动同时发生时，把已取消任务重新写回 running。
@@ -195,11 +401,27 @@ def execute_run(run_id):
         run.last_heartbeat_at = run.started_at
         run.save(update_fields=["status", "started_at", "last_heartbeat_at"])
     step, mode, scope = run.step, run.mode, _run_scope(run)
+    async_ai_scheduled = False
     try:
-        messages = [
-            f"{stage}: {_run_one_stage(run, stage, mode, scope)}"
-            for stage in _stage_steps(step)
-        ]
+        messages = []
+        for stage in _stage_steps(step):
+            if stage == "step2" and mode == "ai":
+                prepare_ai_stage(run, scope)
+                if settings.CELERY_TASK_ALWAYS_EAGER:
+                    _execute_ai_eager(run)
+                else:
+                    from .tasks import dispatch_ai_run_task
+
+                    dispatch_ai_run_task.delay(run.id)
+                    async_ai_scheduled = True
+                break
+            messages.append(f"{stage}: {_run_one_stage(run, stage, mode, scope)}")
+        if async_ai_scheduled:
+            run.refresh_from_db()
+            return run
+        if mode == "ai" and "step2" in _stage_steps(step):
+            run.refresh_from_db()
+            return run
         message = " | ".join(messages)
         run.refresh_from_db()
         run.status = "partial_failed" if run.failed_count else "success"

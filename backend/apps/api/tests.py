@@ -1,4 +1,6 @@
+from datetime import timedelta
 from io import BytesIO
+import importlib
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -8,8 +10,10 @@ import zipfile
 from urllib.parse import quote
 
 from django.contrib.auth.models import Group, Permission
+from django.apps import apps as django_apps
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
+from django.utils import timezone
 import pandas as pd
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
@@ -18,6 +22,7 @@ from apps.accounts.models import User
 from apps.accounts.permissions import ensure_rbac_defaults, permission_codename
 from apps.core import models as m
 from apps.pipeline import ai_config
+from apps.pipeline.ai.service import AIServiceError
 from apps.pipeline.services import classify_school
 
 
@@ -46,10 +51,9 @@ class AgentDispatchDecisionApiTests(TestCase):
     def setUp(self):
         ai_config.save_ai_connection_config(
             {
-                "profile": "openai",
                 "api_style": "responses",
                 "model_name": "gpt-test",
-                "base_url": "",
+                "base_url": "https://model.internal/v1",
                 "api_key": "test-key",
             }
         )
@@ -112,7 +116,7 @@ class AgentDispatchDecisionApiTests(TestCase):
     def test_retry_records_new_failed_decision_when_pdf_is_still_missing(self):
         response = self.client.post(f"/api/agent-decisions/{self.decision.id}/retry/")
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 202)
         self.assertFalse(m.AssignmentAttempt.objects.exists())
         self.assertEqual(m.AgentDispatchDecision.objects.count(), 2)
         new_decision = m.AgentDispatchDecision.objects.order_by("-id").first()
@@ -120,7 +124,12 @@ class AgentDispatchDecisionApiTests(TestCase):
         self.assertIsNone(new_decision.recommendation)
         self.assertIsNone(new_decision.confidence_score)
         self.assertEqual(new_decision.error_code, "pdf_missing")
-        self.assertEqual(response.data["decision"]["id"], new_decision.id)
+        run = m.ProcessingRun.objects.get()
+        self.assertEqual(response.data["run"]["id"], run.id)
+        self.assertEqual(run.mode, "ai")
+        self.assertEqual(run.scope["source"], "ai_retry")
+        self.assertEqual(run.scope["retry_decision_id"], self.decision.id)
+        self.assertEqual(new_decision.processing_run_id, run.id)
 
     def test_retry_is_disabled_when_global_ai_switch_is_off(self):
         m.Config.objects.update_or_create(key="ai_enabled", defaults={"value": False})
@@ -149,6 +158,25 @@ class AgentDispatchDecisionApiTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(m.AgentDispatchDecision.objects.count(), 1)
+
+    def test_retry_task_keeps_the_original_decision_resume(self):
+        m.Resume.objects.create(
+            candidate=self.candidate,
+            apply_id="A0000",
+            position_name="后端工程师",
+            volunteer_rank=0,
+        )
+
+        with patch(
+            "apps.pipeline.services.allocate.ai_service.screen_resume",
+            side_effect=AIServiceError("pdf_missing", "缺少 PDF 简历文件"),
+        ) as screen_resume:
+            response = self.client.post(
+                f"/api/agent-decisions/{self.decision.id}/retry/"
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(screen_resume.call_args.args[0].id, self.resume.id)
 
     def test_retry_cancels_old_active_ai_attempt_before_creating_new_one(self):
         self.resume.resume_file = "张三（A1001）.pdf"
@@ -197,7 +225,7 @@ class AgentDispatchDecisionApiTests(TestCase):
         ):
             response = self.client.post(f"/api/agent-decisions/{self.decision.id}/retry/")
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 202)
         old_attempt.refresh_from_db()
         self.assertEqual(old_attempt.status, m.AssignmentAttempt.STATUS_CANCELLED)
         self.assertEqual(old_attempt.cancel_reason, m.AssignmentAttempt.CANCEL_RERUN)
@@ -282,6 +310,48 @@ class PipelineRunApiTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("系统参数", response.data["detail"])
+
+    def test_pipeline_run_rejects_reserved_ai_retry_scope(self):
+        response = self.client.post(
+            "/api/pipeline/run/",
+            {
+                "step": "step2",
+                "scope": {
+                    "source": "ai_retry",
+                    "retry_decision_id": 1,
+                    "retry_resume_id": 1,
+                },
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("简历详情", response.data["detail"])
+        self.assertFalse(m.ProcessingRun.objects.exists())
+
+    def test_processing_run_list_includes_elapsed_seconds(self):
+        now = timezone.now()
+        running = m.ProcessingRun.objects.create(
+            step="step2", mode="rule", status="running"
+        )
+        finished = m.ProcessingRun.objects.create(
+            step="step2", mode="ai", status="success"
+        )
+        m.ProcessingRun.objects.filter(pk=running.pk).update(
+            created_at=now - timedelta(seconds=75)
+        )
+        m.ProcessingRun.objects.filter(pk=finished.pk).update(
+            created_at=now - timedelta(seconds=130),
+            finished_at=now - timedelta(seconds=65),
+        )
+
+        with patch("apps.api.serializers.timezone.now", return_value=now):
+            response = self.client.get("/api/pipeline/runs/")
+
+        self.assertEqual(response.status_code, 200)
+        runs = {item["id"]: item for item in response.data["results"]}
+        self.assertEqual(runs[running.id]["elapsed_seconds"], 75)
+        self.assertEqual(runs[finished.id]["elapsed_seconds"], 65)
 
     def test_pending_processing_run_can_be_cancelled(self):
         run = m.ProcessingRun.objects.create(step="step2", mode="ai", status="pending")
@@ -662,20 +732,18 @@ class RbacApiTests(TestCase):
 
         ai_config.save_ai_connection_config(
             {
-                "profile": "openai",
                 "api_style": "responses",
                 "model_name": "gpt-test",
-                "base_url": "",
+                "base_url": "https://model.internal/v1",
                 "api_key": "test-key",
             }
         )
         with patch(
             "apps.api.views.ai_service.test_model_connection",
             return_value={
-                "profile": "openai",
                 "model_name": "gpt-test",
                 "api_style": "responses",
-                "base_url": "",
+                "base_url": "https://model.internal/v1",
             },
         ):
             test_response = self.client.post("/api/ai-connection/test/")
@@ -697,10 +765,9 @@ class RbacApiTests(TestCase):
         self.client.force_authenticate(self.admin)
         ai_config.save_ai_connection_config(
             {
-                "profile": "openai",
                 "api_style": "responses",
                 "model_name": "gpt-test",
-                "base_url": "",
+                "base_url": "https://model.internal/v1",
                 "api_key": "test-key",
             }
         )
@@ -747,7 +814,6 @@ class RbacApiTests(TestCase):
 
         self.client.force_authenticate(self.admin)
         payload = {
-            "profile": "deepseek",
             "api_style": "chat_json",
             "model_name": "deepseek-v4-pro",
             "base_url": "https://api.deepseek.com",
@@ -758,12 +824,92 @@ class RbacApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.data["api_key_configured"])
         self.assertNotIn("api_key", response.data)
+        self.assertNotIn("profile", response.data)
+        self.assertNotIn("profiles", response.data)
         self.assertNotIn("sk-test-secret", str(response.data))
         stored = m.Config.objects.get(key="ai_connection_api_key").value
         self.assertNotEqual(stored, "sk-test-secret")
         model_config = ai_config.get_ai_model_config()
         self.assertEqual(model_config.model_name, "deepseek-v4-pro")
         self.assertEqual(model_config.api_key, "sk-test-secret")
+
+    def test_admin_can_discover_models_and_hr_cannot(self):
+        self.client.force_authenticate(self.hr)
+        denied = self.client.post(
+            "/api/ai-connection/models/",
+            {"base_url": "https://model.internal/v1"},
+            format="json",
+        )
+        self.assertEqual(denied.status_code, 403)
+
+        self.client.force_authenticate(self.admin)
+        with patch(
+            "apps.api.views.ai_service.list_available_models",
+            return_value=["deepseek-v4", "glm-4.7"],
+        ) as discover:
+            response = self.client.post(
+                "/api/ai-connection/models/",
+                {
+                    "base_url": "https://model.internal/v1",
+                    "api_key": "temporary-token",
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["models"], ["deepseek-v4", "glm-4.7"])
+        discover.assert_called_once_with(
+            base_url="https://model.internal/v1", api_key="temporary-token"
+        )
+        self.assertNotIn("temporary-token", str(response.data))
+
+    def test_ai_connection_allows_empty_access_token(self):
+        self.client.force_authenticate(self.admin)
+
+        response = self.client.patch(
+            "/api/ai-connection/",
+            {
+                "api_style": "chat_json",
+                "model_name": "glm-4.7",
+                "base_url": "https://model.internal/v1",
+                "clear_api_key": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data["api_key_configured"])
+        self.assertEqual(ai_config.get_ai_model_config().api_key, "")
+
+    def test_changing_base_url_without_new_token_clears_saved_token(self):
+        self.client.force_authenticate(self.admin)
+        first = self.client.patch(
+            "/api/ai-connection/",
+            {
+                "api_style": "chat_json",
+                "model_name": "deepseek-v4",
+                "base_url": "https://model.internal/v1",
+                "api_key": "bound-secret",
+            },
+            format="json",
+        )
+
+        changed = self.client.patch(
+            "/api/ai-connection/",
+            {
+                "base_url": "https://another-model.internal/v1",
+                "api_key": "",
+            },
+            format="json",
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertTrue(first.data["api_key_configured"])
+        self.assertEqual(changed.status_code, 200)
+        self.assertFalse(changed.data["api_key_configured"])
+        self.assertFalse(
+            m.Config.objects.filter(key="ai_connection_api_key").exists()
+        )
 
     def test_role_granted_ai_connection_permission_can_manage_connection(self):
         permission = Permission.objects.get(
@@ -782,14 +928,18 @@ class RbacApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         update_response = self.client.patch(
             "/api/ai-connection/",
-            {"model_name": "delegated-model", "api_key": "delegated-test-key"},
+            {
+                "api_style": "chat_json",
+                "model_name": "delegated-model",
+                "base_url": "https://model.internal/v1",
+                "api_key": "delegated-test-key",
+            },
             format="json",
         )
         self.assertEqual(update_response.status_code, 200)
         with patch(
             "apps.api.views.ai_service.test_model_connection",
             return_value={
-                "profile": "deepseek",
                 "model_name": "delegated-model",
                 "api_style": "chat_json",
                 "base_url": "https://api.deepseek.com",
@@ -805,10 +955,9 @@ class RbacApiTests(TestCase):
         config_response = self.client.patch(
             "/api/ai-connection/",
             {
-                "profile": "openai",
                 "api_style": "responses",
                 "model_name": "gpt-test",
-                "base_url": "",
+                "base_url": "https://model.internal/v1",
                 "api_key": "test-key",
             },
             format="json",
@@ -817,7 +966,6 @@ class RbacApiTests(TestCase):
         with patch(
             "apps.api.views.ai_service.test_model_connection",
             return_value={
-                "profile": "deepseek",
                 "model_name": "deepseek-v4-pro",
                 "api_style": "chat_json",
                 "base_url": "https://api.deepseek.com",
@@ -1122,13 +1270,17 @@ class ListFilteringPaginationApiTests(TestCase):
         )
 
         self.assertEqual(options_response.status_code, 200)
-        self.assertEqual(options_response.data["highest_major"], ["市场营销", "计算机科学与技术"])
-        self.assertEqual(options_response.data["current_rank"], ["1", "2"])
-        self.assertIn("GW", options_response.data["current_entity"])
-        self.assertIn("后端工程师", options_response.data["current_position_name"])
-        self.assertIn("研发中心", options_response.data["job_department_name"])
-        self.assertIn("技术类", options_response.data["current_job_category"])
-        self.assertIn("目标院校", options_response.data["school_tag"])
+        option_values = {
+            key: [item["value"] for item in items]
+            for key, items in options_response.data.items()
+        }
+        self.assertEqual(option_values["highest_major"], ["市场营销", "计算机科学与技术"])
+        self.assertEqual(option_values["current_rank"], ["1", "2"])
+        self.assertIn("GW", option_values["current_entity"])
+        self.assertIn("后端工程师", option_values["current_position_name"])
+        self.assertIn("研发中心", option_values["job_department_name"])
+        self.assertIn("技术类", option_values["current_job_category"])
+        self.assertIn("目标院校", option_values["school_tag"])
         self.assertEqual(filter_response.status_code, 200)
         self.assertEqual([item["id"] for item in filter_response.data["results"]], [keep.id])
 
@@ -1597,6 +1749,29 @@ class ListFilteringPaginationApiTests(TestCase):
             response.data["results"][0]["system_status_label"], "已分配"
         )
 
+        workflow.status = m.CandidateWorkflow.STATUS_PASSED
+        workflow.save(update_fields=["status", "updated_at"])
+        attempt = workflow.attempts.get()
+        attempt.status = m.AssignmentAttempt.STATUS_PASSED
+        attempt.save(update_fields=["status", "updated_at"])
+        passed_response = self.client.get(
+            "/api/candidates/", {"system_status": "screening_passed"}
+        )
+        self.assertEqual(
+            passed_response.data["results"][0]["system_status_label"], "通过"
+        )
+
+        workflow.status = m.CandidateWorkflow.STATUS_IN_PROGRESS
+        workflow.save(update_fields=["status", "updated_at"])
+        attempt.status = m.AssignmentAttempt.STATUS_REJECTED
+        attempt.save(update_fields=["status", "updated_at"])
+        rejected_response = self.client.get(
+            "/api/candidates/", {"system_status": "screening_rejected"}
+        )
+        self.assertEqual(
+            rejected_response.data["results"][0]["system_status_label"], "不通过"
+        )
+
     def test_workflow_list_filters_by_status_search_and_current_position(self):
         keep_candidate = m.Candidate.objects.create(
             identity_hash="candidate-workflow-keep",
@@ -1772,6 +1947,93 @@ class ListFilteringPaginationApiTests(TestCase):
         self.assertEqual(response.data["count"], 1)
         self.assertEqual(response.data["results"][0]["public_name"], "后端开发")
 
+    def test_job_selector_options_and_exact_multi_value_filters(self):
+        department = m.Department.objects.create(name="研发中心", level=2)
+        keep = m.Job.objects.create(
+            entity="GW",
+            department=department,
+            public_name="后端开发",
+            position_name="后端工程师",
+            category="技术类",
+            job_family="研发",
+            location="深圳",
+            education="本科",
+            headcount=3,
+            is_public=True,
+        )
+        m.Job.objects.create(
+            entity="YLS",
+            public_name="产品运营",
+            position_name="产品经理",
+            category="产品类",
+            job_family="产品",
+            location="上海",
+            education="硕士",
+            headcount=1,
+            is_public=False,
+        )
+
+        options_response = self.client.get("/api/jobs/filter-options/")
+        filter_response = self.client.get(
+            "/api/jobs/",
+            {
+                "entity_in": "GW,YLS",
+                "category_in": "技术类",
+                "job_family_in": "研发",
+                "department_name_in": "研发中心",
+                "location_in": "深圳",
+                "education_in": "本科",
+            },
+        )
+
+        self.assertEqual(options_response.status_code, 200)
+        self.assertEqual(filter_response.status_code, 200)
+        category_options = {
+            item["value"]: item for item in options_response.data["category"]
+        }
+        department_options = {
+            item["value"]: item
+            for item in options_response.data["department_name"]
+        }
+        self.assertIn("jishulei", category_options["技术类"]["search_text"])
+        self.assertIn("jsl", category_options["技术类"]["search_text"])
+        self.assertIn("yanfazhongxin", department_options["研发中心"]["search_text"])
+        self.assertEqual(
+            [item["id"] for item in filter_response.data["results"]], [keep.id]
+        )
+
+    def test_job_name_filters_support_full_pinyin_and_initials(self):
+        keep = m.Job.objects.create(
+            entity="GW",
+            public_name="后端开发",
+            position_name="后端工程师",
+            category="技术类",
+            is_active=True,
+        )
+        m.Job.objects.create(
+            entity="YLS",
+            public_name="产品运营",
+            position_name="产品经理",
+            category="产品类",
+            is_active=True,
+        )
+
+        full_response = self.client.get(
+            "/api/jobs/", {"public_name": "houduankaifa"}
+        )
+        initials_response = self.client.get(
+            "/api/jobs/", {"position_name": "hdgcs"}
+        )
+
+        self.assertEqual(full_response.status_code, 200)
+        self.assertEqual(initials_response.status_code, 200)
+        self.assertEqual(
+            [item["id"] for item in full_response.data["results"]], [keep.id]
+        )
+        self.assertEqual(
+            [item["id"] for item in initials_response.data["results"]], [keep.id]
+        )
+
     def test_job_create_and_update_maintains_demand_majors(self):
         department = m.Department.objects.create(name="研发中心", level=2)
 
@@ -1891,6 +2153,38 @@ class ListFilteringPaginationApiTests(TestCase):
         self.assertEqual(response.data["count"], 1)
         self.assertEqual(response.data["results"][0]["name"], "南京大学")
 
+    def test_school_name_pinyin_search_and_platform_selector(self):
+        keep = m.School.objects.create(
+            name="南京大学", platform="双一流", province="江苏"
+        )
+        m.School.objects.create(name="北京大学", platform="985", province="北京")
+
+        full_response = self.client.get("/api/schools/", {"name": "nanjingdaxue"})
+        initials_response = self.client.get("/api/schools/", {"name": "njdx"})
+        selector_response = self.client.get(
+            "/api/schools/", {"platform_in": "双一流"}
+        )
+        options_response = self.client.get("/api/schools/filter-options/")
+
+        self.assertEqual(full_response.status_code, 200)
+        self.assertEqual(initials_response.status_code, 200)
+        self.assertEqual(selector_response.status_code, 200)
+        self.assertEqual(options_response.status_code, 200)
+        self.assertEqual(
+            [item["id"] for item in full_response.data["results"]], [keep.id]
+        )
+        self.assertEqual(
+            [item["id"] for item in initials_response.data["results"]], [keep.id]
+        )
+        self.assertEqual(
+            [item["id"] for item in selector_response.data["results"]], [keep.id]
+        )
+        options = {item["value"]: item for item in options_response.data["platform"]}
+        self.assertIn("shuangyiliu", options["双一流"]["search_text"])
+        keep.refresh_from_db()
+        self.assertEqual(keep.name_pinyin, "nanjingdaxue")
+        self.assertEqual(keep.name_pinyin_initials, "njdx")
+
     def test_contact_header_filters_cover_visible_columns(self):
         department = m.Department.objects.create(name="研发二部", level=2, entity="GW")
         m.Contact.objects.create(
@@ -1922,6 +2216,182 @@ class ListFilteringPaginationApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["count"], 1)
         self.assertEqual(response.data["results"][0]["name"], "王五")
+
+    def test_contact_department_selector_options_and_multi_filter(self):
+        research = m.Department.objects.create(name="研发二部", level=2)
+        product = m.Department.objects.create(name="产品二部", level=2)
+        keep = m.Contact.objects.create(
+            name="王五",
+            employee_no="E1001",
+            department=research,
+            contact_level=m.Contact.LEVEL_SECONDARY,
+            is_active=True,
+        )
+        m.Contact.objects.create(
+            name="赵六",
+            employee_no="E2001",
+            department=product,
+            contact_level=m.Contact.LEVEL_TERTIARY,
+            is_active=True,
+        )
+
+        options_response = self.client.get("/api/contacts/filter-options/")
+        filter_response = self.client.get(
+            "/api/contacts/", {"department_in": f"{research.id},999999"}
+        )
+
+        self.assertEqual(options_response.status_code, 200)
+        self.assertEqual(filter_response.status_code, 200)
+        options = {
+            item["value"]: item for item in options_response.data["department"]
+        }
+        self.assertIn(research.id, options)
+        self.assertIn("yanfaerbu", options[research.id]["search_text"])
+        self.assertEqual(
+            [item["id"] for item in filter_response.data["results"]], [keep.id]
+        )
+
+    def test_contact_name_and_bound_user_support_full_pinyin_and_initials(self):
+        department = m.Department.objects.create(name="研发二部", level=2)
+        contact = m.Contact.objects.create(
+            name="王五",
+            employee_no="PINYIN001",
+            department=department,
+            contact_level=m.Contact.LEVEL_SECONDARY,
+        )
+        user = User.objects.create_user(
+            username="PINYIN001",
+            password="pass",
+            role=User.ROLE_SECONDARY_CONTACT,
+            contact=contact,
+        )
+
+        full_response = self.client.get("/api/contacts/", {"name": "wangwu"})
+        initials_response = self.client.get("/api/contacts/", {"name": "ww"})
+        user_response = self.client.get("/api/users/", {"contact_name": "wangwu"})
+
+        self.assertEqual([item["id"] for item in full_response.data["results"]], [contact.id])
+        self.assertEqual([item["id"] for item in initials_response.data["results"]], [contact.id])
+        self.assertEqual([item["id"] for item in user_response.data["results"]], [user.id])
+        contact.refresh_from_db()
+        self.assertEqual(contact.name_pinyin, "wangwu")
+        self.assertEqual(contact.name_pinyin_initials, "ww")
+
+    def test_candidate_contact_filter_supports_contact_name_pinyin(self):
+        department = m.Department.objects.create(name="技术二部", level=2)
+        contact = m.Contact.objects.create(
+            name="王五",
+            employee_no="PINYIN002",
+            department=department,
+            contact_level=m.Contact.LEVEL_SECONDARY,
+        )
+        candidate = m.Candidate.objects.create(
+            identity_hash="candidate-contact-pinyin",
+            name="候选人甲",
+            phone="13812340000",
+        )
+        resume = m.Resume.objects.create(
+            candidate=candidate,
+            apply_id="PINYIN-APPLY",
+            position_name="后端工程师",
+            volunteer_rank=1,
+        )
+        workflow = m.CandidateWorkflow.objects.create(
+            candidate=candidate,
+            status=m.CandidateWorkflow.STATUS_IN_PROGRESS,
+            current_resume=resume,
+            current_rank=1,
+        )
+        m.AssignmentAttempt.objects.create(
+            workflow=workflow,
+            resume=resume,
+            attempt_no=1,
+            source=m.AssignmentAttempt.SOURCE_RULE,
+            status=m.AssignmentAttempt.STATUS_PENDING_DISPATCH,
+            department=department,
+            contact=contact,
+        )
+
+        response = self.client.get("/api/candidates/", {"contact_name": "ww"})
+
+        self.assertEqual([item["id"] for item in response.data["results"]], [candidate.id])
+
+    def test_candidate_filter_options_respect_contact_rbac_scope(self):
+        department = m.Department.objects.create(name="范围二部", level=2)
+        own_contact = m.Contact.objects.create(
+            name="本人接口人",
+            employee_no="SCOPE001",
+            department=department,
+            contact_level=m.Contact.LEVEL_SECONDARY,
+        )
+        other_contact = m.Contact.objects.create(
+            name="其他接口人",
+            employee_no="SCOPE002",
+            department=department,
+            contact_level=m.Contact.LEVEL_SECONDARY,
+        )
+        contact_user = User.objects.create_user(
+            username="SCOPE001",
+            password="pass",
+            role=User.ROLE_SECONDARY_CONTACT,
+            contact=own_contact,
+        )
+        contact_user.groups.add(Group.objects.get(name="二级接口人"))
+        for index, (contact, position) in enumerate(
+            [(own_contact, "可见岗位"), (other_contact, "不可见岗位")], start=1
+        ):
+            candidate = m.Candidate.objects.create(
+                identity_hash=f"candidate-option-scope-{index}",
+                name=f"范围候选人{index}",
+                phone=f"1385555000{index}",
+            )
+            resume = m.Resume.objects.create(
+                candidate=candidate,
+                apply_id=f"SCOPE-APPLY-{index}",
+                position_name=position,
+                volunteer_rank=1,
+            )
+            workflow = m.CandidateWorkflow.objects.create(
+                candidate=candidate,
+                status=m.CandidateWorkflow.STATUS_IN_PROGRESS,
+                current_resume=resume,
+                current_rank=1,
+            )
+            m.AssignmentAttempt.objects.create(
+                workflow=workflow,
+                resume=resume,
+                attempt_no=1,
+                source=m.AssignmentAttempt.SOURCE_RULE,
+                status=m.AssignmentAttempt.STATUS_DISPATCHED_L2,
+                department=department,
+                contact=contact,
+            )
+
+        self.client.force_authenticate(contact_user)
+        response = self.client.get("/api/candidates/filter-options/")
+
+        values = [item["value"] for item in response.data["current_position_name"]]
+        self.assertEqual(values, ["可见岗位"])
+
+    def test_contact_and_school_pinyin_data_migration_populates_existing_rows(self):
+        contact = m.Contact.objects.create(name="赵六", employee_no="MIGRATION001")
+        school = m.School.objects.create(name="北京大学")
+        m.Contact.objects.filter(pk=contact.pk).update(
+            name_pinyin="", name_pinyin_initials=""
+        )
+        m.School.objects.filter(pk=school.pk).update(
+            name_pinyin="", name_pinyin_initials=""
+        )
+        migration = importlib.import_module(
+            "apps.core.migrations.0023_contact_school_name_pinyin"
+        )
+
+        migration.populate_name_pinyin(django_apps, None)
+
+        contact.refresh_from_db()
+        school.refresh_from_db()
+        self.assertEqual((contact.name_pinyin, contact.name_pinyin_initials), ("zhaoliu", "zl"))
+        self.assertEqual((school.name_pinyin, school.name_pinyin_initials), ("beijingdaxue", "bjdx"))
 
 
 class CandidateExportApiTests(TestCase):

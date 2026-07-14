@@ -4,6 +4,7 @@ from django.db.models import Q
 
 from apps.core import candidate_summary
 from apps.core import models as m
+from apps.core.name_pinyin import name_to_pinyin
 
 
 RAW = "raw"
@@ -18,8 +19,8 @@ LABELS = {
     CLASSIFIED: "已分类",
     ALLOCATED: "已分配",
     PENDING_SCREENING: "待筛选",
-    SCREENING_PASSED: "筛选通过",
-    SCREENING_REJECTED: "筛选不通过",
+    SCREENING_PASSED: "通过",
+    SCREENING_REJECTED: "不通过",
 }
 
 ACTIVE_ATTEMPT_STATUSES = {
@@ -305,13 +306,29 @@ def candidate_filter_options(qs):
         _add_option(values["current_job_category"], getattr(resume, "job_category", ""))
         _add_option(values["school_tag"], candidate_school_tag(candidate))
 
-    return {
+    raw_options = {
         **{
             key: sorted(items, key=str.casefold)
             for key, items in values.items()
             if key != "current_rank"
         },
         "current_rank": sorted(values["current_rank"], key=lambda value: int(value)),
+    }
+    return {
+        key: [_filter_option(value) for value in options]
+        for key, options in raw_options.items()
+    }
+
+
+def _filter_option(value):
+    label = str(value)
+    full_pinyin, initials = name_to_pinyin(label)
+    return {
+        "label": label,
+        "value": label,
+        "search_text": " ".join(
+            item for item in [label.casefold(), full_pinyin, initials] if item
+        ),
     }
 
 

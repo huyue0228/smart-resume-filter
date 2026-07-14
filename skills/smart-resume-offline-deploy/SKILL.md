@@ -23,8 +23,8 @@ description: 在 Linux 服务器上部署、验证、卸载校招智能简历筛
 - `scripts/deploy.sh`：校验、导入镜像、初始化数据库、启动并验证服务。
 - `scripts/verify.sh`：检查服务状态、Django 配置和 Nginx 配置。
 - `scripts/uninstall.sh`：停止并卸载服务；默认保留数据库和上传文件。
-- `agents/deployment-agent.md`：部署时必须执行的确认与交付口径。
-- `agents/uninstall-agent.md`：卸载时必须执行的风险确认口径。
+- `assets/deployment-agent.md`：部署时必须执行的确认与交付口径。
+- `assets/uninstall-agent.md`：卸载时必须执行的风险确认口径。
 
 ## 部署
 
