@@ -369,29 +369,21 @@ class CandidateWorkflow(models.Model):
         (STATUS_ARCHIVED, "已归档"),
     ]
 
-    ARCHIVE_NO_ACTIVE_SCHOOL_RULE = "no_active_school_rule"
     ARCHIVE_SCHOOL_RULE_NOT_MATCHED = "school_rule_not_matched"
     ARCHIVE_NO_NEXT_RESUME = "no_next_resume"
     ARCHIVE_JOB_NOT_MATCHED = "job_not_matched"
     ARCHIVE_DEPARTMENT_NOT_FOUND = "department_not_found"
-    ARCHIVE_CONTACT_NOT_FOUND = "contact_not_found"
-    ARCHIVE_SUB_CONTACT_NOT_FOUND = "sub_contact_not_found"
     ARCHIVE_AGENT_NO_RECOMMENDATION = "agent_no_recommendation"
     ARCHIVE_HR_CANCELLED = "hr_cancelled"
     ARCHIVE_ALL_REJECTED = "all_rejected"
-    ARCHIVE_RERUN_PRESERVED = "rerun_preserved"
     ARCHIVE_REASON_CHOICES = [
-        (ARCHIVE_NO_ACTIVE_SCHOOL_RULE, "没有启用院校标签准入规则"),
         (ARCHIVE_SCHOOL_RULE_NOT_MATCHED, "院校标签未命中规则"),
         (ARCHIVE_NO_NEXT_RESUME, "没有下一条可尝试志愿"),
         (ARCHIVE_JOB_NOT_MATCHED, "未匹配岗位"),
         (ARCHIVE_DEPARTMENT_NOT_FOUND, "无有效二层部门"),
-        (ARCHIVE_CONTACT_NOT_FOUND, "无可用接口人"),
-        (ARCHIVE_SUB_CONTACT_NOT_FOUND, "二级部门下没有可用三级接口人"),
         (ARCHIVE_AGENT_NO_RECOMMENDATION, "AI 无有效建议"),
         (ARCHIVE_HR_CANCELLED, "HR 取消当前分配"),
         (ARCHIVE_ALL_REJECTED, "全部志愿未通过"),
-        (ARCHIVE_RERUN_PRESERVED, "重跑时保留归档"),
     ]
 
     BLOCK_CONTACT_NOT_FOUND = "contact_not_found"

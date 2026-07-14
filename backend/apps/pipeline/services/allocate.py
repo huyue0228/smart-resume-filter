@@ -629,10 +629,9 @@ def _create_next_auto_attempt(workflow, rules, mode="rule", processing_run=None)
 
     strategy = get_rule_strategy()
     had_resume = False
-    # 下面三个 gap 标记用于在所有后续志愿都失败时给出更接近真实原因的归档说明。
+    # 下面两个 gap 标记用于在所有后续志愿都失败时给出更接近真实原因的归档说明。
     saw_job_gap = False
     saw_department_gap = False
-    saw_contact_gap = False
     after_rank = workflow.current_rank if workflow.current_rank else None
     for resume in _candidate_resumes(candidate, after_rank=after_rank):
         had_resume = True
@@ -654,7 +653,6 @@ def _create_next_auto_attempt(workflow, rules, mode="rule", processing_run=None)
                 m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND,
                 f"当前第{resume.volunteer_rank}志愿已匹配二级部门{department.name}，但没有启用的二级接口人",
             )
-            saw_contact_gap = True
             return None
 
         return _create_attempt(
@@ -679,8 +677,6 @@ def _create_next_auto_attempt(workflow, rules, mode="rule", processing_run=None)
         _archive(workflow, m.CandidateWorkflow.ARCHIVE_JOB_NOT_MATCHED, "后续志愿未匹配岗位")
     elif saw_department_gap:
         _archive(workflow, m.CandidateWorkflow.ARCHIVE_DEPARTMENT_NOT_FOUND, "后续志愿未找到二级部门")
-    elif saw_contact_gap:
-        _archive(workflow, m.CandidateWorkflow.ARCHIVE_CONTACT_NOT_FOUND, "后续志愿未找到可用二级接口人")
     else:
         _archive(
             workflow,

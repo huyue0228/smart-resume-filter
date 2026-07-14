@@ -193,11 +193,6 @@ export function cancelPipelineRun(id) {
   return client.post(`/pipeline/runs/${id}/cancel/`)
 }
 
-// ---- Candidate workflows ----
-export function fetchWorkflows(params) {
-  return client.get('/workflows/', { params })
-}
-
 // ---- Workflow attempts ----
 export function dispatchAllocation(id) {
   return client.post(`/workflow-attempts/${id}/dispatch/`)

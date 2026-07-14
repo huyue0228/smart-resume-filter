@@ -9,7 +9,6 @@ import DepartmentsPage from './pages/DepartmentsPage'
 import ConfigPage from './pages/ConfigPage'
 import AIConnectionPage from './pages/AIConnectionPage'
 import UsersPage from './pages/UsersPage'
-import WorkflowsPage from './pages/WorkflowsPage'
 
 function AppRoutes() {
   const { loading, isAuthenticated, hasPermission } = useRole()
@@ -53,14 +52,6 @@ function AppRoutes() {
         <Route
           path="/departments"
           element={guarded('department.view', <DepartmentsPage />)}
-        />
-        <Route
-          path="/workflows"
-          element={guarded('attempt.view_all', <WorkflowsPage />)}
-        />
-        <Route
-          path="/archives"
-          element={guarded('attempt.view_all', <WorkflowsPage archivedOnly />)}
         />
         <Route
           path="/config"
