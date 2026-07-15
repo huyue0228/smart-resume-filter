@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { MemoryRouter } from 'react-router-dom'
 import ResumesPage from './ResumesPage'
 
 const candidate = vi.hoisted(() => ({
@@ -65,16 +66,23 @@ const candidate = vi.hoisted(() => ({
   attempts: [],
 }))
 
+const roleState = vi.hoisted(() => ({
+  permissions: new Set(['attempt.view_all']),
+  contact: null,
+  isContact: false,
+  isSecondaryContact: false,
+}))
+
 vi.mock('@ant-design/pro-components', () => ({
   PageContainer: ({ children }) => <div>{children}</div>,
 }))
 
 vi.mock('../contexts/RoleContext', () => ({
   useRole: () => ({
-    hasPermission: (code) => code === 'attempt.view_all',
-    isContact: false,
-    isSecondaryContact: false,
-    isTertiaryContact: false,
+    hasPermission: (code) => roleState.permissions.has(code),
+    contact: roleState.contact,
+    isContact: roleState.isContact,
+    isSecondaryContact: roleState.isSecondaryContact,
   }),
 }))
 
@@ -105,9 +113,16 @@ vi.mock('../components/SmartDataTable', () => ({
         </button>
       )}
       {dataSource.map((record) => (
-        <button key={record.id} type="button" onClick={() => onRowClick?.(record)}>
-          {record.apply_id || record.id}
-        </button>
+        <div key={record.id}>
+          <button type="button" onClick={() => onRowClick?.(record)}>
+            {record.apply_id || record.id}
+          </button>
+          {tableId === 'candidate-resumes' && (
+            <span data-testid={`entity-${record.id}`}>
+              {columns.find((column) => column.dataIndex === 'entity')?.render?.(record.entity, record)}
+            </span>
+          )}
+        </div>
       ))}
     </section>
   ),
@@ -135,11 +150,21 @@ vi.mock('../api/services', () => ({
   fetchEligibleSubContacts: vi.fn(),
   submitAllocationFeedback: vi.fn(),
   exportAllocations: vi.fn(),
+  exportResumeResultReport: vi.fn(),
 }))
 
 describe('ResumesPage detail', () => {
+  beforeEach(() => {
+    candidate.current_attempt = null
+    candidate.attempts = []
+    roleState.permissions = new Set(['attempt.view_all'])
+    roleState.contact = null
+    roleState.isContact = false
+    roleState.isSecondaryContact = false
+  })
+
   it('removes detail filters and switches preview by volunteer row', async () => {
-    render(<ResumesPage />)
+    render(<MemoryRouter><ResumesPage /></MemoryRouter>)
     await userEvent.click(screen.getByRole('button', { name: '打开候选人' }))
 
     await waitFor(() => expect(screen.getByTestId('resume-preview').textContent).toBe('preview:A001'))
@@ -152,8 +177,53 @@ describe('ResumesPage detail', () => {
     expect(screen.queryByText('最高学历标签')).toBeNull()
     expect(screen.getByText('平台A').classList.contains('ant-tag')).toBe(true)
     expect(screen.getByText('平台B').classList.contains('ant-tag')).toBe(true)
+    const entityATag = screen.getByTestId('entity-11').querySelector('.ant-tag')
+    const entityBTag = screen.getByTestId('entity-12').querySelector('.ant-tag')
+    expect(entityATag.textContent).toBe('主体A')
+    expect(entityBTag.textContent).toBe('主体B')
+    expect(entityATag.className).not.toBe(entityBTag.className)
 
     await userEvent.click(screen.getByRole('button', { name: 'A002' }))
     expect(screen.getByTestId('resume-preview').textContent).toBe('missing:A002')
+  })
+
+  it('shows feedback to the bound secondary contact before transfer', async () => {
+    candidate.current_attempt = {
+      id: 21,
+      status: 'dispatched_l2',
+      contact: 10,
+      sub_contact: null,
+      feedback_at: null,
+    }
+    candidate.attempts = [candidate.current_attempt]
+    roleState.permissions = new Set(['attempt.feedback', 'attempt.view_received'])
+    roleState.contact = { id: 10 }
+    roleState.isContact = true
+    roleState.isSecondaryContact = true
+
+    render(<MemoryRouter><ResumesPage /></MemoryRouter>)
+    await userEvent.click(screen.getByRole('button', { name: '打开候选人' }))
+
+    expect(screen.getByRole('button', { name: '提交反馈' })).not.toBeNull()
+  })
+
+  it('hides feedback from the secondary contact after transfer', async () => {
+    candidate.current_attempt = {
+      id: 22,
+      status: 'assigned_l3',
+      contact: 10,
+      sub_contact: 11,
+      feedback_at: null,
+    }
+    candidate.attempts = [candidate.current_attempt]
+    roleState.permissions = new Set(['attempt.feedback', 'attempt.view_received'])
+    roleState.contact = { id: 10 }
+    roleState.isContact = true
+    roleState.isSecondaryContact = true
+
+    render(<MemoryRouter><ResumesPage /></MemoryRouter>)
+    await userEvent.click(screen.getByRole('button', { name: '打开候选人' }))
+
+    expect(screen.queryByRole('button', { name: '提交反馈' })).toBeNull()
   })
 })

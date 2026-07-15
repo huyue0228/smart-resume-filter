@@ -202,17 +202,23 @@
   border-bottom: 1px solid #eaecf0;
 }
 
-.processing-task-results span {
+.processing-task-results .ant-btn {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  height: auto;
   padding: 9px 4px;
   color: #667085;
   font-size: 11px;
   text-align: center;
 }
 
-.processing-task-results strong {
+.processing-task-results .ant-btn:not(:disabled):hover {
+  color: #1677ff;
+  background: #f0f7ff;
+}
+
+.processing-task-results .ant-btn strong {
   color: #344054;
   font-size: 14px;
   font-weight: 600;

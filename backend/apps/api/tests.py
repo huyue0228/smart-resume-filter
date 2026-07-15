@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 from io import BytesIO
 import importlib
 import os
@@ -15,6 +15,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.utils import timezone
 import pandas as pd
+from openpyxl import load_workbook
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
@@ -557,6 +558,102 @@ class RbacApiTests(TestCase):
         ids = [item["id"] for item in response.data["results"]]
         self.assertEqual(ids, [self.attempt_a.id])
 
+    def _grant_secondary_feedback(self):
+        group = Group.objects.get(name="二级接口人")
+        group.permissions.add(
+            Permission.objects.get(
+                codename=permission_codename("attempt.feedback")
+            )
+        )
+
+    def test_secondary_contact_with_permission_can_feedback_before_transfer(self):
+        self.attempt_a.status = m.AssignmentAttempt.STATUS_DISPATCHED_L2
+        self.attempt_a.sub_contact = None
+        self.attempt_a.sub_department = None
+        self.attempt_a.save(
+            update_fields=["status", "sub_contact", "sub_department"]
+        )
+        self._grant_secondary_feedback()
+        self.client.force_authenticate(self.secondary_user)
+
+        response = self.client.post(
+            f"/api/workflow-attempts/{self.attempt_a.id}/feedback/",
+            {"result": "passed", "note": "二级确认通过"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.attempt_a.refresh_from_db()
+        self.assertEqual(self.attempt_a.status, m.AssignmentAttempt.STATUS_PASSED)
+        self.assertEqual(self.attempt_a.feedback_note, "二级确认通过")
+
+    def test_secondary_contact_cannot_feedback_after_transfer(self):
+        self._grant_secondary_feedback()
+        self.client.force_authenticate(self.secondary_user)
+
+        response = self.client.post(
+            f"/api/workflow-attempts/{self.attempt_a.id}/feedback/",
+            {"result": "rejected", "note": "不应允许"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("绑定", response.data["detail"])
+
+    def test_tertiary_contact_can_feedback_after_transfer_and_cannot_repeat(self):
+        self.client.force_authenticate(self.tertiary_user)
+
+        first_response = self.client.post(
+            f"/api/workflow-attempts/{self.attempt_a.id}/feedback/",
+            {"result": "passed", "note": "三级确认"},
+            format="json",
+        )
+        second_response = self.client.post(
+            f"/api/workflow-attempts/{self.attempt_a.id}/feedback/",
+            {"result": "rejected", "note": "重复"},
+            format="json",
+        )
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(second_response.status_code, 400)
+        self.assertIn("反馈已提交", second_response.data["detail"])
+
+    def test_secondary_contact_without_permission_cannot_feedback(self):
+        self.attempt_a.status = m.AssignmentAttempt.STATUS_DISPATCHED_L2
+        self.attempt_a.sub_contact = None
+        self.attempt_a.sub_department = None
+        self.attempt_a.save(
+            update_fields=["status", "sub_contact", "sub_department"]
+        )
+        self.client.force_authenticate(self.secondary_user)
+
+        response = self.client.post(
+            f"/api/workflow-attempts/{self.attempt_a.id}/feedback/",
+            {"result": "passed"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_feedback_permission_does_not_bypass_contact_binding_or_data_scope(self):
+        self.client.force_authenticate(self.admin)
+        admin_response = self.client.post(
+            f"/api/workflow-attempts/{self.attempt_a.id}/feedback/",
+            {"result": "passed"},
+            format="json",
+        )
+        self._grant_secondary_feedback()
+        self.client.force_authenticate(self.secondary_user)
+        other_response = self.client.post(
+            f"/api/workflow-attempts/{self.attempt_b.id}/feedback/",
+            {"result": "passed"},
+            format="json",
+        )
+
+        self.assertEqual(admin_response.status_code, 400)
+        self.assertIn("绑定", admin_response.data["detail"])
+        self.assertEqual(other_response.status_code, 404)
+
     def test_secondary_contact_uses_resume_library_with_scoped_safe_fields(self):
         self.client.force_authenticate(self.secondary_user)
 
@@ -1041,6 +1138,7 @@ class SchoolRuleConfigApiTests(TestCase):
                 "is_active": True,
                 "first_degree_tag_ids": [first_tag.id],
                 "highest_degree_tag_ids": [highest_tag.id],
+                "allowed_highest_educations": ["bachelor", "master"],
             },
             format="json",
         )
@@ -1048,6 +1146,9 @@ class SchoolRuleConfigApiTests(TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data["first_degree_tags"][0]["id"], first_tag.id)
         self.assertEqual(response.data["highest_degree_tags"][0]["id"], highest_tag.id)
+        self.assertEqual(
+            response.data["allowed_highest_educations"], ["bachelor", "master"]
+        )
         self.assertTrue(
             m.SchoolTagRuleTag.objects.filter(
                 rule_id=response.data["id"],
@@ -1055,6 +1156,32 @@ class SchoolRuleConfigApiTests(TestCase):
                 degree_type=m.SchoolTagRuleTag.DEGREE_FIRST,
             ).exists()
         )
+        self.assertEqual(
+            set(
+                m.SchoolTagRuleEducation.objects.filter(
+                    rule_id=response.data["id"]
+                ).values_list("education", flat=True)
+            ),
+            {"bachelor", "master"},
+        )
+
+    def test_school_tag_rule_omitted_education_list_means_unrestricted(self):
+        first_tag = m.SchoolTag.objects.create(code="FIRST", name="第一学历")
+        highest_tag = m.SchoolTag.objects.create(code="HIGH", name="最高学历")
+
+        response = self.client.post(
+            "/api/school-tag-rules/",
+            {
+                "name": "兼容旧规则",
+                "is_active": True,
+                "first_degree_tag_ids": [first_tag.id],
+                "highest_degree_tag_ids": [highest_tag.id],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["allowed_highest_educations"], [])
 
     def test_active_school_tag_rule_requires_first_and_highest_tags(self):
         first_tag = m.SchoolTag.objects.create(code="A", name="平台A")
@@ -1135,6 +1262,124 @@ class ListFilteringPaginationApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["count"], 5)
         self.assertEqual(len(response.data["results"]), 2)
+
+    def test_candidate_allocation_source_covers_auto_archives_but_not_unstarted_workflows(self):
+        rule_candidate = m.Candidate.objects.create(
+            identity_hash="candidate-source-rule",
+            name="规则归档候选人",
+            phone="13810000001",
+        )
+        ai_candidate = m.Candidate.objects.create(
+            identity_hash="candidate-source-ai",
+            name="AI归档候选人",
+            phone="13810000002",
+        )
+        untouched_candidate = m.Candidate.objects.create(
+            identity_hash="candidate-source-untouched",
+            name="未处理候选人",
+            phone="13810000003",
+        )
+        m.CandidateWorkflow.objects.create(
+            candidate=rule_candidate,
+            status=m.CandidateWorkflow.STATUS_ARCHIVED,
+            dispatch_strategy=m.AssignmentAttempt.SOURCE_RULE,
+            archive_reason=m.CandidateWorkflow.ARCHIVE_JOB_NOT_MATCHED,
+            started_at=timezone.now(),
+        )
+        m.CandidateWorkflow.objects.create(
+            candidate=ai_candidate,
+            status=m.CandidateWorkflow.STATUS_ARCHIVED,
+            dispatch_strategy=m.AssignmentAttempt.SOURCE_AI,
+            archive_reason=m.CandidateWorkflow.ARCHIVE_AGENT_NO_RECOMMENDATION,
+            started_at=timezone.now(),
+        )
+        m.CandidateWorkflow.objects.create(
+            candidate=untouched_candidate,
+            status=m.CandidateWorkflow.STATUS_PENDING,
+            dispatch_strategy=m.AssignmentAttempt.SOURCE_AI,
+        )
+
+        response = self.client.get("/api/candidates/")
+
+        self.assertEqual(response.status_code, 200)
+        sources = {item["id"]: item["allocation_source"] for item in response.data["results"]}
+        self.assertEqual(sources[rule_candidate.id], m.AssignmentAttempt.SOURCE_RULE)
+        self.assertEqual(sources[ai_candidate.id], m.AssignmentAttempt.SOURCE_AI)
+        self.assertEqual(sources[untouched_candidate.id], "")
+
+        rule_response = self.client.get(
+            "/api/candidates/", {"allocation_source": m.AssignmentAttempt.SOURCE_RULE}
+        )
+        ai_response = self.client.get(
+            "/api/candidates/", {"allocation_source": m.AssignmentAttempt.SOURCE_AI}
+        )
+
+        self.assertEqual([item["id"] for item in rule_response.data["results"]], [rule_candidate.id])
+        self.assertEqual([item["id"] for item in ai_response.data["results"]], [ai_candidate.id])
+
+    def test_candidate_list_filters_by_processing_run_result(self):
+        run = m.ProcessingRun.objects.create(step="step2", mode="ai")
+
+        def create_result_candidate(code, scope_status, recommendation=None):
+            candidate = m.Candidate.objects.create(
+                identity_hash=f"candidate-run-{code}",
+                name=f"任务{code}",
+                phone=f"13820000{len(code):03d}",
+            )
+            resume = m.Resume.objects.create(
+                candidate=candidate,
+                apply_id=f"RUN-{code}",
+                position_name="算法工程师",
+                volunteer_rank=1,
+            )
+            workflow = m.CandidateWorkflow.objects.create(
+                candidate=candidate,
+                status=m.CandidateWorkflow.STATUS_IN_PROGRESS,
+                current_resume=resume,
+                current_rank=1,
+                dispatch_strategy=m.AssignmentAttempt.SOURCE_AI,
+                started_at=timezone.now(),
+            )
+            m.ProcessingRunScopeItem.objects.create(
+                run=run,
+                candidate=candidate,
+                status=scope_status,
+            )
+            if recommendation:
+                m.AgentDispatchDecision.objects.create(
+                    workflow=workflow,
+                    resume=resume,
+                    processing_run=run,
+                    recommendation=recommendation,
+                )
+            return candidate
+
+        success = create_result_candidate("success", "success")
+        failed = create_result_candidate("failed", "failed")
+        review = create_result_candidate("review", "success", "review")
+        dispatch = create_result_candidate("dispatch", "success", "dispatch")
+        archive = create_result_candidate("archive", "success", "archive")
+        skipped = create_result_candidate("skipped", "skipped_manual_change")
+        cancelled = create_result_candidate("cancelled", "cancelled")
+
+        expected_ids = {
+            "success": {success.id, review.id, dispatch.id, archive.id},
+            "failed": {failed.id},
+            "review": {review.id},
+            "dispatch": {dispatch.id},
+            "archive": {archive.id},
+            "skipped": {skipped.id},
+            "cancelled": {cancelled.id},
+        }
+        for result, ids in expected_ids.items():
+            response = self.client.get(
+                "/api/candidates/",
+                {"processing_run_id": run.id, "processing_result": result},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(
+                {item["id"] for item in response.data["results"]}, ids, result
+            )
 
     def test_candidate_header_filters_match_current_resume_and_school_tag(self):
         keep = m.Candidate.objects.create(
@@ -1978,6 +2223,8 @@ class ListFilteringPaginationApiTests(TestCase):
             "/api/jobs/",
             {
                 "entity_in": "GW,YLS",
+                "public_name_in": "后端开发",
+                "position_name_in": "后端工程师",
                 "category_in": "技术类",
                 "job_family_in": "研发",
                 "department_name_in": "研发中心",
@@ -1991,12 +2238,26 @@ class ListFilteringPaginationApiTests(TestCase):
         category_options = {
             item["value"]: item for item in options_response.data["category"]
         }
+        public_name_options = {
+            item["value"]: item
+            for item in options_response.data["public_name"]
+        }
+        position_name_options = {
+            item["value"]: item
+            for item in options_response.data["position_name"]
+        }
         department_options = {
             item["value"]: item
             for item in options_response.data["department_name"]
         }
         self.assertIn("jishulei", category_options["技术类"]["search_text"])
         self.assertIn("jsl", category_options["技术类"]["search_text"])
+        self.assertIn("houduankaifa", public_name_options["后端开发"]["search_text"])
+        self.assertIn("hdkf", public_name_options["后端开发"]["search_text"])
+        self.assertIn(
+            "houduangongchengshi",
+            position_name_options["后端工程师"]["search_text"],
+        )
         self.assertIn("yanfazhongxin", department_options["研发中心"]["search_text"])
         self.assertEqual(
             [item["id"] for item in filter_response.data["results"]], [keep.id]
@@ -2519,6 +2780,155 @@ class CandidateExportApiTests(TestCase):
         self.assertEqual(response["X-Export-Missing"], "0")
         self.assertIn("attachment", response["Content-Disposition"])
         self.assertEqual(response.content.decode("utf-8"), "attempt resume")
+
+
+class ResumeResultReportApiTests(TestCase):
+    def setUp(self):
+        ensure_rbac_defaults()
+        self.client = APIClient()
+        self.hr = User.objects.create_user(
+            username="hr-result-report", password="pass", role=User.ROLE_HR
+        )
+        self.hr.groups.add(Group.objects.get(name="HR"))
+        self.client.force_authenticate(self.hr)
+        self.department = m.Department.objects.create(name="当前研发部", level=2)
+        self.contact = m.Contact.objects.create(
+            name="当前二级接口人",
+            employee_no="REPORT-L2",
+            department=self.department,
+            contact_level=m.Contact.LEVEL_SECONDARY,
+        )
+        self.start_at = timezone.make_aware(datetime(2026, 7, 1, 0, 0, 0))
+
+    def _resume(self, suffix, *, name="张三", offset_hours=0):
+        candidate = m.Candidate.objects.create(
+            identity_hash=f"report-{suffix}",
+            name=name,
+            phone=f"1380000{int(suffix):04d}",
+            highest_education=m.Candidate.EDUCATION_MASTER,
+        )
+        resume = m.Resume.objects.create(
+            candidate=candidate,
+            apply_id=f"REPORT-{suffix}",
+            entity="GW",
+            position_name="后端工程师",
+            volunteer_rank=1,
+        )
+        m.Resume.objects.filter(pk=resume.pk).update(
+            imported_at=self.start_at + timedelta(hours=offset_hours)
+        )
+        resume.refresh_from_db()
+        return resume
+
+    def _attempt(self, resume, status, attempt_no=1):
+        workflow = m.CandidateWorkflow.objects.create(
+            candidate=resume.candidate,
+            status=m.CandidateWorkflow.STATUS_IN_PROGRESS,
+            current_resume=resume,
+            current_rank=1,
+        )
+        return m.AssignmentAttempt.objects.create(
+            workflow=workflow,
+            resume=resume,
+            attempt_no=attempt_no,
+            source=m.AssignmentAttempt.SOURCE_RULE,
+            status=status,
+            department=self.department,
+            contact=self.contact,
+            department_name_snapshot="历史研发部",
+            contact_name_snapshot="历史二级接口人",
+        )
+
+    def test_result_report_validates_required_and_ordered_dates(self):
+        missing = self.client.get("/api/resumes/result-report/")
+        invalid = self.client.get(
+            "/api/resumes/result-report/",
+            {"imported_after": "2026-07-xx", "imported_before": "2026-07-02"},
+        )
+        reversed_range = self.client.get(
+            "/api/resumes/result-report/",
+            {"imported_after": "2026-07-03", "imported_before": "2026-07-02"},
+        )
+
+        self.assertEqual(missing.status_code, 400)
+        self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(reversed_range.status_code, 400)
+
+    def test_result_report_uses_resume_status_snapshot_and_formula_protection(self):
+        unassigned = self._resume("0001", name="=2+2", offset_hours=0)
+        pending = self._resume("0002", offset_hours=12)
+        passed = self._resume("0003", offset_hours=47)
+        excluded = self._resume("0004", offset_hours=48)
+        pending_attempt = self._attempt(
+            pending, m.AssignmentAttempt.STATUS_ASSIGNED_L3
+        )
+        pending_attempt.sub_department_name_snapshot = "历史三级部"
+        pending_attempt.sub_contact_name_snapshot = "历史三级接口人"
+        pending_attempt.save(
+            update_fields=["sub_department_name_snapshot", "sub_contact_name_snapshot"]
+        )
+        m.AssignmentAttempt.objects.create(
+            workflow=pending_attempt.workflow,
+            resume=pending,
+            attempt_no=2,
+            source=m.AssignmentAttempt.SOURCE_MANUAL,
+            status=m.AssignmentAttempt.STATUS_CANCELLED,
+            department=self.department,
+            contact=self.contact,
+            department_name_snapshot="不应统计的取消部门",
+        )
+        passed_attempt = self._attempt(passed, m.AssignmentAttempt.STATUS_PASSED)
+        passed_attempt.feedback_result = m.AssignmentAttempt.FEEDBACK_PASSED
+        passed_attempt.feedback_at = self.start_at + timedelta(hours=48)
+        passed_attempt.save(update_fields=["feedback_result", "feedback_at"])
+        self._attempt(excluded, m.AssignmentAttempt.STATUS_PENDING_DISPATCH)
+
+        response = self.client.get(
+            "/api/resumes/result-report/",
+            {"imported_after": "2026-07-01", "imported_before": "2026-07-02"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            quote("简历结果报表_20260701_20260702.xlsx"),
+            response["Content-Disposition"],
+        )
+        workbook = load_workbook(BytesIO(response.content))
+        self.assertEqual(workbook.sheetnames, ["部门汇总", "简历明细"])
+        summary_rows = list(workbook["部门汇总"].iter_rows(values_only=True))
+        summary_by_department = {row[0]: row for row in summary_rows[1:]}
+        self.assertEqual(summary_by_department["历史研发部"][1:4], (2, 2, 0))
+        self.assertEqual(summary_by_department["历史研发部"][6:8], (1, 1))
+        self.assertEqual(summary_by_department["未分配"][1:4], (1, 0, 1))
+        self.assertEqual(summary_by_department["合计"][1], 3)
+        detail_rows = list(workbook["简历明细"].iter_rows(values_only=True))
+        self.assertEqual(len(detail_rows), 4)
+        self.assertNotIn("手机号", detail_rows[0])
+        self.assertEqual(detail_rows[1][1], "'=2+2")
+        self.assertEqual(detail_rows[2][7], "历史研发部")
+        self.assertEqual(detail_rows[2][9], "历史三级部")
+        self.assertEqual(detail_rows[3][13], "通过")
+        self.assertEqual(unassigned.apply_id, detail_rows[1][2])
+
+    def test_result_report_requires_resume_view_permission(self):
+        contact = m.Contact.objects.create(
+            name="二级", employee_no="REPORT-NO", contact_level=m.Contact.LEVEL_SECONDARY
+        )
+        user = User.objects.create_user(
+            username="report-secondary",
+            password="pass",
+            role=User.ROLE_SECONDARY_CONTACT,
+            contact=contact,
+        )
+        user.groups.add(Group.objects.get(name="二级接口人"))
+        self.client.force_authenticate(user)
+
+        response = self.client.get(
+            "/api/resumes/result-report/",
+            {"imported_after": "2026-07-01", "imported_before": "2026-07-02"},
+        )
+
+        self.assertEqual(response.status_code, 403)
 
 
 class ResumePreviewApiTests(TestCase):

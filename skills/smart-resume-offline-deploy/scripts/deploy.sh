@@ -135,6 +135,13 @@ if [[ "$DEPLOY_MODE" == "source" ]]; then
   fi
 fi
 
+for service in db redis backend worker ai-worker frontend; do
+  if ! compose config --services | grep -Fxq "$service"; then
+    echo "Compose 缺少必需服务：${service}。AI 分配需要 default worker 和 ai-worker 同时运行。"
+    exit 1
+  fi
+done
+
 echo "即将部署项目：${PROJECT_NAME}"
 echo "- 部署模式：${DEPLOY_MODE}"
 [[ "$DEPLOY_MODE" == "offline" ]] && echo "- 导入镜像：${IMAGE_TAR}"

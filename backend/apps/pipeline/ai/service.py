@@ -34,6 +34,8 @@ from .schemas import ResumeScreeningOutput
 logger = logging.getLogger(__name__)
 _CLIENT_CACHE = {}
 _CLIENT_CACHE_LOCK = threading.Lock()
+_OCR_SEMAPHORE_LOCK = threading.Lock()
+_OCR_SEMAPHORES = {}
 
 
 SCORE_WEIGHTS = {
@@ -323,22 +325,95 @@ def _resume_path(resume):
     return path
 
 
+def _non_whitespace_length(value):
+    return len("".join(str(value or "").split()))
+
+
+def _ocr_semaphore(limit):
+    with _OCR_SEMAPHORE_LOCK:
+        semaphore = _OCR_SEMAPHORES.get(limit)
+        if semaphore is None:
+            semaphore = threading.BoundedSemaphore(limit)
+            _OCR_SEMAPHORES[limit] = semaphore
+        return semaphore
+
+
+def _ocr_pdf(path):
+    """在单 worker 有界并发和总时限内执行本地中英文 OCR。"""
+    max_pages = max(1, int(settings.RESUME_OCR_MAX_PAGES))
+    dpi = max(72, int(settings.RESUME_OCR_DPI))
+    timeout_seconds = max(1, int(settings.RESUME_OCR_TIMEOUT_SECONDS))
+    concurrency_limit = max(1, int(settings.RESUME_OCR_CONCURRENCY))
+    deadline = time.monotonic() + timeout_seconds
+    semaphore = _ocr_semaphore(concurrency_limit)
+    if not semaphore.acquire(timeout=timeout_seconds):
+        raise AIServiceError("pdf_parse_failed", "OCR 并发繁忙且等待超时")
+    try:
+        try:
+            import fitz
+            import pytesseract
+            from PIL import Image
+        except ImportError as exc:
+            raise AIServiceError("pdf_parse_failed", "服务端缺少 OCR 运行依赖") from exc
+
+        texts = []
+        try:
+            with fitz.open(path) as document:
+                for page_index in range(min(document.page_count, max_pages)):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise AIServiceError("pdf_parse_failed", "PDF OCR 总处理超时")
+                    pixmap = document.load_page(page_index).get_pixmap(
+                        dpi=dpi, alpha=False
+                    )
+                    image = Image.frombytes(
+                        "RGB", (pixmap.width, pixmap.height), pixmap.samples
+                    )
+                    page_text = pytesseract.image_to_string(
+                        image,
+                        lang="chi_sim+eng",
+                        timeout=max(1, int(remaining)),
+                    )
+                    if page_text.strip():
+                        texts.append(page_text.strip())
+        except AIServiceError:
+            raise
+        except RuntimeError as exc:
+            raise AIServiceError("pdf_parse_failed", "PDF OCR 处理超时") from exc
+        except Exception as exc:
+            raise AIServiceError("pdf_parse_failed", "PDF OCR 处理失败") from exc
+        return "\n\n".join(texts)
+    finally:
+        semaphore.release()
+
+
 def _extract_pdf(resume):
     path = _resume_path(resume)
     with open(path, "rb") as file_obj:
         content = file_obj.read()
     checksum = hashlib.sha256(content).hexdigest()
+    primary_error = None
     try:
         from pypdf import PdfReader
 
         reader = PdfReader(path)
         text = "\n\n".join((page.extract_text() or "").strip() for page in reader.pages)
     except Exception as exc:
-        raise AIServiceError("pdf_parse_failed", f"PDF 正文抽取失败：{exc}") from exc
+        primary_error = exc
+        text = ""
     text = _strip_nul_bytes(text).strip()
-    if not text:
-        raise AIServiceError("pdf_parse_failed", "PDF 未抽取到可用正文，可能是扫描件")
-    return checksum, text
+    ocr_used = _non_whitespace_length(text) < 50
+    if ocr_used:
+        try:
+            ocr_text = _strip_nul_bytes(_ocr_pdf(path)).strip()
+        except AIServiceError as exc:
+            if primary_error:
+                raise AIServiceError("pdf_parse_failed", "PDF 正文抽取和 OCR 均失败") from exc
+            raise
+        text = "\n\n".join(part for part in [text, ocr_text] if part).strip()
+    if _non_whitespace_length(text) < 50:
+        raise AIServiceError("pdf_parse_failed", "PDF 未抽取到足够的可用正文")
+    return checksum, text, ocr_used
 
 
 def _current_job_context(job):
@@ -585,7 +660,9 @@ def screen_resume(
 ):
     """读取当前志愿 PDF、调用模型并执行引用护栏，返回可持久化结果。"""
 
-    checksum, text = _extract_pdf(resume)
+    extracted = _extract_pdf(resume)
+    checksum, text = extracted[:2]
+    ocr_used = bool(extracted[2]) if len(extracted) > 2 else False
     text = _strip_nul_bytes(text).strip()
     if not text:
         raise AIServiceError("pdf_parse_failed", "PDF 未抽取到可用正文，可能是扫描件")
@@ -602,6 +679,7 @@ def screen_resume(
     profile.parse_model = model_config.parser_version
     profile.profile_version = model_config.profile_version
     profile.raw_text = text
+    profile.profile_risk_flags = ["ocr_fallback"] if ocr_used else []
     profile.parse_status = "text_extracted"
     profile.parse_error = ""
     profile.parsed_at = timezone.now()
@@ -643,7 +721,14 @@ def screen_resume(
     profile.certificates = data.certificates
     profile.major_direction = data.major_direction[:128]
     profile.summary = data.summary
-    profile.profile_risk_flags = data.risk_flags
+    profile.profile_risk_flags = list(
+        dict.fromkeys(
+            [
+                *data.risk_flags,
+                *(["ocr_fallback"] if ocr_used else []),
+            ]
+        )
+    )
     profile.parse_status = "parsed"
     profile.parse_error = ""
     profile.parsed_at = timezone.now()

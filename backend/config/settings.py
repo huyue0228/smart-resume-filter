@@ -105,6 +105,14 @@ if os.environ.get("FILE_UPLOAD_TEMP_DIR"):
     FILE_UPLOAD_TEMP_DIR = os.environ["FILE_UPLOAD_TEMP_DIR"]
 DATA_UPLOAD_MAX_MEMORY_SIZE = None
 
+# 扫描版 PDF 仅在 AI 正文抽取不足时进入本地 OCR；限制均可由部署环境覆盖。
+RESUME_OCR_MAX_PAGES = int(os.environ.get("RESUME_OCR_MAX_PAGES", "20"))
+RESUME_OCR_DPI = int(os.environ.get("RESUME_OCR_DPI", "200"))
+RESUME_OCR_TIMEOUT_SECONDS = int(
+    os.environ.get("RESUME_OCR_TIMEOUT_SECONDS", "120")
+)
+RESUME_OCR_CONCURRENCY = int(os.environ.get("RESUME_OCR_CONCURRENCY", "2"))
+
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # DRF：正式项目默认启用登录态。W3 接入前，本地开发使用 Token 登录。

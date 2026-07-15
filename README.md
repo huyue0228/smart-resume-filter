@@ -212,6 +212,7 @@ docker compose ps
 ```bash
 docker compose logs -f backend
 docker compose logs -f worker
+docker compose logs -f ai-worker
 docker compose logs -f frontend
 docker compose logs -f db
 docker compose logs -f redis
@@ -220,7 +221,7 @@ docker compose logs -f redis
 重启服务：
 
 ```bash
-docker compose restart backend worker frontend
+docker compose restart backend worker ai-worker frontend
 ```
 
 停止服务但保留数据库卷：
@@ -272,6 +273,7 @@ docker compose --profile init run --rm init
 docker compose exec backend python manage.py check
 docker compose logs --tail=100 backend
 docker compose logs --tail=100 worker
+docker compose logs --tail=100 ai-worker
 ```
 
 ### 9. 数据备份与恢复

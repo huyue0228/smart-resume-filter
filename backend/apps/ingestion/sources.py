@@ -23,6 +23,12 @@ RESUME_SUBDIR = "resumes"
 XLS_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 XLSX_MAGIC = b"PK\x03\x04"
 CSV_ENCODINGS = ("utf-8-sig", "utf-8", "gb18030")
+EDUCATION_RANK = {
+    m.Candidate.EDUCATION_ASSOCIATE: 1,
+    m.Candidate.EDUCATION_BACHELOR: 2,
+    m.Candidate.EDUCATION_MASTER: 3,
+    m.Candidate.EDUCATION_DOCTOR: 4,
+}
 
 
 def _val(row, key):
@@ -56,6 +62,23 @@ def _to_date(s):
         return None if pd.isna(d) else d.date()
     except Exception:
         return None
+
+
+def normalize_highest_education(value):
+    """把简历列表中的常见学历写法映射为领域固定编码。"""
+    text = re.sub(r"[\s　()（）\[\]【】]", "", str(value or "")).lower()
+    if not text:
+        return ""
+    aliases = (
+        (m.Candidate.EDUCATION_DOCTOR, ("博士研究生", "博士", "phd")),
+        (m.Candidate.EDUCATION_MASTER, ("硕士研究生", "硕士", "研究生", "master")),
+        (m.Candidate.EDUCATION_BACHELOR, ("大学本科", "本科", "学士", "bachelor")),
+        (m.Candidate.EDUCATION_ASSOCIATE, ("大学专科", "高职", "大专", "专科", "associate")),
+    )
+    for code, names in aliases:
+        if any(name in text for name in names):
+            return code
+    return ""
 
 
 def _excel_name(file_obj):
@@ -359,6 +382,19 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
     resume_by_apply = {}
     if files.get("resume_list"):
         df = _read_excel(files["resume_list"])
+        education_by_identity = {}
+        for _, row in df.iterrows():
+            name = _val(row, "姓名")
+            phone = _val(row, "手机号")
+            if not name or not normalize_phone(phone):
+                continue
+            education = normalize_highest_education(_val(row, "学历"))
+            if not education:
+                continue
+            ihash = identity_hash(name, phone)
+            previous = education_by_identity.get(ihash, "")
+            if EDUCATION_RANK[education] > EDUCATION_RANK.get(previous, 0):
+                education_by_identity[ihash] = education
         for _, row in df.iterrows():
             name = _val(row, "姓名")
             phone = _val(row, "手机号")
@@ -369,17 +405,20 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
                 counts["candidates_skipped"] += 1
                 continue
             ihash = identity_hash(name, phone)
+            candidate_defaults = {
+                "name": name,
+                "phone": phone,
+                "gender": _gender_code(_val(row, "性别")),
+                "household_province": _val(row, "户口所在地"),
+                "first_degree_school": _val(row, "第一学历毕业院校"),
+                "highest_degree_school": _val(row, "最高学历毕业院校"),
+                "highest_major": _val(row, "最高学历专业"),
+            }
+            if education_by_identity.get(ihash):
+                candidate_defaults["highest_education"] = education_by_identity[ihash]
             cand, created = m.Candidate.objects.update_or_create(
                 identity_hash=ihash,
-                defaults={
-                    "name": name,
-                    "phone": phone,
-                    "gender": _gender_code(_val(row, "性别")),
-                    "household_province": _val(row, "户口所在地"),
-                    "first_degree_school": _val(row, "第一学历毕业院校"),
-                    "highest_degree_school": _val(row, "最高学历毕业院校"),
-                    "highest_major": _val(row, "最高学历专业"),
-                },
+                defaults=candidate_defaults,
             )
             counts["candidates_created" if created else "candidates_updated"] += 1
             affected_candidate_ids.add(cand.id)

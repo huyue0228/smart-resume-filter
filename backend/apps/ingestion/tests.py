@@ -11,7 +11,11 @@ from django.test import TestCase
 from apps.accounts.models import User
 from apps.accounts.permissions import ensure_rbac_defaults
 from apps.core import models as m
-from apps.ingestion.sources import _read_excel, import_files
+from apps.ingestion.sources import (
+    _read_excel,
+    import_files,
+    normalize_highest_education,
+)
 
 
 def _excel_file(rows):
@@ -30,6 +34,64 @@ def _excel_file_without_name(rows):
 
 
 class ResumeImportDesignContractTests(TestCase):
+    def test_highest_education_aliases_are_normalized(self):
+        self.assertEqual(normalize_highest_education("高职（专科）"), "associate")
+        self.assertEqual(normalize_highest_education("大学本科 / 学士"), "bachelor")
+        self.assertEqual(normalize_highest_education("硕士研究生"), "master")
+        self.assertEqual(normalize_highest_education("博士研究生"), "doctor")
+        self.assertEqual(normalize_highest_education("其它"), "")
+
+    def test_resume_import_keeps_highest_recognized_education_per_candidate(self):
+        resume_list = _excel_file(
+            [
+                {
+                    "姓名": "张三",
+                    "手机号": "13800000000",
+                    "应聘ID": "EDU1001",
+                    "学历": "本科",
+                },
+                {
+                    "姓名": "张三",
+                    "手机号": "13800000000",
+                    "应聘ID": "EDU1002",
+                    "学历": "硕士研究生",
+                },
+            ]
+        )
+
+        import_files({"resume_list": resume_list}, mode="incremental")
+
+        candidate = m.Candidate.objects.get()
+        self.assertEqual(candidate.highest_education, m.Candidate.EDUCATION_MASTER)
+        self.assertEqual(candidate.resumes.count(), 2)
+
+    def test_unknown_education_does_not_overwrite_existing_value(self):
+        candidate = m.Candidate.objects.create(
+            identity_hash="placeholder",
+            name="李四",
+            phone="13900000000",
+            highest_education=m.Candidate.EDUCATION_DOCTOR,
+        )
+        from apps.ingestion.identity import identity_hash
+
+        candidate.identity_hash = identity_hash(candidate.name, candidate.phone)
+        candidate.save(update_fields=["identity_hash"])
+        resume_list = _excel_file(
+            [
+                {
+                    "姓名": "李四",
+                    "手机号": "13900000000",
+                    "应聘ID": "EDU2001",
+                    "学历": "未知",
+                }
+            ]
+        )
+
+        import_files({"resume_list": resume_list}, mode="incremental")
+
+        candidate.refresh_from_db()
+        self.assertEqual(candidate.highest_education, m.Candidate.EDUCATION_DOCTOR)
+
     def test_read_excel_uses_content_detection_when_name_is_missing(self):
         excel = _excel_file_without_name([{"姓名": "张三"}])
 

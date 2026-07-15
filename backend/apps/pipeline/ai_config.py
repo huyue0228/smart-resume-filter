@@ -279,7 +279,7 @@ def get_ai_model_config():
         prompt_version="resume-screening-v1",
         decision_version="decision-v1",
         profile_version="profile-v1",
-        parser_version="pypdf-v1",
+        parser_version="pypdf-ocr-v2",
         api_key=decrypt_api_key(saved_api_key) if saved_api_key else "",
         base_url=base_url,
     )

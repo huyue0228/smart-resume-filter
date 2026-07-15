@@ -121,6 +121,62 @@ def filter_queryset_by_system_status(qs, statuses):
     return qs.filter(id__in=ids)
 
 
+PROCESSING_RESULT_VALUES = {
+    "success",
+    "failed",
+    "review",
+    "dispatch",
+    "archive",
+    "skipped",
+    "cancelled",
+}
+
+
+def filter_queryset_by_processing_result(qs, params):
+    """按处理中心某次 AI 运行的候选人级结果筛选。
+
+    ``success`` / ``failed`` / ``skipped`` / ``cancelled`` 与 ScopeItem 的终态
+    一一对应；待复核、待下发和建议归档则与该运行产生的 AI 决策对应。后者是
+    成功处理的业务细分，因此允许和 ``success`` 结果重叠，和处理中心计数保持
+    同一语义。
+    """
+    raw_run_id = _value(params, "processing_run_id")
+    if not raw_run_id:
+        return qs
+    try:
+        run_id = int(raw_run_id)
+    except (TypeError, ValueError):
+        return qs.none()
+
+    result = _value(params, "processing_result")
+    if not result:
+        return qs.filter(processing_scope_items__run_id=run_id).distinct()
+    if result not in PROCESSING_RESULT_VALUES:
+        return qs.none()
+
+    scope_statuses = {
+        "success": "success",
+        "failed": "failed",
+        "skipped": "skipped_manual_change",
+        "cancelled": "cancelled",
+    }
+    if result in scope_statuses:
+        return qs.filter(
+            processing_scope_items__run_id=run_id,
+            processing_scope_items__status=scope_statuses[result],
+        ).distinct()
+
+    recommendation = {
+        "review": m.AgentDispatchDecision.RECOMMEND_REVIEW,
+        "dispatch": m.AgentDispatchDecision.RECOMMEND_DISPATCH,
+        "archive": m.AgentDispatchDecision.RECOMMEND_ARCHIVE,
+    }[result]
+    return qs.filter(
+        workflow__agent_decisions__processing_run_id=run_id,
+        workflow__agent_decisions__recommendation=recommendation,
+    ).distinct()
+
+
 def apply_candidate_filters(qs, params):
     search = _value(params, "search")
     if search:
@@ -280,7 +336,8 @@ def apply_candidate_filters(qs, params):
     system_statuses = (
         _list_value(params, "system_statuses") or _list_value(params, "system_status")
     )
-    return filter_queryset_by_system_status(qs, system_statuses).distinct()
+    qs = filter_queryset_by_system_status(qs, system_statuses)
+    return filter_queryset_by_processing_result(qs, params).distinct()
 
 
 def candidate_filter_options(qs):

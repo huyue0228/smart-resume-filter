@@ -56,14 +56,14 @@ export default function JobsPage() {
       fixed: 'left',
       width: 160,
       ellipsis: true,
-      filter: { type: 'text', param: 'public_name', placeholder: '筛选对外名称/拼音' },
+      filter: { type: 'select', param: 'public_name_in', multiple: true, options: 'public_name' },
     },
     {
       title: '职位名称',
       dataIndex: 'position_name',
       width: 160,
       ellipsis: true,
-      filter: { type: 'text', param: 'position_name', placeholder: '筛选职位名称/拼音' },
+      filter: { type: 'select', param: 'position_name_in', multiple: true, options: 'position_name' },
     },
     {
       title: '岗位类别',

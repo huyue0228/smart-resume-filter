@@ -19,6 +19,8 @@ docker compose --env-file .env --profile init run --rm init
 docker compose --env-file .env up -d
 ```
 
+启动后必须同时存在 `worker`（消费 `default`）和 `ai-worker`（threads 池消费 `ai`）；AI 任务只有在两者都运行时才会被调度和执行。
+
 验证：
 
 ```bash

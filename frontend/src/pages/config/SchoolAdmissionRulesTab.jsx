@@ -33,6 +33,16 @@ function TagList({ tags = [] }) {
   )
 }
 
+const EDUCATION_OPTIONS = [
+  { value: 'associate', label: '大专' },
+  { value: 'bachelor', label: '本科' },
+  { value: 'master', label: '硕士' },
+  { value: 'doctor', label: '博士' },
+]
+const EDUCATION_LABELS = Object.fromEntries(
+  EDUCATION_OPTIONS.map((item) => [item.value, item.label]),
+)
+
 export default function SchoolAdmissionRulesTab() {
   const actionRef = useRef()
   const modal = useModalRecord()
@@ -63,6 +73,7 @@ export default function SchoolAdmissionRulesTab() {
       is_active: Boolean(values.is_active),
       first_degree_tag_ids: values.first_degree_tag_ids || [],
       highest_degree_tag_ids: values.highest_degree_tag_ids || [],
+      allowed_highest_educations: values.allowed_highest_educations || [],
     }
     if (modal.record) {
       await updateSchoolTagRule(modal.record.id, body)
@@ -107,6 +118,13 @@ export default function SchoolAdmissionRulesTab() {
       render: (tags) => <TagList tags={tags} />,
     },
     {
+      title: '允许最高学历',
+      dataIndex: 'allowed_highest_educations',
+      render: (values = []) => values.length
+        ? <Space wrap>{values.map((value) => <Tag key={value}>{EDUCATION_LABELS[value] || value}</Tag>)}</Space>
+        : '不限',
+    },
+    {
       title: '操作',
       valueType: 'option',
       width: 130,
@@ -143,6 +161,7 @@ export default function SchoolAdmissionRulesTab() {
         priority: 0,
         first_degree_tag_ids: [],
         highest_degree_tag_ids: [],
+        allowed_highest_educations: [],
       }
 
   return (
@@ -193,6 +212,13 @@ export default function SchoolAdmissionRulesTab() {
           options={schoolTagOptions}
           placeholder="选择最高学历允许标签"
           rules={[{ required: true, message: '请至少配置一个最高学历标签' }]}
+        />
+        <ProFormSelect
+          name="allowed_highest_educations"
+          label="允许最高学历"
+          mode="multiple"
+          options={EDUCATION_OPTIONS}
+          placeholder="不选择表示不限最高学历"
         />
       </ModalForm>
     </>

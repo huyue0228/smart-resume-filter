@@ -14,6 +14,7 @@ import {
   SafetyCertificateOutlined,
 } from '@ant-design/icons'
 import { useRole, ROLES } from '../contexts/RoleContext'
+import BrandLogo from '../components/BrandLogo'
 import ProcessingTaskCenter from '../components/ProcessingTaskCenter'
 
 const ROOT_MENU_KEYS = ['/data', '/system']
@@ -105,8 +106,8 @@ export default function BasicLayout() {
 
   return (
     <ProLayout
-      title="智能简历筛选系统"
-      logo={false}
+      title="海纳智选"
+      logo={<BrandLogo size={28} />}
       layout="mix"
       fixedHeader
       fixSiderbar

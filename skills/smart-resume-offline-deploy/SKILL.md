@@ -51,7 +51,7 @@ bash skills/smart-resume-offline-deploy/scripts/deploy.sh
 bash skills/smart-resume-offline-deploy/scripts/verify.sh
 ```
 
-成功条件：`db`、`redis`、`backend`、`worker`、`frontend` 均处于运行状态，backend 的 `manage.py check` 通过，frontend 的 `nginx -t` 通过。
+成功条件：`db`、`redis`、`backend`、`worker`、`ai-worker`、`frontend` 均处于运行状态；`worker` 只消费 `default`，`ai-worker` 以 threads 池消费 `ai` 队列。backend 的 `manage.py check` 通过，frontend 的 `nginx -t` 通过。
 
 ## 卸载
 

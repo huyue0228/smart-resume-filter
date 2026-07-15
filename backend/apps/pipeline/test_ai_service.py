@@ -1,5 +1,8 @@
 from dataclasses import replace
+import hashlib
 import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -112,6 +115,138 @@ class AIResumeScreeningServiceTests(TestCase):
         self.assertEqual(result.profile.parse_status, "parsed")
         self.assertEqual(result.profile.skills, ["Python", "Django"])
         self.assertEqual(result.profile.file_checksum, "a" * 64)
+
+    def test_text_pdf_does_not_trigger_ocr(self):
+        with TemporaryDirectory() as media_root, self.settings(MEDIA_ROOT=media_root):
+            resume_dir = Path(media_root) / "resumes"
+            resume_dir.mkdir()
+            (resume_dir / self.resume.resume_file).write_bytes(b"fake-pdf")
+            page = SimpleNamespace(extract_text=lambda: "可提取中文正文" * 20)
+            with patch("pypdf.PdfReader", return_value=SimpleNamespace(pages=[page])), patch.object(
+                service, "_ocr_pdf"
+            ) as ocr:
+                checksum, text, ocr_used = service._extract_pdf(self.resume)
+
+        ocr.assert_not_called()
+        self.assertEqual(checksum, hashlib.sha256(b"fake-pdf").hexdigest())
+        self.assertIn("可提取中文正文", text)
+        self.assertFalse(ocr_used)
+
+    def test_short_pdf_text_uses_ocr_and_merges_bilingual_text(self):
+        with TemporaryDirectory() as media_root, self.settings(MEDIA_ROOT=media_root):
+            resume_dir = Path(media_root) / "resumes"
+            resume_dir.mkdir()
+            (resume_dir / self.resume.resume_file).write_bytes(b"scan-pdf")
+            page = SimpleNamespace(extract_text=lambda: "短文本")
+            with patch("pypdf.PdfReader", return_value=SimpleNamespace(pages=[page])), patch.object(
+                service, "_ocr_pdf", return_value="中文 OCR English text " * 10
+            ):
+                _checksum, text, ocr_used = service._extract_pdf(self.resume)
+
+        self.assertTrue(ocr_used)
+        self.assertIn("短文本", text)
+        self.assertIn("中文 OCR English text", text)
+
+    def test_ocr_fallback_updates_parser_version_and_risk_flag(self):
+        output = screening_output(
+            contact_id=self.contact.id,
+            department_id=self.department.id,
+            job_id=self.job.id,
+        )
+        with patch.object(
+            service,
+            "_extract_pdf",
+            return_value=("o" * 64, "OCR 正文" * 80, True),
+        ), patch.object(service, "_call_model", return_value=output):
+            result = service.screen_resume(self.resume, self.job)
+
+        self.assertEqual(result.profile.parse_model, "pypdf-ocr-v2")
+        self.assertIn("ocr_fallback", result.profile.profile_risk_flags)
+
+    def test_ocr_honors_page_limit(self):
+        pixmap = SimpleNamespace(width=1, height=1, samples=b"\x00\x00\x00")
+        page = SimpleNamespace(get_pixmap=Mock(return_value=pixmap))
+
+        class FakeDocument:
+            page_count = 5
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def load_page(self, _index):
+                return page
+
+        with self.settings(
+            RESUME_OCR_MAX_PAGES=2,
+            RESUME_OCR_DPI=200,
+            RESUME_OCR_TIMEOUT_SECONDS=120,
+            RESUME_OCR_CONCURRENCY=2,
+        ), patch("fitz.open", return_value=FakeDocument()), patch(
+            "pytesseract.image_to_string", return_value="OCR 正文"
+        ) as image_to_string:
+            text = service._ocr_pdf("scan.pdf")
+
+        self.assertEqual(image_to_string.call_count, 2)
+        self.assertEqual(text, "OCR 正文\n\nOCR 正文")
+
+    def test_ocr_timeout_is_reported_as_pdf_parse_failure(self):
+        class FakeDocument:
+            page_count = 1
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        with self.settings(
+            RESUME_OCR_MAX_PAGES=20,
+            RESUME_OCR_DPI=200,
+            RESUME_OCR_TIMEOUT_SECONDS=120,
+            RESUME_OCR_CONCURRENCY=2,
+        ), patch("fitz.open", return_value=FakeDocument()), patch.object(
+            service.time, "monotonic", side_effect=[0, 121]
+        ):
+            with self.assertRaises(service.AIServiceError) as captured:
+                service._ocr_pdf("scan.pdf")
+
+        self.assertEqual(captured.exception.code, "pdf_parse_failed")
+        self.assertIn("超时", captured.exception.message)
+
+    def test_missing_tesseract_is_reported_as_pdf_parse_failure(self):
+        from pytesseract.pytesseract import TesseractNotFoundError
+
+        pixmap = SimpleNamespace(width=1, height=1, samples=b"\x00\x00\x00")
+        page = SimpleNamespace(get_pixmap=Mock(return_value=pixmap))
+
+        class FakeDocument:
+            page_count = 1
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def load_page(self, _index):
+                return page
+
+        with self.settings(
+            RESUME_OCR_MAX_PAGES=20,
+            RESUME_OCR_DPI=200,
+            RESUME_OCR_TIMEOUT_SECONDS=120,
+            RESUME_OCR_CONCURRENCY=2,
+        ), patch("fitz.open", return_value=FakeDocument()), patch(
+            "pytesseract.image_to_string", side_effect=TesseractNotFoundError()
+        ):
+            with self.assertRaises(service.AIServiceError) as captured:
+                service._ocr_pdf("scan.pdf")
+
+        self.assertEqual(captured.exception.code, "pdf_parse_failed")
+        self.assertIn("OCR", captured.exception.message)
 
     def test_nul_bytes_are_removed_before_ai_data_is_persisted(self):
         output = screening_output(

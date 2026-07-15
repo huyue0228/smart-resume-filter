@@ -51,7 +51,7 @@ bash skills/smart-resume-offline-release/scripts/release.sh \
 - backend、frontend、PostgreSQL、Redis 均为 `linux/amd64`。
 - 后端 `python manage.py check` 和前端 `nginx -t` 通过。
 - 包内 `SHA256SUMS`、外层 `.sha256` 和 `docker load` 回读通过。
-- 离线 Compose 不含 `build:`，且引用本次版本镜像。
+- 离线 Compose 不含 `build:`，引用本次版本镜像，并定义消费 `default` 的 `worker` 与消费 `ai` 的 threads `ai-worker`。
 - 移动硬盘副本 SHA-256 通过，并与本地压缩包逐字节一致。
 
 最终只需报告版本、目标盘、两个交付文件的绝对路径、大小、外层 SHA-256 和验收结果。

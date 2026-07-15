@@ -349,8 +349,39 @@ class AllocationDesignContractTests(TestCase):
             m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND,
         )
         self.assertIn("技术部", self.candidate.workflow.block_detail)
+        self.assertIn("后端工程师", self.candidate.workflow.block_detail)
+        self.assertIn("二级接口人", self.candidate.workflow.block_detail)
         self.assertEqual(self.resume.job, self.job)
         self.assertIsNone(fallback_resume.job)
+
+    def test_rule_archive_detail_identifies_missing_job_requirement(self):
+        self.job.is_active = False
+        self.job.save(update_fields=["is_active"])
+
+        allocate.run(mode="rule")
+
+        self.candidate.workflow.refresh_from_db()
+        self.assertEqual(
+            self.candidate.workflow.archive_reason,
+            m.CandidateWorkflow.ARCHIVE_JOB_NOT_MATCHED,
+        )
+        self.assertIn("第1志愿", self.candidate.workflow.archive_detail)
+        self.assertIn("后端工程师", self.candidate.workflow.archive_detail)
+        self.assertIn("岗位需求中未配置", self.candidate.workflow.archive_detail)
+
+    def test_rule_archive_detail_identifies_missing_secondary_department(self):
+        self.job.department = None
+        self.job.save(update_fields=["department"])
+
+        allocate.run(mode="rule")
+
+        self.candidate.workflow.refresh_from_db()
+        self.assertEqual(
+            self.candidate.workflow.archive_reason,
+            m.CandidateWorkflow.ARCHIVE_DEPARTMENT_NOT_FOUND,
+        )
+        self.assertIn("后端工程师", self.candidate.workflow.archive_detail)
+        self.assertIn("未配置有效二级部门", self.candidate.workflow.archive_detail)
 
     def test_rule_allocation_clears_contact_block_when_valid_attempt_is_created(self):
         workflow = m.CandidateWorkflow.objects.create(
@@ -538,6 +569,106 @@ class AllocationDesignContractTests(TestCase):
         attempt = m.AssignmentAttempt.objects.get()
         self.assertEqual(attempt.matched_rule, rule)
 
+    def test_school_gate_requires_allowed_highest_education_in_same_rule(self):
+        first_tag = m.SchoolTag.objects.create(code="EDU_FIRST", name="第一标签")
+        highest_tag = m.SchoolTag.objects.create(code="EDU_HIGH", name="最高标签")
+        self.candidate.first_degree_tag = first_tag
+        self.candidate.highest_degree_tag = highest_tag
+        self.candidate.highest_education = m.Candidate.EDUCATION_MASTER
+        self.candidate.save(
+            update_fields=["first_degree_tag", "highest_degree_tag", "highest_education"]
+        )
+        bachelor_rule = m.SchoolTagRule.objects.create(
+            name="仅本科", priority=1, is_active=True
+        )
+        master_rule = m.SchoolTagRule.objects.create(
+            name="允许硕士", priority=2, is_active=True
+        )
+        for rule in [bachelor_rule, master_rule]:
+            m.SchoolTagRuleTag.objects.create(
+                rule=rule,
+                school_tag=first_tag,
+                degree_type=m.SchoolTagRuleTag.DEGREE_FIRST,
+            )
+            m.SchoolTagRuleTag.objects.create(
+                rule=rule,
+                school_tag=highest_tag,
+                degree_type=m.SchoolTagRuleTag.DEGREE_HIGHEST,
+            )
+        m.SchoolTagRuleEducation.objects.create(
+            rule=bachelor_rule, education=m.Candidate.EDUCATION_BACHELOR
+        )
+        m.SchoolTagRuleEducation.objects.create(
+            rule=master_rule, education=m.Candidate.EDUCATION_MASTER
+        )
+
+        allocate.run(mode="rule")
+
+        self.assertEqual(m.AssignmentAttempt.objects.get().matched_rule, master_rule)
+
+    def test_missing_highest_education_blocks_ai_before_model_call(self):
+        first_tag = m.SchoolTag.objects.create(code="MISS_FIRST", name="第一标签")
+        highest_tag = m.SchoolTag.objects.create(code="MISS_HIGH", name="最高标签")
+        self.candidate.first_degree_tag = first_tag
+        self.candidate.highest_degree_tag = highest_tag
+        self.candidate.highest_education = ""
+        self.candidate.save(
+            update_fields=["first_degree_tag", "highest_degree_tag", "highest_education"]
+        )
+        rule = m.SchoolTagRule.objects.create(name="限制学历", priority=1, is_active=True)
+        m.SchoolTagRuleTag.objects.create(
+            rule=rule,
+            school_tag=first_tag,
+            degree_type=m.SchoolTagRuleTag.DEGREE_FIRST,
+        )
+        m.SchoolTagRuleTag.objects.create(
+            rule=rule,
+            school_tag=highest_tag,
+            degree_type=m.SchoolTagRuleTag.DEGREE_HIGHEST,
+        )
+        m.SchoolTagRuleEducation.objects.create(
+            rule=rule, education=m.Candidate.EDUCATION_MASTER
+        )
+
+        with patch(
+            "apps.pipeline.services.allocate.ai_service.screen_resume"
+        ) as screen_resume:
+            allocate.run(mode="ai")
+
+        screen_resume.assert_not_called()
+        self.candidate.workflow.refresh_from_db()
+        self.assertIn("最高学历缺失", self.candidate.workflow.archive_detail)
+
+    def test_disallowed_highest_education_records_explicit_archive_detail(self):
+        first_tag = m.SchoolTag.objects.create(code="NO_FIRST", name="第一标签")
+        highest_tag = m.SchoolTag.objects.create(code="NO_HIGH", name="最高标签")
+        self.candidate.first_degree_tag = first_tag
+        self.candidate.highest_degree_tag = highest_tag
+        self.candidate.highest_education = m.Candidate.EDUCATION_ASSOCIATE
+        self.candidate.save(
+            update_fields=["first_degree_tag", "highest_degree_tag", "highest_education"]
+        )
+        rule = m.SchoolTagRule.objects.create(name="仅本科", priority=1, is_active=True)
+        m.SchoolTagRuleTag.objects.create(
+            rule=rule,
+            school_tag=first_tag,
+            degree_type=m.SchoolTagRuleTag.DEGREE_FIRST,
+        )
+        m.SchoolTagRuleTag.objects.create(
+            rule=rule,
+            school_tag=highest_tag,
+            degree_type=m.SchoolTagRuleTag.DEGREE_HIGHEST,
+        )
+        m.SchoolTagRuleEducation.objects.create(
+            rule=rule, education=m.Candidate.EDUCATION_BACHELOR
+        )
+
+        allocate.run(mode="rule")
+
+        self.candidate.workflow.refresh_from_db()
+        self.assertIn("不在", self.candidate.workflow.archive_detail)
+        self.assertIn("允许范围", self.candidate.workflow.archive_detail)
+
     def test_school_gate_does_not_fall_back_to_legacy_platform_text(self):
         first_tag = m.SchoolTag.objects.create(code="A", name="平台A")
         highest_tag = m.SchoolTag.objects.create(code="A_PLUS", name="平台A+")
@@ -646,6 +777,45 @@ class AllocationDesignContractTests(TestCase):
             m.CandidateWorkflow.ARCHIVE_AGENT_NO_RECOMMENDATION,
         )
 
+    def test_ai_archive_detail_identifies_missing_secondary_department(self):
+        self.job.department = None
+        self.job.save(update_fields=["department"])
+        with patch("apps.pipeline.services.allocate.ai_service.screen_resume") as mocked:
+            allocate.run(mode="ai")
+
+        self.candidate.workflow.refresh_from_db()
+        decision = m.AgentDispatchDecision.objects.get()
+        mocked.assert_not_called()
+        self.assertEqual(decision.error_code, "reference_not_found")
+        self.assertIn("后端工程师", decision.error_message)
+        self.assertIn("未配置有效二级部门", self.candidate.workflow.archive_detail)
+
+    def test_ai_archive_detail_identifies_missing_job_requirement(self):
+        self.job.is_active = False
+        self.job.save(update_fields=["is_active"])
+        with patch("apps.pipeline.services.allocate.ai_service.screen_resume") as mocked:
+            allocate.run(mode="ai")
+
+        self.candidate.workflow.refresh_from_db()
+        decision = m.AgentDispatchDecision.objects.get()
+        mocked.assert_not_called()
+        self.assertEqual(decision.error_code, "guardrail_blocked")
+        self.assertIn("后端工程师", decision.error_message)
+        self.assertIn("岗位需求中未配置", self.candidate.workflow.archive_detail)
+
+    def test_ai_archive_detail_identifies_missing_secondary_contact(self):
+        self.contact.is_active = False
+        self.contact.save(update_fields=["is_active"])
+        with patch("apps.pipeline.services.allocate.ai_service.screen_resume") as mocked:
+            allocate.run(mode="ai")
+
+        self.candidate.workflow.refresh_from_db()
+        decision = m.AgentDispatchDecision.objects.get()
+        mocked.assert_not_called()
+        self.assertEqual(decision.error_code, "reference_not_found")
+        self.assertIn("技术部", decision.error_message)
+        self.assertIn("没有启用的二级接口人", self.candidate.workflow.archive_detail)
+
     def test_cancel_ai_review_archives_when_no_other_active_attempt(self):
         m.Config.objects.create(key="ai_dispatch_threshold", value=0.8)
         with patch(
@@ -710,6 +880,31 @@ class AllocationDesignContractTests(TestCase):
         self.assertEqual(handoff.to_contact_name_snapshot, "二级接口人")
         self.assertEqual(handoff.to_contact_employee_no_snapshot, "L2001")
         self.assertEqual(handoff.created_by_username_snapshot, "hr-snapshot")
+
+    def test_secondary_stage_rejection_advances_to_next_volunteer(self):
+        second_resume = m.Resume.objects.create(
+            candidate=self.candidate,
+            apply_id="A1002",
+            position_name="后端工程师",
+            volunteer_rank=2,
+            resume_file="张三（A1002）.pdf",
+        )
+        allocate.run(mode="rule")
+        first_attempt = m.AssignmentAttempt.objects.get()
+        allocate.dispatch_attempt(first_attempt)
+
+        allocate.submit_feedback(
+            first_attempt,
+            m.AssignmentAttempt.FEEDBACK_REJECTED,
+            "二级判断不匹配",
+        )
+
+        first_attempt.refresh_from_db()
+        next_attempt = m.AssignmentAttempt.objects.exclude(pk=first_attempt.pk).get()
+        self.assertEqual(first_attempt.status, m.AssignmentAttempt.STATUS_REJECTED)
+        self.assertEqual(first_attempt.feedback_note, "二级判断不匹配")
+        self.assertEqual(next_attempt.resume, second_resume)
+        self.assertEqual(next_attempt.status, m.AssignmentAttempt.STATUS_PENDING_DISPATCH)
 
     def test_ai_model_versions_come_from_backend_config(self):
         ai_config.save_ai_connection_config(

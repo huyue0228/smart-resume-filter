@@ -530,6 +530,61 @@ def _current_volunteer_job(resume):
     ).get(pk=selected.pk)
 
 
+def _volunteer_label(resume):
+    rank = f"第{resume.volunteer_rank}志愿" if resume.volunteer_rank else "当前志愿"
+    position_name = (resume.position_name or "").strip()
+    if not position_name:
+        return f"{rank}（未填写投递岗位）"
+    entity = (resume.entity or "").strip()
+    entity_suffix = f"（招聘主体：{entity}）" if entity else ""
+    return f"{rank}“{position_name}”{entity_suffix}"
+
+
+def _job_label(job):
+    name = (job.public_name or job.position_name or "").strip()
+    return f"岗位需求“{name or f'ID {job.id}'}”"
+
+
+def _job_not_configured_detail(resume):
+    if not (resume.position_name or "").strip():
+        return f"{_volunteer_label(resume)}，无法在岗位需求中定位启用岗位"
+    return f"{_volunteer_label(resume)}：岗位需求中未配置与该投递岗位匹配的启用岗位"
+
+
+def _rule_job_gap_detail(resume, strategy, jobs):
+    """区分岗位需求缺失与岗位已配置但专业不符合，避免笼统写“未匹配岗位”。"""
+    job = strategy.match_current_volunteer_job(resume, jobs)
+    if not job:
+        return _job_not_configured_detail(resume)
+    candidate_major = (resume.candidate.highest_major or "").strip() or "未填写"
+    return (
+        f"{_volunteer_label(resume)}已匹配{_job_label(job)}，"
+        f"但最高学历专业“{candidate_major}”不符合该岗位需求专业"
+    )
+
+
+def _ai_current_volunteer_prerequisite(resume):
+    """返回 AI 当前志愿可调用模型前的岗位、二级部门和接口人校验结果。"""
+    job = _current_volunteer_job(resume)
+    if not job:
+        return None, "guardrail_blocked", _job_not_configured_detail(resume)
+    department = _secondary_department(job.department)
+    if not department:
+        return (
+            job,
+            "reference_not_found",
+            f"{_volunteer_label(resume)}已匹配{_job_label(job)}，但该岗位未配置有效二级部门",
+        )
+    if not _first_secondary_contact(department):
+        return (
+            job,
+            "reference_not_found",
+            f"{_volunteer_label(resume)}已匹配{_job_label(job)}并定位二级部门“{department.name}”，"
+            "但该部门没有启用的二级接口人",
+        )
+    return job, "", ""
+
+
 def _process_ai_recommendation(
     workflow,
     resume,
@@ -745,6 +800,8 @@ def process_ai_scope_item(run_id, scope_item_id):
     admission = school_admission.evaluate(candidate, rules)
     resume = None
     job = None
+    prerequisite_code = ""
+    prerequisite_detail = ""
     result = None
     ai_error = None
     last_cancel_check = [0.0, False]
@@ -765,8 +822,10 @@ def process_ai_scope_item(run_id, scope_item_id):
             else _candidate_resumes(candidate).first()
         )
         if resume:
-            job = _current_volunteer_job(resume)
-        if resume and job:
+            job, prerequisite_code, prerequisite_detail = _ai_current_volunteer_prerequisite(
+                resume
+            )
+        if resume and job and not prerequisite_detail:
             try:
                 result = ai_service.screen_resume(
                     resume,
@@ -839,7 +898,7 @@ def process_ai_scope_item(run_id, scope_item_id):
             _archive(
                 workflow,
                 m.CandidateWorkflow.ARCHIVE_SCHOOL_RULE_NOT_MATCHED,
-                "候选人第一学历标签和最高学历标签未命中任何启用规则",
+                admission.failure_detail,
             )
         elif not resume:
             _archive(
@@ -847,18 +906,18 @@ def process_ai_scope_item(run_id, scope_item_id):
                 m.CandidateWorkflow.ARCHIVE_NO_NEXT_RESUME,
                 "没有下一条可尝试志愿",
             )
-        elif not job:
+        elif prerequisite_detail:
             _touch_workflow(workflow, resume, "ai")
             decision = _create_agent_failure_decision(
                 workflow,
                 resume,
-                error_code="guardrail_blocked",
-                error_message="当前志愿未匹配到启用岗位需求",
+                error_code=prerequisite_code,
+                error_message=prerequisite_detail,
             )
             _archive(
                 workflow,
                 m.CandidateWorkflow.ARCHIVE_AGENT_NO_RECOMMENDATION,
-                "当前志愿未匹配到启用岗位需求",
+                prerequisite_detail,
             )
             failed = True
             item.error_code = decision.error_code
@@ -938,7 +997,7 @@ def _create_next_auto_attempt(
         _archive(
             workflow,
             m.CandidateWorkflow.ARCHIVE_SCHOOL_RULE_NOT_MATCHED,
-            "候选人第一学历标签和最高学历标签未命中任何启用规则",
+            admission.failure_detail,
         )
         return None
 
@@ -956,18 +1015,20 @@ def _create_next_auto_attempt(
             )
             return None
         _touch_workflow(workflow, resume, "ai")
-        job = _current_volunteer_job(resume)
-        if not job:
+        job, prerequisite_code, prerequisite_detail = _ai_current_volunteer_prerequisite(
+            resume
+        )
+        if prerequisite_detail:
             _create_agent_failure_decision(
                 workflow,
                 resume,
-                error_code="guardrail_blocked",
-                error_message="当前志愿未匹配到启用岗位需求",
+                error_code=prerequisite_code,
+                error_message=prerequisite_detail,
             )
             _archive(
                 workflow,
                 m.CandidateWorkflow.ARCHIVE_AGENT_NO_RECOMMENDATION,
-                "当前志愿未匹配到启用岗位需求",
+                prerequisite_detail,
             )
             return None
         return _process_ai_recommendation(
@@ -985,20 +1046,30 @@ def _create_next_auto_attempt(
     )
     strategy = get_rule_strategy()
     had_resume = False
-    # 下面两个 gap 标记用于在所有后续志愿都失败时给出更接近真实原因的归档说明。
-    saw_job_gap = False
-    saw_department_gap = False
+    # 所有志愿均无法创建尝试时，保留每条志愿的真实缺口；首条志愿决定归档码。
+    gaps = []
     after_rank = workflow.current_rank if workflow.current_rank else None
     for resume in _candidate_resumes(candidate, after_rank=after_rank):
         had_resume = True
         _touch_workflow(workflow, resume, mode)
         job, _category, classify_reason = _classify_resume(resume, strategy, jobs, "rule")
         if not job:
-            saw_job_gap = True
+            gaps.append(
+                (
+                    m.CandidateWorkflow.ARCHIVE_JOB_NOT_MATCHED,
+                    _rule_job_gap_detail(resume, strategy, jobs),
+                )
+            )
             continue
         department = _secondary_department(job.department)
         if not department:
-            saw_department_gap = True
+            gaps.append(
+                (
+                    m.CandidateWorkflow.ARCHIVE_DEPARTMENT_NOT_FOUND,
+                    f"{_volunteer_label(resume)}已匹配{_job_label(job)}，"
+                    "但该岗位未配置有效二级部门",
+                )
+            )
             continue
         contact = _first_secondary_contact(department)
         if not contact:
@@ -1007,7 +1078,8 @@ def _create_next_auto_attempt(
             _block_current_volunteer(
                 workflow,
                 m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND,
-                f"当前第{resume.volunteer_rank}志愿已匹配二级部门{department.name}，但没有启用的二级接口人",
+                f"{_volunteer_label(resume)}已匹配{_job_label(job)}并定位二级部门“{department.name}”，"
+                "但该部门没有启用的二级接口人",
             )
             return None
 
@@ -1029,10 +1101,9 @@ def _create_next_auto_attempt(
             m.CandidateWorkflow.ARCHIVE_NO_NEXT_RESUME,
             "没有下一条可尝试志愿",
         )
-    elif saw_job_gap:
-        _archive(workflow, m.CandidateWorkflow.ARCHIVE_JOB_NOT_MATCHED, "后续志愿未匹配岗位")
-    elif saw_department_gap:
-        _archive(workflow, m.CandidateWorkflow.ARCHIVE_DEPARTMENT_NOT_FOUND, "后续志愿未找到二级部门")
+    elif gaps:
+        reason, _detail = gaps[0]
+        _archive(workflow, reason, "；".join(detail for _reason, detail in gaps))
     else:
         _archive(
             workflow,
@@ -1401,12 +1472,37 @@ def assign_sub_contact(attempt, sub_contact, operator_contact=None, user=None, n
 
 
 @transaction.atomic
-def submit_feedback(attempt, result, note=""):
+def submit_feedback(attempt, result, note="", *, user=None):
     attempt, workflow = _lock_attempt_for_manual_write(attempt)
     if attempt.feedback_at:
         raise ValueError("反馈已提交，不允许重复修改")
-    if attempt.status != m.AssignmentAttempt.STATUS_ASSIGNED_L3:
-        raise ValueError("仅已转派三级的尝试可以反馈")
+    allowed_statuses = {
+        m.AssignmentAttempt.STATUS_DISPATCHED_L2,
+        m.AssignmentAttempt.STATUS_ASSIGNED_L3,
+    }
+    if attempt.status not in allowed_statuses:
+        raise ValueError("仅已下发且未转派的二级尝试或已转派三级尝试可以反馈")
+    if user is not None:
+        from apps.accounts.permissions import user_permission_codes
+
+        permissions = user_permission_codes(user)
+        contact_id = getattr(user, "contact_id", None)
+        if "attempt.feedback" not in permissions:
+            raise ValueError("当前用户没有提交反馈权限")
+        is_bound_secondary = (
+            attempt.status == m.AssignmentAttempt.STATUS_DISPATCHED_L2
+            and "attempt.view_received" in permissions
+            and contact_id
+            and attempt.contact_id == contact_id
+        )
+        is_bound_tertiary = (
+            attempt.status == m.AssignmentAttempt.STATUS_ASSIGNED_L3
+            and "attempt.view_assigned" in permissions
+            and contact_id
+            and attempt.sub_contact_id == contact_id
+        )
+        if not (is_bound_secondary or is_bound_tertiary):
+            raise ValueError("当前用户不是该阶段绑定的反馈接口人")
     if result not in [
         m.AssignmentAttempt.FEEDBACK_PASSED,
         m.AssignmentAttempt.FEEDBACK_REJECTED,
@@ -1528,17 +1624,19 @@ def retry_agent_decision(decision):
             workflow,
             resume,
             error_code="guardrail_blocked",
-            error_message="候选人第一学历标签和最高学历标签未命中任何启用规则",
+            error_message=admission.failure_detail,
         )
         return new_decision, None
 
-    job = _current_volunteer_job(resume)
-    if not job:
+    job, prerequisite_code, prerequisite_detail = _ai_current_volunteer_prerequisite(
+        resume
+    )
+    if prerequisite_detail:
         new_decision = _create_agent_failure_decision(
             workflow,
             resume,
-            error_code="reference_not_found",
-            error_message="AI 重试时当前志愿未匹配到启用岗位需求",
+            error_code=prerequisite_code,
+            error_message=f"AI 重试时{prerequisite_detail}",
         )
         return new_decision, None
 

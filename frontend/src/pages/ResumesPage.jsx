@@ -1,4 +1,5 @@
-import { useRef, useEffect, useState, useCallback } from 'react'
+import { useRef, useEffect, useState, useCallback, useMemo } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { PageContainer } from '@ant-design/pro-components'
 import {
   Button,
@@ -14,6 +15,8 @@ import {
   Select,
   Input,
   Popconfirm,
+  Alert,
+  DatePicker,
 } from 'antd'
 import {
   DeleteOutlined,
@@ -44,6 +47,7 @@ import {
   fetchEligibleSubContacts,
   submitAllocationFeedback,
   exportAllocations,
+  exportResumeResultReport,
 } from '../api/services'
 import ImportButton from '../components/ImportButton'
 import ResumePreview from '../components/ResumePreview'
@@ -58,6 +62,43 @@ const RESUME_IMPORT_FIELDS = [
   { key: 'resume_list', label: '① 简历信息列表 (.xlsx/.xls/.csv)', accept: '.xlsx,.xls,.csv' },
   { key: 'resume_package', label: '② 简历包 (.zip，文件名含应聘ID)', accept: '.zip' },
 ]
+
+const PROCESSING_RESULT_LABELS = {
+  success: '成功',
+  failed: '失败',
+  review: '待复核',
+  dispatch: '待下发',
+  archive: '归档',
+  skipped: '跳过',
+  cancelled: '取消',
+}
+
+const ENTITY_TAG_COLORS = [
+  'blue',
+  'geekblue',
+  'purple',
+  'magenta',
+  'volcano',
+  'orange',
+  'gold',
+  'green',
+  'cyan',
+  'lime',
+]
+const ENTITY_TAG_COLOR_MAP = new Map()
+
+function entityTagColor(entity) {
+  if (!ENTITY_TAG_COLOR_MAP.has(entity)) {
+    const color = ENTITY_TAG_COLORS[ENTITY_TAG_COLOR_MAP.size % ENTITY_TAG_COLORS.length]
+    ENTITY_TAG_COLOR_MAP.set(entity, color)
+  }
+  return ENTITY_TAG_COLOR_MAP.get(entity)
+}
+
+function renderEntityTag(entity) {
+  const label = String(entity || '').trim()
+  return label ? <Tag color={entityTagColor(label)}>{label}</Tag> : '-'
+}
 
 const SYSTEM_STATUS_OPTIONS = {
   raw: {
@@ -131,12 +172,14 @@ const REASON_TYPE = {
 
 export default function ResumesPage() {
   const actionRef = useRef()
-  const { hasPermission, isContact, isSecondaryContact, isTertiaryContact } = useRole()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const { hasPermission, contact, isContact, isSecondaryContact } = useRole()
   const canViewAgentDecisions = hasPermission('attempt.view_all')
   const canRunPipeline = hasPermission('pipeline.run')
   const canImport = hasPermission('resume.import')
   const canDispatch = hasPermission('attempt.dispatch')
   const canExport = hasPermission('resume.view') || hasPermission('attempt.export')
+  const canExportResultReport = hasPermission('resume.view')
   const canSelectCandidates = canDispatch || canExport || canImport
   const { run } = useProcessRunner()
   const [undo, setUndo] = useState({ available: false })
@@ -180,6 +223,31 @@ export default function ResumesPage() {
     note: '',
     loading: false,
   })
+  const [reportModal, setReportModal] = useState({
+    open: false,
+    range: null,
+    loading: false,
+  })
+
+  const handleExportResultReport = async () => {
+    const [start, end] = reportModal.range || []
+    if (!start || !end) {
+      message.warning('请选择导入日期范围')
+      return
+    }
+    setReportModal((prev) => ({ ...prev, loading: true }))
+    try {
+      const response = await exportResumeResultReport({
+        imported_after: start.format('YYYY-MM-DD'),
+        imported_before: end.format('YYYY-MM-DD'),
+      })
+      downloadBlobFromResponse(response, '简历结果报表.xlsx')
+      message.success('结果报表已导出')
+      setReportModal({ open: false, range: null, loading: false })
+    } catch {
+      setReportModal((prev) => ({ ...prev, loading: false }))
+    }
+  }
 
   const openManualAssign = async (resume, attempt = null) => {
     setManualModal((prev) => ({ ...prev, open: true, resume, attempt, loading: true }))
@@ -573,7 +641,10 @@ export default function ResumesPage() {
     const canDispatchAttempt = canDispatch && attempt?.status === 'pending_dispatch'
     const canReview = hasPermission('attempt.dispatch') && attempt?.status === 'pending_review'
     const canAssign = isSecondaryContact && attempt && ['dispatched_l2', 'assigned_l3'].includes(attempt.status) && !attempt.feedback_at
-    const canFeedback = isTertiaryContact && attempt?.status === 'assigned_l3' && !attempt.feedback_at
+    const canFeedback = hasPermission('attempt.feedback') && !attempt?.feedback_at && (
+      (attempt?.status === 'dispatched_l2' && hasPermission('attempt.view_received') && attempt.contact === contact?.id)
+      || (attempt?.status === 'assigned_l3' && hasPermission('attempt.view_assigned') && attempt.sub_contact === contact?.id)
+    )
     return (
       <Space wrap className="resume-detail-actions">
         {hasPermission('resume.manual_assign') && record.current_resume && (
@@ -624,7 +695,7 @@ export default function ResumesPage() {
             style={{ padding: 0 }}
             onClick={() => setFeedbackModal({ open: true, record: attempt, result: 'passed', note: '', loading: false })}
           >
-            反馈
+            提交反馈
           </Button>
         )}
         {hasPermission('resume.import') && (
@@ -636,11 +707,23 @@ export default function ResumesPage() {
     )
   }
 
+  const processingResultFilter = useMemo(() => {
+    const runId = searchParams.get('processing_run_id')
+    const result = searchParams.get('processing_result')
+    if (!runId || !PROCESSING_RESULT_LABELS[result]) return null
+    return { runId, result }
+  }, [searchParams])
+
   const requestCandidates = useCallback((params) => {
+    const taskQuery = processingResultFilter ? {
+      processing_run_id: processingResultFilter.runId,
+      processing_result: processingResultFilter.result,
+    } : {}
+    const mergedParams = { ...params, ...taskQuery }
     const { page: _page, page_size: _pageSize, ...query } = params
-    setLastQuery(query)
-    return fetchCandidates(params)
-  }, [])
+    setLastQuery({ ...query, ...taskQuery })
+    return fetchCandidates(mergedParams)
+  }, [processingResultFilter])
 
   const baseColumns = [
     {
@@ -677,7 +760,7 @@ export default function ResumesPage() {
       dataIndex: 'current_entity',
       width: 120,
       filter: { type: 'select', param: 'current_entity_in', multiple: true, options: 'current_entity' },
-      render: (_, record) => record.current_resume?.entity || '-',
+      render: (_, record) => renderEntityTag(record.current_resume?.entity),
     },
     {
       title: '当前投递岗位',
@@ -707,7 +790,7 @@ export default function ResumesPage() {
       dataIndex: 'allocation_source',
       width: 100,
       filter: { type: 'select', param: 'allocation_source', multiple: true, options: Object.entries(SOURCE_TEXT).map(([value, label]) => ({ value, label })) },
-      render: (_, record) => SOURCE_TEXT[record.current_attempt?.source] || '-',
+      render: (_, record) => SOURCE_TEXT[record.allocation_source] || '-',
     },
     {
       title: '二级接口人',
@@ -788,6 +871,16 @@ export default function ResumesPage() {
       title="简历库"
       content="按候选人聚合展示当前有效志愿；单击候选人行查看全部投递、分配尝试和反馈。"
     >
+      {processingResultFilter && (
+        <Alert
+          showIcon
+          type="info"
+          style={{ marginBottom: 16 }}
+          message={`处理任务 #${processingResultFilter.runId}：${PROCESSING_RESULT_LABELS[processingResultFilter.result]}简历`}
+          description="当前列表、导出和批量操作均限定为该任务的对应候选人结果。"
+          action={<Button size="small" onClick={() => setSearchParams({})}>清除筛选</Button>}
+        />
+      )}
       <SmartDataTable
         tableId="candidates"
         actionRef={actionRef}
@@ -887,6 +980,13 @@ export default function ResumesPage() {
           >
             处理简历
           </Button>,
+          canExportResultReport && <Button
+            key="result-report"
+            icon={<DownloadOutlined />}
+            onClick={() => setReportModal({ open: true, range: null, loading: false })}
+          >
+            导出结果报表
+          </Button>,
           canImport && <Button
             key="undo"
             icon={<UndoOutlined />}
@@ -898,6 +998,29 @@ export default function ResumesPage() {
         ].filter(Boolean)}
         request={requestCandidates}
       />
+      <Modal
+        title="导出简历结果报表"
+        open={reportModal.open}
+        okText="导出 Excel"
+        cancelText="取消"
+        confirmLoading={reportModal.loading}
+        okButtonProps={{ disabled: !reportModal.range?.[0] || !reportModal.range?.[1] }}
+        onOk={handleExportResultReport}
+        onCancel={() => {
+          if (!reportModal.loading) setReportModal({ open: false, range: null, loading: false })
+        }}
+      >
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Typography.Text>
+            按应聘记录首次导入日期导出全部结果，不受当前表格筛选影响。
+          </Typography.Text>
+          <DatePicker.RangePicker
+            value={reportModal.range}
+            onChange={(range) => setReportModal((prev) => ({ ...prev, range }))}
+            style={{ width: '100%' }}
+          />
+        </Space>
+      </Modal>
       <Modal
         title="处理简历"
         open={processModalOpen}
@@ -952,6 +1075,9 @@ export default function ResumesPage() {
               <Descriptions.Item label="最高学历专业">
                 {detailRecord.highest_major || '-'}
               </Descriptions.Item>
+              <Descriptions.Item label="最高学历">
+                {detailRecord.highest_education_label || '-'}
+              </Descriptions.Item>
               <Descriptions.Item label="第一学历院校">
                 <Space size={6} wrap>
                   <span>{detailRecord.first_degree_school || '-'}</span>
@@ -978,6 +1104,9 @@ export default function ResumesPage() {
               </Descriptions.Item>
               <Descriptions.Item label="流程状态">
                 {WORKFLOW_STATUS[detailRecord.workflow_status]?.text || detailRecord.workflow_status || '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="分配来源">
+                {SOURCE_TEXT[detailRecord.allocation_source] || '-'}
               </Descriptions.Item>
               <Descriptions.Item label="原因" span={2}>
                 <Space>
@@ -1019,6 +1148,7 @@ export default function ResumesPage() {
                   title: '主体',
                   dataIndex: 'entity',
                   width: 100,
+                  render: (value) => renderEntityTag(value),
                 },
                 {
                   title: '投递岗位',

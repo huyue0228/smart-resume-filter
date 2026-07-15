@@ -243,6 +243,17 @@ class MajorAlias(models.Model):
 class Candidate(models.Model):
     """同学 / 人。以 identity_hash(规范化姓名+手机号) 全局唯一标识。"""
 
+    EDUCATION_ASSOCIATE = "associate"
+    EDUCATION_BACHELOR = "bachelor"
+    EDUCATION_MASTER = "master"
+    EDUCATION_DOCTOR = "doctor"
+    HIGHEST_EDUCATION_CHOICES = [
+        (EDUCATION_ASSOCIATE, "大专"),
+        (EDUCATION_BACHELOR, "本科"),
+        (EDUCATION_MASTER, "硕士"),
+        (EDUCATION_DOCTOR, "博士"),
+    ]
+
     identity_hash = models.CharField(max_length=64, unique=True)
     name = models.CharField(max_length=64)
     phone = models.CharField(max_length=32, blank=True)
@@ -253,6 +264,12 @@ class Candidate(models.Model):
     first_degree_school = models.CharField(max_length=128, blank=True)
     highest_degree_school = models.CharField(max_length=128, blank=True)
     highest_major = models.CharField(max_length=128, blank=True)
+    highest_education = models.CharField(
+        max_length=16,
+        choices=HIGHEST_EDUCATION_CHOICES,
+        blank=True,
+        help_text="最高学历",
+    )
     # Step3 院校分类结果
     first_degree_platform = models.CharField(max_length=64, blank=True)
     highest_degree_platform = models.CharField(max_length=64, blank=True)
@@ -325,6 +342,11 @@ class Resume(models.Model):
     def __str__(self):
         return f"{self.candidate.name}-{self.position_name}"
 
+    class Meta:
+        indexes = [
+            models.Index(fields=["imported_at"]),
+        ]
+
 
 class ResumeProfile(models.Model):
     """AI 策略读取 PDF 后形成的、可按文件和版本复用的结构化画像。"""
@@ -395,6 +417,29 @@ class SchoolTagRuleTag(models.Model):
 
     def __str__(self):
         return f"{self.rule}-{self.school_tag}-{self.degree_type}"
+
+
+class SchoolTagRuleEducation(models.Model):
+    """院校准入规则允许的候选人最高学历明细。"""
+
+    rule = models.ForeignKey(
+        SchoolTagRule, on_delete=models.CASCADE, related_name="education_links"
+    )
+    education = models.CharField(
+        max_length=16, choices=Candidate.HIGHEST_EDUCATION_CHOICES
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["rule", "education"],
+                name="core_rule_education_unique",
+            )
+        ]
+        indexes = [models.Index(fields=["rule", "education"])]
+
+    def __str__(self):
+        return f"{self.rule}-{self.get_education_display()}"
 
 
 class CandidateWorkflow(models.Model):

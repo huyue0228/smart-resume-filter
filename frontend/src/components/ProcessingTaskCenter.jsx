@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Alert, Badge, Button, Card, Drawer, Empty, Popconfirm, Progress, Space, Tag, Tooltip, Typography, message } from 'antd'
 import {
   CheckCircleOutlined,
@@ -74,7 +75,17 @@ function scopeSummaryText(run) {
   return parts.join(' · ')
 }
 
-function TaskCard({ run, cancellingId, onCancel }) {
+const RESULT_METRICS = [
+  { key: 'success', label: '成功' },
+  { key: 'failed', label: '失败', danger: true },
+  { key: 'review', label: '待复核' },
+  { key: 'dispatch', label: '待下发' },
+  { key: 'archive', label: '归档' },
+  { key: 'skipped', label: '跳过' },
+  { key: 'cancelled', label: '取消' },
+]
+
+function TaskCard({ run, cancellingId, onCancel, onOpenCandidates }) {
   const percent = progressOf(run)
   const stage = (run.stages || []).find((item) => item.step === run.current_stage)
   const status = STATUS_META[run.status] || { text: run.status || '未知', color: 'default' }
@@ -146,13 +157,22 @@ function TaskCard({ run, cancellingId, onCancel }) {
 
         {hasResults ? (
           <div className="processing-task-results">
-            <span><strong>{run.success_count || 0}</strong>成功</span>
-            <span className={run.failed_count ? 'is-danger' : ''}><strong>{run.failed_count || 0}</strong>失败</span>
-            <span><strong>{run.review_count || 0}</strong>待复核</span>
-            <span><strong>{run.dispatch_count || 0}</strong>待下发</span>
-            <span><strong>{run.archive_count || 0}</strong>归档</span>
-            <span><strong>{run.skipped_count || 0}</strong>跳过</span>
-            <span><strong>{run.cancelled_count || 0}</strong>取消</span>
+            {RESULT_METRICS.map(({ key, label, danger }) => {
+              const count = Number(run[`${key}_count`] || 0)
+              return (
+                <Button
+                  key={key}
+                  type="text"
+                  size="small"
+                  disabled={!count || run.mode !== 'ai'}
+                  className={danger && count ? 'is-danger' : ''}
+                  onClick={() => onOpenCandidates(run, key)}
+                  aria-label={`筛选本任务${label}简历 ${count} 名`}
+                >
+                  <strong>{count}</strong>{label}
+                </Button>
+              )
+            })}
           </div>
         ) : null}
 
@@ -191,6 +211,7 @@ function TaskCard({ run, cancellingId, onCancel }) {
 
 // 常驻于主布局的非模态任务中心：所有有 pipeline.view 权限的 HR/管理员看到同一份服务端任务状态。
 export default function ProcessingTaskCenter() {
+  const navigate = useNavigate()
   const [open, setOpen] = useState(false)
   const [runs, setRuns] = useState([])
   const [loading, setLoading] = useState(false)
@@ -232,6 +253,14 @@ export default function ProcessingTaskCenter() {
     } finally {
       setCancellingId(null)
     }
+  }
+
+  const openCandidates = (run, result) => {
+    setOpen(false)
+    navigate({
+      pathname: '/resumes',
+      search: `?processing_run_id=${run.id}&processing_result=${result}`,
+    })
   }
 
   return (
@@ -283,7 +312,13 @@ export default function ProcessingTaskCenter() {
         </div>
         <div className="processing-task-list">
           {visibleRuns.length ? visibleRuns.map((run) => (
-            <TaskCard key={run.id} run={run} cancellingId={cancellingId} onCancel={cancel} />
+            <TaskCard
+              key={run.id}
+              run={run}
+              cancellingId={cancellingId}
+              onCancel={cancel}
+              onOpenCandidates={openCandidates}
+            />
           )) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无处理任务" />}
         </div>
       </Drawer>

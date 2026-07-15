@@ -1,17 +1,20 @@
 import io
 import mimetypes
 import os
+import re
 import zipfile
+from datetime import date, datetime, time as datetime_time, timedelta
 from urllib.parse import quote
 
 from django.conf import settings
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import Group
 from django.db import transaction
-from django.db.models import Count
+from django.db.models import Count, Prefetch
 from django.db.models.deletion import ProtectedError
 from django.http import HttpResponse
 from django.db.models import Q
+from django.utils import timezone
 from rest_framework.authtoken.models import Token
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -42,6 +45,7 @@ from apps.pipeline.services import allocate as allocate_service
 from apps.pipeline.ai import service as ai_service
 
 from . import serializers
+from .result_report import build_result_report
 
 
 CONFIG_REGISTRY = {
@@ -410,6 +414,80 @@ class ResumeViewSet(PermissionedReadOnlyModelViewSet):
             qs = qs.filter(imported_at__date__lte=p["imported_before"])
         return qs.distinct()
 
+    @action(detail=False, methods=["get"], url_path="result-report")
+    def result_report(self, request):
+        imported_after = request.query_params.get("imported_after")
+        imported_before = request.query_params.get("imported_before")
+        if not imported_after or not imported_before:
+            return Response(
+                {"detail": "imported_after 和 imported_before 均为必填日期"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", imported_after) or not re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}", imported_before
+            ):
+                raise ValueError
+            start_date = date.fromisoformat(imported_after)
+            end_date = date.fromisoformat(imported_before)
+        except (TypeError, ValueError):
+            return Response(
+                {"detail": "日期格式必须为 YYYY-MM-DD"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if start_date > end_date:
+            return Response(
+                {"detail": "开始日期不能晚于结束日期"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        current_timezone = timezone.get_current_timezone()
+        start_at = timezone.make_aware(
+            datetime.combine(start_date, datetime_time.min), current_timezone
+        )
+        end_at = timezone.make_aware(
+            datetime.combine(end_date + timedelta(days=1), datetime_time.min),
+            current_timezone,
+        )
+        attempts = (
+            m.AssignmentAttempt.objects.exclude(
+                status=m.AssignmentAttempt.STATUS_CANCELLED
+            )
+            .select_related(
+                "department", "contact", "sub_department", "sub_contact"
+            )
+            .order_by("attempt_no", "id")
+        )
+        resumes = list(
+            m.Resume.objects.filter(
+                imported_at__gte=start_at,
+                imported_at__lt=end_at,
+            )
+            .select_related(
+                "candidate", "candidate__first_degree_tag", "candidate__highest_degree_tag"
+            )
+            .prefetch_related(
+                Prefetch(
+                    "assignment_attempts",
+                    queryset=attempts,
+                    to_attr="report_attempts",
+                )
+            )
+            .order_by("imported_at", "id")
+        )
+        content = build_result_report(resumes)
+        filename = f"简历结果报表_{start_date:%Y%m%d}_{end_date:%Y%m%d}.xlsx"
+        response = HttpResponse(
+            content,
+            content_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+        )
+        response["Content-Disposition"] = (
+            "attachment; filename*=UTF-8''" + quote(filename)
+        )
+        return response
+
     @action(detail=True, methods=["get"], url_path="preview")
     def preview(self, request, pk=None):
         resume = self.get_object()
@@ -526,22 +604,32 @@ class CandidateViewSet(PermissionedModelViewSet):
         if not any([source_values, status_values, contact_name, sub_contact_name]):
             return qs
         ids = []
+        can_view_resume = "resume.view" in user_permission_codes(self.request.user)
         for candidate in qs:
             attempt = serializers.visible_candidate_attempt(candidate, self.request.user)
-            if not attempt:
+            allocation_source = (
+                attempt.source
+                if attempt
+                else candidate_summary.allocation_source(candidate)
+                if can_view_resume
+                else ""
+            )
+            if source_values and allocation_source not in source_values:
+                continue
+            if status_values and (not attempt or attempt.status not in status_values):
                 continue
             visible_contact_name = (
                 attempt.contact_name_snapshot
                 or (attempt.contact.name if attempt.contact else "")
+                if attempt
+                else ""
             ).casefold()
             visible_sub_contact_name = (
                 attempt.sub_contact_name_snapshot
                 or (attempt.sub_contact.name if attempt.sub_contact else "")
+                if attempt
+                else ""
             ).casefold()
-            if source_values and attempt.source not in source_values:
-                continue
-            if status_values and attempt.status not in status_values:
-                continue
             if contact_name and not _pinyin_text_matches(visible_contact_name, contact_name):
                 continue
             if sub_contact_name and not _pinyin_text_matches(
@@ -717,9 +805,15 @@ class JobViewSet(PermissionedModelViewSet):
             qs = qs.filter(entity__in=entity_values)
         elif p.get("entity"):
             qs = qs.filter(entity__icontains=p["entity"])
-        if p.get("public_name"):
+        public_name_values = _query_list_values(p, "public_name_in")
+        if public_name_values:
+            qs = qs.filter(public_name__in=public_name_values)
+        elif p.get("public_name"):
             qs = _filter_queryset_text_with_pinyin(qs, "public_name", p["public_name"])
-        if p.get("position_name"):
+        position_name_values = _query_list_values(p, "position_name_in")
+        if position_name_values:
+            qs = qs.filter(position_name__in=position_name_values)
+        elif p.get("position_name"):
             qs = _filter_queryset_text_with_pinyin(qs, "position_name", p["position_name"])
         category_values = _query_list_values(p, "category_in")
         if category_values:
@@ -773,6 +867,10 @@ class JobViewSet(PermissionedModelViewSet):
         return Response(
             {
                 "entity": options(jobs.values_list("entity", flat=True)),
+                "public_name": options(jobs.values_list("public_name", flat=True)),
+                "position_name": options(
+                    jobs.values_list("position_name", flat=True)
+                ),
                 "category": options(jobs.values_list("category", flat=True)),
                 "job_family": options(jobs.values_list("job_family", flat=True)),
                 "department_name": options(
@@ -1007,7 +1105,7 @@ class SchoolTagRuleViewSet(PermissionedModelViewSet):
 
     def get_queryset(self):
         qs = m.SchoolTagRule.objects.prefetch_related(
-            "tag_links__school_tag"
+            "tag_links__school_tag", "education_links"
         ).order_by("priority", "id")
         p = self.request.query_params
         if p.get("name"):
@@ -1332,7 +1430,9 @@ class AssignmentAttemptViewSet(PermissionedReadOnlyModelViewSet):
         result = request.data.get("result") or request.data.get("feedback_result")
         note = request.data.get("note") or request.data.get("feedback_note") or ""
         try:
-            attempt = allocate_service.submit_feedback(attempt, result, note)
+            attempt = allocate_service.submit_feedback(
+                attempt, result, note, user=request.user
+            )
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(serializers.AssignmentAttemptSerializer(attempt).data)

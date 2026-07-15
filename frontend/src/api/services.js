@@ -137,6 +137,9 @@ export function previewAllocationResume(id) {
 export function manualAssignResume(id, body) {
   return client.post(`/resumes/${id}/manual-assign/`, body)
 }
+export function exportResumeResultReport(params) {
+  return client.get('/resumes/result-report/', { params, responseType: 'blob' })
+}
 
 // ---- Generic list endpoints (placeholder pages / dropdowns) ----
 export function fetchCandidates(params) {
