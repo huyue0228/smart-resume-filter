@@ -1,5 +1,7 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
-import { RoleProvider, useRole } from './contexts/RoleContext'
+import { RoleProvider } from './contexts/RoleContext'
+import { useRole } from './contexts/roleState'
+import { canAccessRoute, DEFAULT_AUTHENTICATED_PATH } from './routePermissions'
 import BasicLayout from './layouts/BasicLayout'
 import LoginPage from './pages/LoginPage'
 import ResumesPage from './pages/ResumesPage'
@@ -24,11 +26,10 @@ function AppRoutes() {
     )
   }
 
-  const defaultPath = '/resumes'
+  const defaultPath = DEFAULT_AUTHENTICATED_PATH
 
-  const guarded = (permission, element) => {
-    const permissions = Array.isArray(permission) ? permission : [permission]
-    return permissions.some((code) => hasPermission(code)) ? (
+  const guarded = (path, element) => {
+    return canAccessRoute(path, hasPermission) ? (
       element
     ) : (
       <Navigate to={defaultPath} replace />
@@ -42,28 +43,25 @@ function AppRoutes() {
         <Route index element={<Navigate to={defaultPath} replace />} />
         <Route
           path="/resumes"
-          element={guarded(
-            ['resume.view', 'attempt.view_received', 'attempt.view_assigned'],
-            <ResumesPage />,
-          )}
+          element={guarded('/resumes', <ResumesPage />)}
         />
-        <Route path="/jobs" element={guarded('job.view', <JobsPage />)} />
-        <Route path="/schools" element={guarded('school.view', <SchoolsPage />)} />
+        <Route path="/jobs" element={guarded('/jobs', <JobsPage />)} />
+        <Route path="/schools" element={guarded('/schools', <SchoolsPage />)} />
         <Route
           path="/departments"
-          element={guarded('department.view', <DepartmentsPage />)}
+          element={guarded('/departments', <DepartmentsPage />)}
         />
         <Route
           path="/config"
-          element={guarded('settings.manage_config', <ConfigPage />)}
+          element={guarded('/config', <ConfigPage />)}
         />
         <Route
           path="/ai-connection"
-          element={guarded('settings.manage_ai_connection', <AIConnectionPage />)}
+          element={guarded('/ai-connection', <AIConnectionPage />)}
         />
         <Route
           path="/users"
-          element={guarded('settings.manage_permissions', <UsersPage />)}
+          element={guarded('/users', <UsersPage />)}
         />
         <Route path="*" element={<Navigate to={defaultPath} replace />} />
       </Route>

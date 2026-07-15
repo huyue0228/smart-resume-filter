@@ -10,7 +10,7 @@ import {
 import { FilterOutlined, SearchOutlined } from '@ant-design/icons'
 import { ProTable } from '@ant-design/pro-components'
 import { Alert, Button, Input, Select, Space } from 'antd'
-import { useRole } from '../contexts/RoleContext'
+import { useRole } from '../contexts/roleState'
 import ResizableHeaderCell from './ResizableHeaderCell'
 import {
   filterLocalData,
@@ -156,6 +156,7 @@ const SmartDataTable = forwardRef(function SmartDataTable(
     onRowClick,
     onRow,
     pagination,
+    params: externalParams,
     options,
     scroll,
     ...tableProps
@@ -378,11 +379,14 @@ const SmartDataTable = forwardRef(function SmartDataTable(
         pagination={pagination === undefined
           ? dataRequest ? { defaultPageSize: 10, showSizeChanger: true } : false
           : pagination}
+        params={externalParams}
         request={dataRequest ? async (params) => {
           try {
+            const { current, pageSize, ...requestParams } = params
             const response = await dataRequest({
-              page: params.current,
-              page_size: params.pageSize,
+              ...requestParams,
+              page: current,
+              page_size: pageSize,
               ...serializeTableFilters(baseColumns, filtersRef.current),
             })
             const payload = response?.data ?? response ?? {}

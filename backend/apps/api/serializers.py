@@ -15,12 +15,13 @@ from apps.core import models as m
 from apps.core import system_status
 
 
-def visible_candidate_attempt(candidate, user):
+def visible_candidate_attempt(candidate, user, *, permissions=None):
     """返回当前用户在统一简历库中可操作的最新尝试。"""
     workflow = candidate_summary.workflow_or_none(candidate)
     if not workflow:
         return None
-    permissions = user_permission_codes(user)
+    if permissions is None:
+        permissions = user_permission_codes(user)
     if "resume.view" in permissions:
         resume = candidate_summary.current_resume(candidate)
         return candidate_summary.latest_effective_attempt(
@@ -328,23 +329,55 @@ class CandidateSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
 
+    def _cached_candidate_value(self, cache_name, obj, factory):
+        cache = getattr(self, cache_name, None)
+        if cache is None:
+            cache = {}
+            setattr(self, cache_name, cache)
+        key = obj.pk if obj.pk is not None else id(obj)
+        if key not in cache:
+            cache[key] = factory()
+        return cache[key]
+
+    def _permissions(self):
+        if not hasattr(self, "_permission_codes"):
+            request = self.context.get("request")
+            self._permission_codes = (
+                user_permission_codes(request.user) if request else set()
+            )
+        return self._permission_codes
+
     def _workflow(self, obj):
-        return candidate_summary.workflow_or_none(obj)
+        return self._cached_candidate_value(
+            "_workflow_cache", obj, lambda: candidate_summary.workflow_or_none(obj)
+        )
+
+    def _visible_attempt(self, obj):
+        request = self.context.get("request")
+        user = request.user if request else None
+        return self._cached_candidate_value(
+            "_visible_attempt_cache",
+            obj,
+            lambda: visible_candidate_attempt(
+                obj, user, permissions=self._permissions()
+            ),
+        )
 
     def _is_full_view(self):
         request = self.context.get("request")
-        return not request or "resume.view" in user_permission_codes(request.user)
+        return not request or "resume.view" in self._permissions()
 
     def _current_resume(self, obj):
-        request = self.context.get("request")
-        if request and "resume.view" not in user_permission_codes(request.user):
-            attempt = visible_candidate_attempt(obj, request.user)
-            return attempt.resume if attempt else None
-        return candidate_summary.current_resume(obj)
+        def resolve():
+            if not self._is_full_view():
+                attempt = self._visible_attempt(obj)
+                return attempt.resume if attempt else None
+            return candidate_summary.current_resume(obj)
+
+        return self._cached_candidate_value("_current_resume_cache", obj, resolve)
 
     def get_phone(self, obj):
-        request = self.context.get("request")
-        if request and "resume.view" not in user_permission_codes(request.user):
+        if not self._is_full_view():
             return ""
         return obj.phone
 
@@ -359,8 +392,7 @@ class CandidateSerializer(serializers.ModelSerializer):
 
     def get_system_status(self, obj):
         if not self._is_full_view():
-            request = self.context.get("request")
-            attempt = visible_candidate_attempt(obj, request.user)
+            attempt = self._visible_attempt(obj)
             if not attempt:
                 return system_status.RAW
             if attempt.status == m.AssignmentAttempt.STATUS_PASSED:
@@ -386,9 +418,8 @@ class CandidateSerializer(serializers.ModelSerializer):
         return ResumeBriefSerializer(resume).data if resume else None
 
     def get_preview_resume(self, obj):
-        request = self.context.get("request")
-        if request and "resume.view" not in user_permission_codes(request.user):
-            attempt = visible_candidate_attempt(obj, request.user)
+        if not self._is_full_view():
+            attempt = self._visible_attempt(obj)
             return (
                 ResumeBriefSerializer(attempt.resume).data
                 if attempt and attempt.resume.resume_file
@@ -407,8 +438,7 @@ class CandidateSerializer(serializers.ModelSerializer):
 
     def get_job_department_name(self, obj):
         if not self._is_full_view():
-            request = self.context.get("request")
-            attempt = visible_candidate_attempt(obj, request.user)
+            attempt = self._visible_attempt(obj)
             if attempt:
                 return attempt.department_name_snapshot or (
                     attempt.department.name if attempt.department else ""
@@ -417,18 +447,16 @@ class CandidateSerializer(serializers.ModelSerializer):
 
     def get_reason_type(self, obj):
         if not self._is_full_view():
-            request = self.context.get("request")
             return (
                 candidate_summary.REASON_ASSIGNMENT
-                if visible_candidate_attempt(obj, request.user)
+                if self._visible_attempt(obj)
                 else candidate_summary.REASON_NONE
             )
         return candidate_summary.reason(obj)[0]
 
     def get_reason_text(self, obj):
         if not self._is_full_view():
-            request = self.context.get("request")
-            attempt = visible_candidate_attempt(obj, request.user)
+            attempt = self._visible_attempt(obj)
             if attempt:
                 return attempt.manual_reason or attempt.match_reason or attempt.feedback_note
             return ""
@@ -443,16 +471,14 @@ class CandidateSerializer(serializers.ModelSerializer):
         return workflow.archive_detail if workflow else ""
 
     def get_allocation_source(self, obj):
-        request = self.context.get("request")
-        if request and "resume.view" not in user_permission_codes(request.user):
-            attempt = visible_candidate_attempt(obj, request.user)
+        if not self._is_full_view():
+            attempt = self._visible_attempt(obj)
             return attempt.source if attempt else ""
         return candidate_summary.allocation_source(obj)
 
     def get_resumes(self, obj):
-        request = self.context.get("request")
-        if request and "resume.view" not in user_permission_codes(request.user):
-            attempt = visible_candidate_attempt(obj, request.user)
+        if not self._is_full_view():
+            attempt = self._visible_attempt(obj)
             return [ResumeBriefSerializer(attempt.resume).data] if attempt else []
         resumes = sorted(
             obj.resumes.all(),
@@ -469,26 +495,21 @@ class CandidateSerializer(serializers.ModelSerializer):
         if not workflow:
             return []
         request = self.context.get("request")
-        if request and "resume.view" not in user_permission_codes(request.user):
-            attempt = visible_candidate_attempt(obj, request.user)
+        if request and not self._is_full_view():
+            attempt = self._visible_attempt(obj)
             return [self._attempt_data(attempt, include_ai=False)] if attempt else []
-        attempts = workflow.attempts.select_related(
-            "resume",
-            "contact",
-            "department",
-            "sub_contact",
-            "sub_department",
-            "agent_decision",
-        ).order_by("attempt_no")
+        attempts = sorted(
+            workflow.attempts.all(), key=lambda attempt: (attempt.attempt_no, attempt.id)
+        )
         return [self._attempt_data(attempt, include_ai=True) for attempt in attempts]
 
     def get_current_attempt(self, obj):
         request = self.context.get("request")
         user = request.user if request else None
-        attempt = visible_candidate_attempt(obj, user)
+        attempt = self._visible_attempt(obj)
         if not attempt:
             return None
-        include_ai = bool(user and "resume.view" in user_permission_codes(user))
+        include_ai = bool(user and self._is_full_view())
         return self._attempt_data(attempt, include_ai=include_ai)
 
     def _attempt_data(self, attempt, *, include_ai):

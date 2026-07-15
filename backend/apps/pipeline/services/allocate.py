@@ -114,9 +114,15 @@ def candidate_ids_for_scope(scope=None):
 def _is_scoped_reprocess(scope):
     scope = scope or {}
     return bool(
-        system_status.normalize_statuses(scope.get("system_statuses"))
+        scope.get("force_reprocess") is True
+        or system_status.normalize_statuses(scope.get("system_statuses"))
         or scope.get("source") == "ai_retry"
     )
+
+
+def _should_force_ai(scope):
+    scope = scope or {}
+    return scope.get("source") == "ai_retry" or scope.get("force_reprocess") is True
 
 
 def _reopen_workflow(workflow, mode):
@@ -793,7 +799,7 @@ def process_ai_scope_item(run_id, scope_item_id):
         claimed_revision = workflow.revision
         candidate_id = candidate.id
         retry_resume_id = (run.scope or {}).get("retry_resume_id")
-        force_ai = (run.scope or {}).get("source") == "ai_retry"
+        force_ai = _should_force_ai(run.scope)
 
     candidate = m.Candidate.objects.prefetch_related("resumes").get(pk=candidate_id)
     rules = school_admission.active_rules()
@@ -1124,6 +1130,8 @@ def _sync_stage_progress(processing_stage, processing_run):
         "review_count",
         "dispatch_count",
         "archive_count",
+        "skipped_count",
+        "cancelled_count",
     ]:
         setattr(processing_stage, field, getattr(processing_run, field))
     processing_stage.save(
@@ -1135,6 +1143,8 @@ def _sync_stage_progress(processing_stage, processing_run):
             "review_count",
             "dispatch_count",
             "archive_count",
+            "skipped_count",
+            "cancelled_count",
         ]
     )
 
@@ -1159,10 +1169,13 @@ def run(scope=None, mode="rule", processing_run=None, processing_stage=None):
         processing_run.review_count = 0
         processing_run.dispatch_count = 0
         processing_run.archive_count = 0
+        processing_run.skipped_count = 0
+        processing_run.cancelled_count = 0
         processing_run.save(
             update_fields=[
                 "total_count", "processed_count", "success_count", "failed_count",
-                "review_count", "dispatch_count", "archive_count",
+                "review_count", "dispatch_count", "archive_count", "skipped_count",
+                "cancelled_count",
             ]
         )
         _sync_stage_progress(processing_stage, processing_run)
@@ -1197,13 +1210,14 @@ def run(scope=None, mode="rule", processing_run=None, processing_stage=None):
                 if changed_after_submit:
                     scope_item.status = "skipped_manual_change"
                     scope_item.skip_reason = "workflow_changed_after_submit"
-                    scope_item.save(update_fields=["status", "skip_reason"])
+                    scope_item.finished_at = timezone.now()
+                    scope_item.save(update_fields=["status", "skip_reason", "finished_at"])
                     if processing_run:
                         processing_run.processed_count += 1
-                        processing_run.success_count += 1
+                        processing_run.skipped_count += 1
                         processing_run.last_heartbeat_at = timezone.now()
                         processing_run.save(
-                            update_fields=["processed_count", "success_count", "last_heartbeat_at"]
+                            update_fields=["processed_count", "skipped_count", "last_heartbeat_at"]
                         )
                         _sync_stage_progress(processing_stage, processing_run)
                     continue
@@ -1234,7 +1248,9 @@ def run(scope=None, mode="rule", processing_run=None, processing_stage=None):
                 if scoped_reprocess
                 else None,
                 source=(
-                    m.AssignmentAttempt.SOURCE_AI
+                    None
+                    if scoped_reprocess
+                    else m.AssignmentAttempt.SOURCE_AI
                     if mode == "ai"
                     else m.AssignmentAttempt.SOURCE_RULE
                 ),
@@ -1258,7 +1274,7 @@ def run(scope=None, mode="rule", processing_run=None, processing_stage=None):
                 rules,
                 mode=mode,
                 processing_run=processing_run,
-                force_ai=scope.get("source") == "ai_retry",
+                force_ai=_should_force_ai(scope),
                 retry_resume_id=scope.get("retry_resume_id"),
             ):
                 created += 1

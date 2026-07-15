@@ -278,6 +278,96 @@ class PipelineRunApiTests(TestCase):
         mock_create.assert_called_once_with("step2", scope=scope, created_by=self.user)
         self.assertEqual(response.data["processing_runs"][0]["message"], "ok")
 
+    def test_pipeline_run_accepts_selected_force_reprocess_scope(self):
+        run = m.ProcessingRun.objects.create(
+            step="step2",
+            mode="rule",
+            status="success",
+            message="ok",
+        )
+        scope = {"candidate_ids": [3, 5], "force_reprocess": True}
+
+        with patch(
+            "apps.api.views.runner.create_configured_run", return_value=run
+        ) as mock_create, patch(
+            "apps.api.views.execute_runs_sequence_task.delay",
+            return_value=SimpleNamespace(id="task-force"),
+        ):
+            response = self.client.post(
+                "/api/pipeline/run/",
+                {"step": "step2", "scope": scope},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        mock_create.assert_called_once_with("step2", scope=scope, created_by=self.user)
+
+    def test_pipeline_run_rejects_invalid_force_reprocess_scopes(self):
+        invalid_requests = [
+            (
+                {"step": "step1", "scope": {"candidate_ids": [1], "force_reprocess": True}},
+                "step2",
+            ),
+            ({"step": "step2", "scope": {"force_reprocess": True}}, "candidate_ids"),
+            (
+                {"step": "step2", "scope": {"candidate_ids": [], "force_reprocess": True}},
+                "candidate_ids",
+            ),
+            (
+                {
+                    "step": "step2",
+                    "scope": {"candidate_ids": [True], "force_reprocess": True},
+                },
+                "candidate_ids",
+            ),
+            (
+                {
+                    "step": "step2",
+                    "scope": {
+                        "candidate_ids": [1],
+                        "force_reprocess": True,
+                        "system_statuses": [],
+                    },
+                },
+                "不得与",
+            ),
+            (
+                {
+                    "step": "step2",
+                    "scope": {
+                        "candidate_ids": [1],
+                        "force_reprocess": True,
+                        "candidate_filters": {},
+                    },
+                },
+                "不得与",
+            ),
+            (
+                {
+                    "step": "step2",
+                    "scope": {"candidate_ids": [1], "force_reprocess": "true"},
+                },
+                "布尔值",
+            ),
+            (
+                {
+                    "step": "step2",
+                    "scope": {"candidate_ids": [1], "force_reprocess": False},
+                },
+                "true",
+            ),
+        ]
+
+        for payload, expected_detail in invalid_requests:
+            with self.subTest(payload=payload):
+                response = self.client.post(
+                    "/api/pipeline/run/", payload, format="json"
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(expected_detail, response.data["detail"])
+
+        self.assertFalse(m.ProcessingRun.objects.exists())
+
     def test_pipeline_run_rejects_caller_mode_override(self):
         response = self.client.post(
             "/api/pipeline/run/",

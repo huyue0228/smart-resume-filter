@@ -17,7 +17,7 @@ import {
   updateJob,
 } from '../api/services'
 import ImportButton from '../components/ImportButton'
-import { useRole } from '../contexts/RoleContext'
+import { useRole } from '../contexts/roleState'
 import SmartDataTable from '../components/SmartDataTable'
 
 const IMPORT_FIELDS = [

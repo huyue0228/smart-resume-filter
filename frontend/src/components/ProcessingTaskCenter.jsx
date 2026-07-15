@@ -4,11 +4,13 @@ import { Alert, Badge, Button, Card, Drawer, Empty, Popconfirm, Progress, Space,
 import {
   CheckCircleOutlined,
   ClockCircleOutlined,
+  DownOutlined,
   ExclamationCircleOutlined,
   ReloadOutlined,
   RobotOutlined,
   StopOutlined,
   SyncOutlined,
+  UpOutlined,
   UserOutlined,
 } from '@ant-design/icons'
 import { cancelPipelineRun, fetchPipelineRuns } from '../api/services'
@@ -78,22 +80,90 @@ function scopeSummaryText(run) {
 const RESULT_METRICS = [
   { key: 'success', label: '成功' },
   { key: 'failed', label: '失败', danger: true },
-  { key: 'review', label: '待复核' },
-  { key: 'dispatch', label: '待下发' },
-  { key: 'archive', label: '归档' },
   { key: 'skipped', label: '跳过' },
   { key: 'cancelled', label: '取消' },
 ]
+const SUCCESS_DETAIL_METRICS = [
+  { key: 'review', label: '待复核' },
+  { key: 'dispatch', label: '待下发' },
+  { key: 'archive', label: '建议归档' },
+]
+
+function hasTaskResults(run) {
+  return Boolean(
+    run.success_count || run.failed_count || run.review_count || run.dispatch_count
+      || run.archive_count || run.skipped_count || run.cancelled_count,
+  )
+}
+
+function TaskResultMetrics({ run, onOpenCandidates }) {
+  const [successDetailsOpen, setSuccessDetailsOpen] = useState(false)
+
+  return (
+    <>
+      <div className="processing-task-results">
+        {RESULT_METRICS.map(({ key, label, danger }) => {
+          const count = Number(run[`${key}_count`] || 0)
+          return (
+            <div key={key} className="processing-task-result-item">
+              <Button
+                type="text"
+                size="small"
+                disabled={!count}
+                className={`processing-task-result-button ${danger && count ? 'is-danger' : ''}`}
+                onClick={() => onOpenCandidates(run, key)}
+                aria-label={`筛选本任务${label}简历 ${count} 名`}
+              >
+                <strong>{count}</strong>{label}
+              </Button>
+              {key === 'success' && run.mode === 'ai' ? (
+                <Button
+                  type="text"
+                  size="small"
+                  className="processing-task-result-toggle"
+                  icon={successDetailsOpen ? <UpOutlined /> : <DownOutlined />}
+                  aria-label={successDetailsOpen ? '收起成功子项' : '展开成功子项'}
+                  onClick={() => setSuccessDetailsOpen((open) => !open)}
+                />
+              ) : null}
+            </div>
+          )
+        })}
+      </div>
+      {run.mode === 'ai' && successDetailsOpen ? (
+        <div className="processing-task-success-details">
+          <div className="processing-task-success-metrics">
+            {SUCCESS_DETAIL_METRICS.map(({ key, label }) => {
+              const count = Number(run[`${key}_count`] || 0)
+              return (
+                <Button
+                  key={key}
+                  type="text"
+                  size="small"
+                  disabled={!count}
+                  className="processing-task-result-button"
+                  onClick={() => onOpenCandidates(run, key)}
+                  aria-label={`筛选本任务${label}简历 ${count} 名`}
+                >
+                  <strong>{count}</strong>{label}
+                </Button>
+              )
+            })}
+          </div>
+          <Typography.Text type="secondary">
+            成功子项合计可小于成功总数；部分成功候选人没有产生 AI recommendation。
+          </Typography.Text>
+        </div>
+      ) : null}
+    </>
+  )
+}
 
 function TaskCard({ run, cancellingId, onCancel, onOpenCandidates }) {
   const percent = progressOf(run)
   const stage = (run.stages || []).find((item) => item.step === run.current_stage)
   const status = STATUS_META[run.status] || { text: run.status || '未知', color: 'default' }
   const scopeSummary = scopeSummaryText(run)
-  const hasResults = Boolean(
-    run.success_count || run.failed_count || run.review_count || run.dispatch_count || run.archive_count
-      || run.skipped_count || run.cancelled_count,
-  )
   return (
     <Card
       size="small"
@@ -155,25 +225,8 @@ function TaskCard({ run, cancellingId, onCancel, onOpenCandidates }) {
           </Typography.Text>
         ) : null}
 
-        {hasResults ? (
-          <div className="processing-task-results">
-            {RESULT_METRICS.map(({ key, label, danger }) => {
-              const count = Number(run[`${key}_count`] || 0)
-              return (
-                <Button
-                  key={key}
-                  type="text"
-                  size="small"
-                  disabled={!count || run.mode !== 'ai'}
-                  className={danger && count ? 'is-danger' : ''}
-                  onClick={() => onOpenCandidates(run, key)}
-                  aria-label={`筛选本任务${label}简历 ${count} 名`}
-                >
-                  <strong>{count}</strong>{label}
-                </Button>
-              )
-            })}
-          </div>
+        {hasTaskResults(run) ? (
+          <TaskResultMetrics run={run} onOpenCandidates={onOpenCandidates} />
         ) : null}
 
         {run.mode === 'ai' && run.ai_concurrency_limit ? (

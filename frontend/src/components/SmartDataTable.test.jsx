@@ -34,6 +34,60 @@ describe('SmartDataTable', () => {
     }))
   })
 
+  it('reloads the first page when stable external parameters change', async () => {
+    const request = vi.fn().mockResolvedValue({ data: { results: rows, count: 1 } })
+    const { rerender } = render(
+      <SmartDataTable
+        tableId="external-params"
+        rowKey="id"
+        columns={[{ title: '姓名', dataIndex: 'name' }]}
+        params={{ processing_run_id: '18', processing_result: 'success' }}
+        request={request}
+      />,
+    )
+
+    await waitFor(() => expect(request).toHaveBeenCalledWith({
+      page: 1,
+      page_size: 10,
+      processing_run_id: '18',
+      processing_result: 'success',
+    }))
+
+    rerender(
+      <SmartDataTable
+        tableId="external-params"
+        rowKey="id"
+        columns={[{ title: '姓名', dataIndex: 'name' }]}
+        params={{ processing_run_id: '19', processing_result: 'failed' }}
+        request={request}
+      />,
+    )
+
+    await waitFor(() => expect(request).toHaveBeenLastCalledWith({
+      page: 1,
+      page_size: 10,
+      processing_run_id: '19',
+      processing_result: 'failed',
+    }))
+
+    rerender(
+      <SmartDataTable
+        tableId="external-params"
+        rowKey="id"
+        columns={[{ title: '姓名', dataIndex: 'name' }]}
+        params={{ processing_run_id: undefined, processing_result: undefined }}
+        request={request}
+      />,
+    )
+
+    await waitFor(() => expect(request).toHaveBeenLastCalledWith({
+      page: 1,
+      page_size: 10,
+      processing_run_id: undefined,
+      processing_result: undefined,
+    }))
+  })
+
   it('resetTable clears filters and persisted column configuration', async () => {
     const actionRef = createRef()
     const storageKey = 'srf:table:v1:anonymous:reset'

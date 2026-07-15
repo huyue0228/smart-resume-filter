@@ -17,7 +17,7 @@ export default function DepartmentsPage() {
       await deleteContact(record.id)
       message.success('已删除')
       actionRef.current?.reload()
-      loadFilterOptions()
+      actionRef.current?.reloadOptions()
     } catch (error) {
       message.error(error?.response?.data?.detail || '删除失败')
     }

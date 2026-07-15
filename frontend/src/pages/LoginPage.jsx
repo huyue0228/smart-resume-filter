@@ -4,7 +4,7 @@ import { LoginForm, ProFormText } from '@ant-design/pro-components'
 import { Alert, Typography } from 'antd'
 import { LockOutlined, UserOutlined } from '@ant-design/icons'
 import BrandLogo from '../components/BrandLogo'
-import { useRole } from '../contexts/RoleContext'
+import { useRole } from '../contexts/roleState'
 
 const { Text } = Typography
 

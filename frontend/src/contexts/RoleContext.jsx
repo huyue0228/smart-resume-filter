@@ -1,14 +1,6 @@
-import { createContext, useContext, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { fetchMe, login as loginApi, logout as logoutApi } from '../api/services'
-
-const RoleContext = createContext(null)
-
-export const ROLES = {
-  hr: { label: 'HR' },
-  admin: { label: '管理员' },
-  secondary_contact: { label: '二级接口人' },
-  tertiary_contact: { label: '三级接口人' },
-}
+import { RoleContext } from './roleState'
 
 export function RoleProvider({ children }) {
   const [token, setToken] = useState(() => localStorage.getItem('srf_token') || '')
@@ -89,8 +81,4 @@ export function RoleProvider({ children }) {
       {children}
     </RoleContext.Provider>
   )
-}
-
-export function useRole() {
-  return useContext(RoleContext)
 }

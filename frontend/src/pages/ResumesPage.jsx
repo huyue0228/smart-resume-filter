@@ -3,7 +3,6 @@ import { useSearchParams } from 'react-router-dom'
 import { PageContainer } from '@ant-design/pro-components'
 import {
   Button,
-  Checkbox,
   Tag,
   Space,
   Modal,
@@ -54,8 +53,10 @@ import ResumePreview from '../components/ResumePreview'
 import SchoolTagBadge from '../components/SchoolTagBadge'
 import SmartDataTable from '../components/SmartDataTable'
 import { useProcessRunner } from '../components/useProcessRunner'
-import { useRole } from '../contexts/RoleContext'
+import { useRole } from '../contexts/roleState'
 import { downloadBlobFromResponse } from '../utils/download'
+import ResumeProcessModal from './resumes/ResumeProcessModal'
+import { buildResumeProcessingScope } from './resumes/resumeProcessing'
 import './ResumesPage.css'
 
 const RESUME_IMPORT_FIELDS = [
@@ -193,6 +194,8 @@ export default function ResumesPage() {
   const [processing, setProcessing] = useState(false)
   const [processModalOpen, setProcessModalOpen] = useState(false)
   const [processStatusSelection, setProcessStatusSelection] = useState([])
+  const [processCurrentSelected, setProcessCurrentSelected] = useState(false)
+  const [processCandidateSnapshot, setProcessCandidateSnapshot] = useState([])
   const [allocationMode, setAllocationMode] = useState({ mode: 'rule', ai_enabled: false, ai_ready: false })
   const [lastQuery, setLastQuery] = useState({})
   const [selectedRowKeys, setSelectedRowKeys] = useState([])
@@ -597,39 +600,50 @@ export default function ResumesPage() {
     }
   }
 
-  const selectedSystemStatuses = () => {
-    const value = lastQuery.system_status
-    if (!value) return []
-    return Array.isArray(value) ? value : String(value).split(',').filter(Boolean)
+  const handleProcessSelectedStatuses = () => {
+    setProcessCandidateSnapshot([...selectedRowKeys])
+    setProcessCurrentSelected(false)
+    setProcessStatusSelection([])
+    setProcessModalOpen(true)
   }
 
-  const handleProcessSelectedStatuses = () => {
-    setProcessStatusSelection(selectedSystemStatuses())
-    setProcessModalOpen(true)
+  const handleCurrentSelectedChange = (event) => {
+    const checked = event.target.checked
+    setProcessCurrentSelected(checked)
+    if (checked) setProcessStatusSelection([])
+  }
+
+  const handleProcessStatusChange = (statuses) => {
+    setProcessStatusSelection(statuses)
+    if (statuses.length) setProcessCurrentSelected(false)
   }
 
   const handleConfirmProcess = async () => {
     const statuses = processStatusSelection
-    if (!statuses.length) {
-      message.warning('请先勾选需要处理的简历状态')
+    if (!processCurrentSelected && !statuses.length) {
+      message.warning('请先勾选当前选中或需要处理的简历状态')
       return
     }
     setProcessing(true)
     try {
-      const { system_status: _ignoredSystemStatus, ...candidateFilters } = lastQuery
+      const scope = buildResumeProcessingScope({
+        processCurrentSelected,
+        processCandidateSnapshot,
+        processStatusSelection: statuses,
+        lastQuery,
+      })
       const r = await run(
         [{ step: 'step2', label: '简历分类、分配与下发' }],
         `正在重新处理简历（${allocationMode.mode === 'ai' ? 'AI' : '规则'}）`,
-        {
-          scope: {
-            system_statuses: statuses,
-            candidate_filters: candidateFilters,
-          },
-        },
+        { scope },
       )
       if (r.success) {
         message.success('已提交重新处理任务，可继续操作并在任务中心查看进度')
         setProcessModalOpen(false)
+        if (processCurrentSelected) {
+          setSelectedRowKeys([])
+          actionRef.current?.clearSelected?.()
+        }
       }
     } finally {
       setProcessing(false)
@@ -714,16 +728,22 @@ export default function ResumesPage() {
     return { runId, result }
   }, [searchParams])
 
+  const processingRequestParams = useMemo(() => ({
+    processing_run_id: processingResultFilter?.runId,
+    processing_result: processingResultFilter?.result,
+  }), [processingResultFilter?.runId, processingResultFilter?.result])
+
+  useEffect(() => {
+    setDetailRecord(null)
+  }, [processingResultFilter?.runId, processingResultFilter?.result])
+
   const requestCandidates = useCallback((params) => {
-    const taskQuery = processingResultFilter ? {
-      processing_run_id: processingResultFilter.runId,
-      processing_result: processingResultFilter.result,
-    } : {}
-    const mergedParams = { ...params, ...taskQuery }
     const { page: _page, page_size: _pageSize, ...query } = params
-    setLastQuery({ ...query, ...taskQuery })
-    return fetchCandidates(mergedParams)
-  }, [processingResultFilter])
+    setLastQuery(Object.fromEntries(
+      Object.entries(query).filter(([, value]) => value !== undefined),
+    ))
+    return fetchCandidates(params)
+  }, [])
 
   const baseColumns = [
     {
@@ -996,6 +1016,7 @@ export default function ResumesPage() {
             撤销上次上传
           </Button>,
         ].filter(Boolean)}
+        params={processingRequestParams}
         request={requestCandidates}
       />
       <Modal
@@ -1021,46 +1042,21 @@ export default function ResumesPage() {
           />
         </Space>
       </Modal>
-      <Modal
-        title="处理简历"
+      <ResumeProcessModal
         open={processModalOpen}
-        okText="开始处理"
-        cancelText="取消"
-        confirmLoading={processing}
-        okButtonProps={{ disabled: !processStatusSelection.length }}
-        onOk={handleConfirmProcess}
+        processing={processing}
+        allocationMode={allocationMode}
+        processCurrentSelected={processCurrentSelected}
+        processCandidateCount={processCandidateSnapshot.length}
+        processStatusSelection={processStatusSelection}
+        statusOptions={SYSTEM_STATUS_OPTIONS}
+        onCurrentSelectedChange={handleCurrentSelectedChange}
+        onStatusChange={handleProcessStatusChange}
+        onConfirm={handleConfirmProcess}
         onCancel={() => {
           if (!processing) setProcessModalOpen(false)
         }}
-      >
-        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-          <Typography.Text>
-            选择需要重新处理的简历状态。系统会按当前表格的其它筛选条件限定范围，并保留历史分配与反馈记录。
-          </Typography.Text>
-          <Space>
-            <Typography.Text>当前系统分配模式：</Typography.Text>
-            <Tag color={allocationMode.mode === 'ai' ? 'purple' : 'blue'}>
-              {allocationMode.mode === 'ai' ? 'AI 分配' : '规则分配'}
-            </Tag>
-            {allocationMode.mode === 'ai' && !allocationMode.ai_ready && (
-              <Typography.Text type="danger">模型连接尚未测试成功</Typography.Text>
-            )}
-          </Space>
-          <Checkbox.Group
-            value={processStatusSelection}
-            onChange={setProcessStatusSelection}
-            style={{ width: '100%' }}
-          >
-            <Space direction="vertical">
-              {Object.entries(SYSTEM_STATUS_OPTIONS).map(([value, item]) => (
-                <Checkbox key={value} value={value}>
-                  {item.text}
-                </Checkbox>
-              ))}
-            </Space>
-          </Checkbox.Group>
-        </Space>
-      </Modal>
+      />
       <Drawer
         title={detailRecord ? `${detailRecord.name} 的简历详情` : '简历详情'}
         width={1100}

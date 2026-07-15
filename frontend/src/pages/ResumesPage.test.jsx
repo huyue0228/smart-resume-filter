@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
@@ -72,12 +72,14 @@ const roleState = vi.hoisted(() => ({
   isContact: false,
   isSecondaryContact: false,
 }))
+const runProcess = vi.hoisted(() => vi.fn())
+const fetchAllocationMode = vi.hoisted(() => vi.fn())
 
 vi.mock('@ant-design/pro-components', () => ({
   PageContainer: ({ children }) => <div>{children}</div>,
 }))
 
-vi.mock('../contexts/RoleContext', () => ({
+vi.mock('../contexts/roleState', () => ({
   useRole: () => ({
     hasPermission: (code) => roleState.permissions.has(code),
     contact: roleState.contact,
@@ -87,7 +89,7 @@ vi.mock('../contexts/RoleContext', () => ({
 }))
 
 vi.mock('../components/useProcessRunner', () => ({
-  useProcessRunner: () => ({ run: vi.fn() }),
+  useProcessRunner: () => ({ run: runProcess }),
 }))
 
 vi.mock('../components/ImportButton', () => ({ default: () => null }))
@@ -101,31 +103,71 @@ vi.mock('../components/ResumePreview', () => ({
 }))
 
 vi.mock('../components/SmartDataTable', () => ({
-  default: ({ tableId, columns = [], dataSource = [], onRowClick }) => (
-    <section
-      data-testid={`table-${tableId}`}
-      data-filter-count={columns.filter((column) => column.filter).length}
-      data-columns={columns.map((column) => column.title).join(',')}
-    >
-      {tableId === 'candidates' && (
-        <button type="button" onClick={() => onRowClick?.(candidate)}>
-          打开候选人
-        </button>
-      )}
-      {dataSource.map((record) => (
-        <div key={record.id}>
-          <button type="button" onClick={() => onRowClick?.(record)}>
-            {record.apply_id || record.id}
-          </button>
-          {tableId === 'candidate-resumes' && (
-            <span data-testid={`entity-${record.id}`}>
-              {columns.find((column) => column.dataIndex === 'entity')?.render?.(record.entity, record)}
-            </span>
-          )}
-        </div>
-      ))}
-    </section>
-  ),
+  default: ({
+    tableId,
+    columns = [],
+    dataSource = [],
+    onRowClick,
+    rowSelection,
+    toolBarRender,
+    request,
+    params,
+    actionRef,
+  }) => {
+    if (actionRef) {
+      actionRef.current = {
+        clearSelected: () => rowSelection?.onChange?.([]),
+      }
+    }
+    return (
+      <section
+        data-testid={`table-${tableId}`}
+        data-filter-count={columns.filter((column) => column.filter).length}
+        data-columns={columns.map((column) => column.title).join(',')}
+        data-params={JSON.stringify(params || {})}
+      >
+        {tableId === 'candidates' && (
+          <>
+            <div>{toolBarRender?.()}</div>
+            <output data-testid="selected-count">{rowSelection?.selectedRowKeys?.length || 0}</output>
+            <button type="button" onClick={() => onRowClick?.(candidate)}>
+              打开候选人
+            </button>
+            <button type="button" onClick={() => rowSelection?.onChange?.([1, 2])}>
+              选择两名候选人
+            </button>
+            <button type="button" onClick={() => rowSelection?.onChange?.([3])}>
+              改选一名候选人
+            </button>
+            <button
+              type="button"
+              onClick={() => request?.({
+                ...params,
+                page: 1,
+                page_size: 10,
+                name: '张三',
+                system_status: 'raw',
+              })}
+            >
+              加载候选人
+            </button>
+          </>
+        )}
+        {dataSource.map((record) => (
+          <div key={record.id}>
+            <button type="button" onClick={() => onRowClick?.(record)}>
+              {record.apply_id || record.id}
+            </button>
+            {tableId === 'candidate-resumes' && (
+              <span data-testid={`entity-${record.id}`}>
+                {columns.find((column) => column.dataIndex === 'entity')?.render?.(record.entity, record)}
+              </span>
+            )}
+          </div>
+        ))}
+      </section>
+    )
+  },
 }))
 
 vi.mock('../api/services', () => ({
@@ -139,7 +181,7 @@ vi.mock('../api/services', () => ({
   manualAssignResume: vi.fn(),
   fetchAgentDecisions: vi.fn().mockResolvedValue({ data: { results: [] } }),
   retryAgentDecision: vi.fn(),
-  fetchAllocationMode: vi.fn(),
+  fetchAllocationMode,
   dispatchAllocation: vi.fn(),
   confirmReviewAllocation: vi.fn(),
   cancelAllocation: vi.fn(),
@@ -161,6 +203,12 @@ describe('ResumesPage detail', () => {
     roleState.contact = null
     roleState.isContact = false
     roleState.isSecondaryContact = false
+    runProcess.mockReset()
+    runProcess.mockResolvedValue({ success: true })
+    fetchAllocationMode.mockReset()
+    fetchAllocationMode.mockResolvedValue({
+      data: { mode: 'rule', ai_enabled: false, ai_ready: false },
+    })
   })
 
   it('removes detail filters and switches preview by volunteer row', async () => {
@@ -225,5 +273,109 @@ describe('ResumesPage detail', () => {
     await userEvent.click(screen.getByRole('button', { name: '打开候选人' }))
 
     expect(screen.queryByRole('button', { name: '提交反馈' })).toBeNull()
+  })
+
+  it('always shows the fixed processing choices and disables an empty current selection', async () => {
+    roleState.permissions = new Set(['pipeline.run'])
+    render(<MemoryRouter><ResumesPage /></MemoryRouter>)
+
+    await userEvent.click(screen.getByRole('button', { name: /处理简历/ }))
+
+    const currentSelected = screen.getByRole('checkbox', { name: '当前选中（0）' })
+    expect(currentSelected.disabled).toBe(true)
+    expect(screen.getAllByRole('checkbox')).toHaveLength(7)
+    for (const checkbox of screen.getAllByRole('checkbox')) {
+      expect(checkbox.checked).toBe(false)
+    }
+  })
+
+  it('freezes selected candidate ids, keeps choices exclusive, and clears selection on success', async () => {
+    roleState.permissions = new Set(['pipeline.run', 'resume.import'])
+    render(<MemoryRouter><ResumesPage /></MemoryRouter>)
+
+    await userEvent.click(screen.getByRole('button', { name: '选择两名候选人' }))
+    expect(screen.getByTestId('selected-count').textContent).toBe('2')
+    await userEvent.click(screen.getByRole('button', { name: /处理简历/ }))
+
+    const currentSelected = screen.getByRole('checkbox', { name: '当前选中（2）' })
+    expect(currentSelected.checked).toBe(false)
+    await userEvent.click(currentSelected)
+    expect(currentSelected.checked).toBe(true)
+
+    const rawStatus = screen.getByRole('checkbox', { name: '待处理' })
+    const classifiedStatus = screen.getByRole('checkbox', { name: '已分类' })
+    await userEvent.click(rawStatus)
+    await userEvent.click(classifiedStatus)
+    expect(currentSelected.checked).toBe(false)
+    expect(rawStatus.checked).toBe(true)
+    expect(classifiedStatus.checked).toBe(true)
+
+    await userEvent.click(currentSelected)
+    expect(rawStatus.checked).toBe(false)
+    expect(classifiedStatus.checked).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: '改选一名候选人' }))
+    await userEvent.click(screen.getByRole('button', { name: '开始处理' }))
+
+    await waitFor(() => expect(runProcess).toHaveBeenCalledWith(
+      [{ step: 'step2', label: '简历分类、分配与下发' }],
+      expect.any(String),
+      {
+        scope: {
+          candidate_ids: [1, 2],
+          force_reprocess: true,
+        },
+      },
+    ))
+    expect(screen.getByTestId('selected-count').textContent).toBe('0')
+  })
+
+  it('submits status processing with the current table and task filters', async () => {
+    roleState.permissions = new Set(['pipeline.run'])
+    render(
+      <MemoryRouter initialEntries={['/resumes?processing_run_id=18&processing_result=success']}>
+        <ResumesPage />
+      </MemoryRouter>,
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: '加载候选人' }))
+    await userEvent.click(screen.getByRole('button', { name: /处理简历/ }))
+    await userEvent.click(screen.getByRole('checkbox', { name: '通过' }))
+    await userEvent.click(screen.getByRole('button', { name: '开始处理' }))
+
+    await waitFor(() => expect(runProcess).toHaveBeenCalledWith(
+      [{ step: 'step2', label: '简历分类、分配与下发' }],
+      expect.any(String),
+      {
+        scope: {
+          system_statuses: ['screening_passed'],
+          candidate_filters: {
+            name: '张三',
+            processing_run_id: '18',
+            processing_result: 'success',
+          },
+        },
+      },
+    ))
+  })
+
+  it('keeps selection but closes old detail when clearing a task result filter', async () => {
+    roleState.permissions = new Set(['pipeline.run', 'resume.import'])
+    render(
+      <MemoryRouter initialEntries={['/resumes?processing_run_id=18&processing_result=success']}>
+        <ResumesPage />
+      </MemoryRouter>,
+    )
+
+    expect(screen.getByTestId('table-candidates').dataset.params).toBe(
+      '{"processing_run_id":"18","processing_result":"success"}',
+    )
+    await userEvent.click(screen.getByRole('button', { name: '选择两名候选人' }))
+    await userEvent.click(screen.getByRole('button', { name: '打开候选人' }))
+    await waitFor(() => expect(screen.getByTestId('resume-preview')).not.toBeNull())
+    await userEvent.click(screen.getByRole('button', { name: '清除筛选' }))
+
+    await waitFor(() => expect(screen.queryByTestId('resume-preview')).toBeNull())
+    expect(screen.getByTestId('selected-count').textContent).toBe('2')
+    expect(screen.getByTestId('table-candidates').dataset.params).toBe('{}')
   })
 })

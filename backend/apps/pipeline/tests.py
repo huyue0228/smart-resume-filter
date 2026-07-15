@@ -2,9 +2,10 @@ from unittest.mock import patch
 from types import SimpleNamespace
 
 from django.test import TestCase
+from django.utils import timezone
 
 from apps.accounts.models import User
-from apps.core import models as m
+from apps.core import models as m, system_status
 from apps.pipeline import ai_config, runner
 from apps.pipeline.ai import service as ai_service
 from apps.pipeline.ai.service import AIServiceError
@@ -152,10 +153,12 @@ class AllocationDesignContractTests(TestCase):
             [m.AssignmentAttempt.SOURCE_AI],
         )
 
-    def test_run_skips_candidate_changed_after_submit(self):
+    def test_force_reprocess_skips_candidate_changed_after_submit(self):
         workflow = m.CandidateWorkflow.objects.create(candidate=self.candidate)
         run = runner.create_run(
-            "step2", mode="rule", scope={"candidate_ids": [self.candidate.id]}
+            "step2",
+            mode="rule",
+            scope={"candidate_ids": [self.candidate.id], "force_reprocess": True},
         )
         workflow.status = m.CandidateWorkflow.STATUS_IN_PROGRESS
         workflow.save(update_fields=["status"])
@@ -164,6 +167,11 @@ class AllocationDesignContractTests(TestCase):
 
         scope_item = run.scope_items.get(candidate=self.candidate)
         self.assertEqual(scope_item.status, "skipped_manual_change")
+        self.assertIsNotNone(scope_item.finished_at)
+        run.refresh_from_db()
+        self.assertEqual(run.success_count, 0)
+        self.assertEqual(run.skipped_count, 1)
+        self.assertEqual(run.stages.get(step="step2").skipped_count, 1)
         self.assertFalse(m.AssignmentAttempt.objects.exists())
 
     def test_scoped_reprocess_classifies_school_tags_before_school_gate(self):
@@ -1099,3 +1107,204 @@ class AllocationDesignContractTests(TestCase):
         )
         self.assertFalse(hasattr(same_name_raw_candidate, "workflow"))
         self.assertIn("已生成 1 条候选人分配尝试", message)
+
+    def test_force_reprocess_selected_reopens_all_system_statuses(self):
+        status_candidates = [("raw", self.candidate, self.resume)]
+
+        def create_candidate(code, *, job_category=""):
+            candidate = m.Candidate.objects.create(
+                identity_hash=f"candidate-force-{code}",
+                name=f"候选人-{code}",
+                phone=f"1390000{len(status_candidates):04d}",
+                first_degree_platform="平台A",
+                highest_degree_platform="平台A",
+            )
+            resume = m.Resume.objects.create(
+                candidate=candidate,
+                apply_id=f"FORCE-{code}",
+                position_name="后端工程师",
+                volunteer_rank=1,
+                job_category=job_category,
+                resume_file=f"{code}.pdf",
+            )
+            status_candidates.append((code, candidate, resume))
+            return candidate, resume
+
+        classified, classified_resume = create_candidate(
+            "classified", job_category="技术类"
+        )
+        allocated, allocated_resume = create_candidate("allocated")
+        pending_screening, pending_screening_resume = create_candidate(
+            "pending_screening"
+        )
+        passed, passed_resume = create_candidate("screening_passed")
+        rejected, rejected_resume = create_candidate("screening_rejected")
+
+        def create_attempt(candidate, resume, status, *, workflow_status="in_progress"):
+            workflow = m.CandidateWorkflow.objects.create(
+                candidate=candidate,
+                status=workflow_status,
+                current_resume=resume,
+                current_rank=1,
+            )
+            attempt = m.AssignmentAttempt.objects.create(
+                workflow=workflow,
+                resume=resume,
+                attempt_no=1,
+                source=m.AssignmentAttempt.SOURCE_RULE,
+                status=status,
+                department=self.department,
+                contact=self.contact,
+            )
+            if workflow_status == m.CandidateWorkflow.STATUS_PASSED:
+                workflow.passed_attempt = attempt
+                workflow.save(update_fields=["passed_attempt"])
+            return workflow, attempt
+
+        create_attempt(
+            allocated,
+            allocated_resume,
+            m.AssignmentAttempt.STATUS_PENDING_DISPATCH,
+        )
+        create_attempt(
+            pending_screening,
+            pending_screening_resume,
+            m.AssignmentAttempt.STATUS_DISPATCHED_L2,
+        )
+        create_attempt(
+            passed,
+            passed_resume,
+            m.AssignmentAttempt.STATUS_PASSED,
+            workflow_status=m.CandidateWorkflow.STATUS_PASSED,
+        )
+        create_attempt(
+            rejected,
+            rejected_resume,
+            m.AssignmentAttempt.STATUS_REJECTED,
+            workflow_status=m.CandidateWorkflow.STATUS_ARCHIVED,
+        )
+
+        actual_statuses = {
+            code: system_status.candidate_system_status(
+                m.Candidate.objects.prefetch_related(
+                    "resumes", "workflow__attempts"
+                ).get(pk=candidate.pk)
+            )
+            for code, candidate, _resume in status_candidates
+        }
+        self.assertEqual(set(actual_statuses.values()), set(system_status.LABELS))
+
+        candidate_ids = [candidate.id for _code, candidate, _resume in status_candidates]
+        allocate.run(
+            mode="rule",
+            scope={"candidate_ids": candidate_ids, "force_reprocess": True},
+        )
+
+        self.assertEqual(
+            m.CandidateWorkflow.objects.filter(
+                candidate_id__in=candidate_ids,
+                dispatch_strategy="rule",
+            ).count(),
+            6,
+        )
+        for _code, candidate, _resume in status_candidates:
+            candidate.workflow.refresh_from_db()
+            self.assertEqual(
+                candidate.workflow.status, m.CandidateWorkflow.STATUS_IN_PROGRESS
+            )
+
+    def test_force_reprocess_preserves_history_and_cancels_unfeedbacked_auto_attempts(self):
+        allocate.run(mode="rule")
+        passed_attempt = m.AssignmentAttempt.objects.get()
+        allocate.dispatch_attempt(passed_attempt)
+        allocate.submit_feedback(
+            passed_attempt,
+            m.AssignmentAttempt.FEEDBACK_PASSED,
+            "业务确认通过",
+        )
+        workflow = self.candidate.workflow
+        workflow.archive_reason = m.CandidateWorkflow.ARCHIVE_ALL_REJECTED
+        workflow.archive_detail = "旧归档原因"
+        workflow.block_reason = m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND
+        workflow.block_detail = "旧阻塞原因"
+        workflow.completed_at = timezone.now()
+        workflow.save(
+            update_fields=[
+                "archive_reason",
+                "archive_detail",
+                "block_reason",
+                "block_detail",
+                "completed_at",
+            ]
+        )
+        old_decision = m.AgentDispatchDecision.objects.create(
+            workflow=workflow,
+            resume=self.resume,
+            recommendation=m.AgentDispatchDecision.RECOMMEND_REVIEW,
+            summary="历史 AI 决策",
+        )
+        pending_auto = m.AssignmentAttempt.objects.create(
+            workflow=workflow,
+            resume=self.resume,
+            attempt_no=2,
+            source=m.AssignmentAttempt.SOURCE_AI,
+            status=m.AssignmentAttempt.STATUS_PENDING_REVIEW,
+            department=self.department,
+            contact=self.contact,
+        )
+        manual_attempt = m.AssignmentAttempt.objects.create(
+            workflow=workflow,
+            resume=self.resume,
+            attempt_no=3,
+            source=m.AssignmentAttempt.SOURCE_MANUAL,
+            status=m.AssignmentAttempt.STATUS_PENDING_DISPATCH,
+            department=self.department,
+            contact=self.contact,
+        )
+
+        allocate.run(
+            mode="rule",
+            scope={"candidate_ids": [self.candidate.id], "force_reprocess": True},
+        )
+
+        workflow.refresh_from_db()
+        passed_attempt.refresh_from_db()
+        pending_auto.refresh_from_db()
+        manual_attempt.refresh_from_db()
+        self.assertEqual(workflow.status, m.CandidateWorkflow.STATUS_IN_PROGRESS)
+        self.assertIsNone(workflow.passed_attempt_id)
+        self.assertEqual(workflow.archive_reason, "")
+        self.assertEqual(workflow.archive_detail, "")
+        self.assertEqual(workflow.block_reason, "")
+        self.assertEqual(workflow.block_detail, "")
+        self.assertIsNone(workflow.completed_at)
+        self.assertEqual(passed_attempt.feedback_result, m.AssignmentAttempt.FEEDBACK_PASSED)
+        self.assertEqual(passed_attempt.feedback_note, "业务确认通过")
+        self.assertEqual(pending_auto.status, m.AssignmentAttempt.STATUS_CANCELLED)
+        self.assertEqual(pending_auto.cancel_reason, m.AssignmentAttempt.CANCEL_RERUN)
+        self.assertEqual(manual_attempt.status, m.AssignmentAttempt.STATUS_PENDING_DISPATCH)
+        self.assertTrue(m.AgentDispatchDecision.objects.filter(pk=old_decision.pk).exists())
+        self.assertEqual(workflow.attempts.count(), 4)
+
+    def test_resume_import_scope_does_not_reopen_terminal_workflow(self):
+        allocate.run(mode="rule")
+        passed_attempt = m.AssignmentAttempt.objects.get()
+        allocate.dispatch_attempt(passed_attempt)
+        allocate.submit_feedback(passed_attempt, m.AssignmentAttempt.FEEDBACK_PASSED)
+        workflow = self.candidate.workflow
+        passed_attempt_count = workflow.attempts.count()
+
+        allocate.run(
+            mode="rule",
+            scope={
+                "candidate_ids": [self.candidate.id],
+                "source": "resume_import",
+            },
+        )
+
+        workflow.refresh_from_db()
+        passed_attempt.refresh_from_db()
+        self.assertEqual(workflow.status, m.CandidateWorkflow.STATUS_PASSED)
+        self.assertEqual(workflow.passed_attempt, passed_attempt)
+        self.assertEqual(workflow.attempts.count(), passed_attempt_count)
+        self.assertEqual(passed_attempt.status, m.AssignmentAttempt.STATUS_PASSED)

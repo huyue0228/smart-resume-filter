@@ -13,7 +13,8 @@ import {
   UserOutlined,
   SafetyCertificateOutlined,
 } from '@ant-design/icons'
-import { useRole, ROLES } from '../contexts/RoleContext'
+import { useRole, ROLES } from '../contexts/roleState'
+import { canAccessRoute } from '../routePermissions'
 import BrandLogo from '../components/BrandLogo'
 import ProcessingTaskCenter from '../components/ProcessingTaskCenter'
 
@@ -58,20 +59,8 @@ const allRoute = {
 }
 
 function filterRoutesByPermission(routes, hasPermission) {
-  const permissionMap = {
-    '/resumes': ['resume.view', 'attempt.view_received', 'attempt.view_assigned'],
-    '/jobs': 'job.view',
-    '/schools': 'school.view',
-    '/departments': 'department.view',
-    '/config': 'settings.manage_config',
-    '/ai-connection': 'settings.manage_ai_connection',
-    '/users': 'settings.manage_permissions',
-  }
   const keepRoute = (route) => {
-    const needed = permissionMap[route.path]
-    if (!needed) return true
-    const codes = Array.isArray(needed) ? needed : [needed]
-    return codes.some((code) => hasPermission(code))
+    return canAccessRoute(route.path, hasPermission)
   }
   const next = routes
     .map((route) => {

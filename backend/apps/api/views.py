@@ -545,16 +545,21 @@ class CandidateViewSet(PermissionedModelViewSet):
     }
 
     def _base_queryset(self):
+        attempts = m.AssignmentAttempt.objects.select_related(
+            "workflow__candidate",
+            "resume__candidate",
+            "contact",
+            "department",
+            "sub_contact",
+            "sub_department",
+            "matched_rule",
+            "agent_decision",
+        ).order_by("attempt_no")
         return (
             m.Candidate.objects.prefetch_related(
                 "resumes",
                 "resumes__job__department__parent",
-                "workflow__attempts__resume",
-                "workflow__attempts__contact",
-                "workflow__attempts__sub_contact",
-                "workflow__attempts__department",
-                "workflow__attempts__sub_department",
-                "workflow__attempts__agent_decision",
+                Prefetch("workflow__attempts", queryset=attempts),
             )
             .select_related(
                 "first_degree_tag",
@@ -1565,6 +1570,40 @@ class PipelineRunView(APIView):
                 {"detail": "AI 重试只能从简历详情中的重试入口发起"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        force_reprocess_requested = "force_reprocess" in scope
+        force_reprocess = scope.get("force_reprocess")
+        if force_reprocess_requested and force_reprocess is not True:
+            return Response(
+                {"detail": "force_reprocess 仅支持布尔值 true"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if force_reprocess_requested:
+            candidate_ids = scope.get("candidate_ids")
+            valid_candidate_ids = (
+                isinstance(candidate_ids, list)
+                and bool(candidate_ids)
+                and all(
+                    isinstance(candidate_id, int)
+                    and not isinstance(candidate_id, bool)
+                    and candidate_id > 0
+                    for candidate_id in candidate_ids
+                )
+            )
+            if step != "step2":
+                return Response(
+                    {"detail": "force_reprocess 只允许用于 step2"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if not valid_candidate_ids:
+                return Response(
+                    {"detail": "force_reprocess 必须搭配非空的 candidate_ids 正整数数组"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if "system_statuses" in scope or "candidate_filters" in scope:
+                return Response(
+                    {"detail": "force_reprocess 不得与状态或筛选范围同时提交"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
         try:
             run = runner.create_configured_run(step, scope=scope, created_by=request.user)
         except ValueError as exc:
