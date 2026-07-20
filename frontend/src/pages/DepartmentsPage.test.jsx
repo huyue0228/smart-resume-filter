@@ -5,6 +5,9 @@ import DepartmentsPage from './DepartmentsPage'
 
 const mocks = vi.hoisted(() => ({
   deleteContact: vi.fn(),
+  fetchConfig: vi.fn(),
+  updateConfig: vi.fn(),
+  hasPermission: vi.fn(),
   reload: vi.fn(),
   reloadOptions: vi.fn(),
   success: vi.fn(),
@@ -23,13 +26,31 @@ vi.mock('antd', () => ({
     </div>
   ),
   Space: ({ children }) => <div>{children}</div>,
+  Switch: ({ checked, loading, onChange, ...props }) => (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      disabled={loading}
+      onClick={() => onChange(!checked)}
+      {...props}
+    >
+      {checked ? '开启' : '关闭'}
+    </button>
+  ),
   Tag: ({ children }) => <span>{children}</span>,
+}))
+
+vi.mock('../contexts/roleState', () => ({
+  useRole: () => ({ hasPermission: mocks.hasPermission }),
 }))
 
 vi.mock('../api/services', () => ({
   deleteContact: mocks.deleteContact,
+  fetchConfig: mocks.fetchConfig,
   fetchContactFilterOptions: vi.fn(),
   fetchContacts: vi.fn(),
+  updateConfig: mocks.updateConfig,
 }))
 
 vi.mock('../components/ImportButton', () => ({ default: () => null }))
@@ -49,6 +70,12 @@ describe('DepartmentsPage', () => {
   beforeEach(() => {
     mocks.deleteContact.mockReset()
     mocks.deleteContact.mockResolvedValue({})
+    mocks.fetchConfig.mockReset()
+    mocks.fetchConfig.mockResolvedValue({ data: { key: 'welink_enabled', value: false } })
+    mocks.updateConfig.mockReset()
+    mocks.updateConfig.mockResolvedValue({ data: { key: 'welink_enabled', value: true } })
+    mocks.hasPermission.mockReset()
+    mocks.hasPermission.mockImplementation((code) => code === 'department.manage')
     mocks.reload.mockReset()
     mocks.reloadOptions.mockReset()
     mocks.success.mockReset()
@@ -63,5 +90,24 @@ describe('DepartmentsPage', () => {
     expect(mocks.reload).toHaveBeenCalledOnce()
     expect(mocks.reloadOptions).toHaveBeenCalledOnce()
     expect(mocks.success).toHaveBeenCalledWith('已删除')
+  })
+
+  it('manages the WeLink notification switch on the contacts page', async () => {
+    render(<DepartmentsPage />)
+
+    await waitFor(() => expect(mocks.fetchConfig).toHaveBeenCalledWith('welink_enabled'))
+    await userEvent.click(screen.getByRole('switch', { name: 'WeLink 通知' }))
+
+    await waitFor(() => expect(mocks.updateConfig).toHaveBeenCalledWith('welink_enabled', true))
+    expect(mocks.success).toHaveBeenCalledWith('已开启 WeLink 通知')
+  })
+
+  it('hides the WeLink switch without contact management permission', () => {
+    mocks.hasPermission.mockReturnValue(false)
+
+    render(<DepartmentsPage />)
+
+    expect(screen.queryByRole('switch', { name: 'WeLink 通知' })).toBeNull()
+    expect(mocks.fetchConfig).not.toHaveBeenCalled()
   })
 })

@@ -168,6 +168,7 @@ export default function SchoolAdmissionRulesTab() {
     <>
       <SmartDataTable
         tableId="school-admission-rules"
+        stickyPagination
         actionRef={actionRef}
         rowKey="id"
         columns={baseColumns}

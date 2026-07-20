@@ -27,14 +27,14 @@ compose() {
 command -v docker >/dev/null || { echo "未找到 docker。"; exit 1; }
 docker compose version >/dev/null || { echo "未找到 Docker Compose v2。"; exit 1; }
 compose config --images >/dev/null
-for service in db redis backend worker ai-worker frontend; do
+for service in db redis backend worker ai-worker frontend backup-scheduler; do
   if ! compose config --services | grep -Fxq "$service"; then
     echo "Compose 缺少必需服务：${service}"
     exit 1
   fi
 done
 compose ps
-for service in db redis backend worker ai-worker frontend; do
+for service in db redis backend worker ai-worker frontend backup-scheduler; do
   if ! compose ps --status running --services | grep -Fxq "$service"; then
     echo "服务未处于运行状态：${service}"
     exit 1

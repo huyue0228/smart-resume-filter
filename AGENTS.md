@@ -4,7 +4,7 @@ This file gives Codex working context for this repository. The project was origi
 
 ## Project Overview
 
-校招智能简历筛选系统。核心候选人处理流程是：查重与志愿排序 -> 简历分类、分配与下发。院校分类、需求录入、部门接口人维护是分配前置数据准备；分配环节支持规则 / AI 双模式。
+This is an intelligent resume screening system for campus recruitment. The core candidate workflow is: deduplication and volunteer-order resolution -> resume classification, assignment, and dispatch. School classification, job-demand entry, and department-contact maintenance provide the prerequisite data for assignment; assignment supports both Rule and AI modes.
 
 Tech stack:
 
@@ -90,7 +90,7 @@ Use focused verification for the files changed:
 - `strategies.py` owns deterministic Rule matching. Formal AI screening lives under `backend/apps/pipeline/ai/` and must never fall back to Rule. The only runtime model connection source is the `settings.manage_ai_connection`-protected system settings page; the shared intranet Base URL, selectable API style, model ID and optional access token are stored there without provider/Profile templates. The backend reads OpenAI-compatible `GET /models` for model choices while keeping the field directly editable. AI mode requires a text-extractable PDF.
 - AI Agent screening is a hard-rule-constrained recommendation flow: it only evaluates the candidate's current effective volunteer, never skips volunteer order or school admission rules, and never automatically falls back to Rule after AI failure.
 - AI failures, timeouts, parse failures, invalid output, missing references, and guardrail blocks should be recorded for HR handling. HR chooses retry AI, switch to Rule, manual assignment, or archive handling.
-- Frontend submits one `/api/pipeline/run/` request with non-empty `modes` and optional `scope` via `frontend/src/components/useProcessRunner.jsx`; the backend creates independent runs and executes them through the sequential Celery orchestration.
+- Frontend submits one `/api/pipeline/run/` request with a single explicit `mode` (`rule` or `ai`) and optional `scope` via `frontend/src/components/useProcessRunner.jsx`; the backend creates one mode-fixed run and executes it through the sequential Celery orchestration. AI is selectable only while the current full model-connection fingerprint has a successful test.
 
 ## API Notes
 
@@ -110,7 +110,7 @@ Use focused verification for the files changed:
 - API wrappers live in `frontend/src/api/`.
 - Layout and permission-code menu filtering live in `frontend/src/layouts/BasicLayout.jsx`.
 - `RoleContext.jsx` holds the current token-backed user, `/api/me/` permissions, roles, contact binding, and data-scope helpers. Do not reintroduce demo role switching.
-- Rule/AI selection is made by the resume-processing dialog and submitted as a non-empty `modes` array; allocation subpages only filter existing attempts by source.
+- Rule/AI selection is made by both the resume-upload dialog and the resume-processing dialog, and submitted as one explicit mode (`processing_mode` for uploads, `mode` for `/api/pipeline/run/`). Rule is always available; AI is enabled only when the current model connection test is valid. Allocation subpages only filter existing attempts by source.
 - Import UI is decentralized through `frontend/src/components/ImportButton.jsx`; there is no standalone import page.
 - Shared table header filters and resizable column wiring live in `frontend/src/components/DataTableControls.jsx` and `frontend/src/components/ResizableHeaderCell.jsx`; reuse them for dense data tables instead of rebuilding per page.
 - PDF preview UI lives in `frontend/src/components/ResumePreview.jsx` and supports direct resume previews and assignment-attempt scoped previews.

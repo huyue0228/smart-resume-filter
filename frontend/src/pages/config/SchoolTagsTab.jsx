@@ -99,6 +99,7 @@ export default function SchoolTagsTab() {
     <>
       <SmartDataTable
         tableId="school-tags"
+        stickyPagination
         actionRef={actionRef}
         rowKey="id"
         columns={baseColumns}

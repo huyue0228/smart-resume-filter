@@ -1,4 +1,4 @@
-"""Step2 岗位分类：按岗位类别映射表打标签，供当前全局分配模式复用。"""
+"""岗位分类兼容工具；正式 Rule-first 流程由 Step3 按当前志愿完成匹配。"""
 from apps.core import models as m
 
 from ..strategies import get_rule_strategy

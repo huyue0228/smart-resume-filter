@@ -1,4 +1,4 @@
-"""Step3 院校分类：第一/最高学历对照院校清单打院校标签。"""
+"""Step2 院校分类：第一/最高学历对照院校清单完整生成院校标签。"""
 from apps.core import models as m
 
 
@@ -58,13 +58,11 @@ def _school_platform_name(tag, school):
 
 
 def classify_candidates(candidates, *, overwrite=True):
-    """按院校清单给指定候选人集合补院校标签。
+    """按当前院校清单为指定候选人完整生成并固化院校标签。
 
-    简历库“处理简历”只重跑 Step2，但 Step2 的院校准入依赖 Step3 产出的
-    `first_degree_tag` / `highest_degree_tag`。这里允许 Step2 在锁定本次
-    处理范围后只补这批候选人的标签，避免未预分类候选人被误判为非目标院校。
-    Step2 调用时使用 `overwrite=False`，只补缺失标签，不覆盖已有准入结果；
-    完整重分类仍由 Step3 显式执行。
+    正式流水线在 Step2 使用 ``overwrite=True``，保证准入检查和固化标签来自
+    同一版基础数据；Step3 与 Step4 不再调用本服务。``overwrite=False`` 仅为
+    兼容内部工具保留，不属于正式处理流程。
     """
     count = 0
     school_map = {s.name: s for s in m.School.objects.select_related("school_tag")}
@@ -81,8 +79,7 @@ def classify_candidates(candidates, *, overwrite=True):
         highest_tag = _school_tag(highest_school, default_tag, non_target_tag)
         should_update_first = overwrite or not cand.first_degree_tag_id
         should_update_highest = overwrite or not cand.highest_degree_tag_id
-        # Step2 的补分类只补空字段。已有标签/平台可能来自 HR 手工修正或
-        # 完整 Step3 分类结果，不能因为单次处理简历而被院校清单兜底覆盖。
+        # 正式 Step2 总是覆盖生成；非覆盖模式仅供兼容内部工具使用。
         should_update_first_platform = overwrite or not cand.first_degree_platform
         should_update_highest_platform = overwrite or not cand.highest_degree_platform
         if should_update_first:

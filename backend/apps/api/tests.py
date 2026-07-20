@@ -59,7 +59,6 @@ class AgentDispatchDecisionApiTests(TestCase):
             }
         )
         ai_config.mark_ai_connection_tested()
-        m.Config.objects.update_or_create(key="ai_enabled", defaults={"value": True})
         self.client = APIClient()
         ensure_rbac_defaults()
         self.user = User.objects.create_user(
@@ -93,6 +92,7 @@ class AgentDispatchDecisionApiTests(TestCase):
             public_name="后端工程师",
             position_name="后端工程师",
             category="技术类",
+            responsibilities="负责后端服务开发、维护和性能优化。",
             headcount=1,
         )
         self.workflow = m.CandidateWorkflow.objects.create(
@@ -132,13 +132,13 @@ class AgentDispatchDecisionApiTests(TestCase):
         self.assertEqual(run.scope["retry_decision_id"], self.decision.id)
         self.assertEqual(new_decision.processing_run_id, run.id)
 
-    def test_retry_is_disabled_when_global_ai_switch_is_off(self):
-        m.Config.objects.update_or_create(key="ai_enabled", defaults={"value": False})
+    def test_retry_is_disabled_when_ai_connection_is_not_ready(self):
+        ai_config.invalidate_ai_connection_test()
 
         response = self.client.post(f"/api/agent-decisions/{self.decision.id}/retry/")
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("AI 分配当前未开启", response.data["detail"])
+        self.assertIn("模型连接尚未测试成功", response.data["detail"])
         self.assertEqual(m.AgentDispatchDecision.objects.count(), 1)
 
     def test_retry_rejects_high_confidence_dispatch_decision(self):
@@ -264,18 +264,20 @@ class PipelineRunApiTests(TestCase):
             "candidate_filters": {"system_status": "screening_passed,screening_rejected"},
         }
 
-        with patch("apps.api.views.runner.create_configured_run", return_value=run) as mock_create, patch(
+        with patch("apps.api.views.runner.create_run", return_value=run) as mock_create, patch(
             "apps.api.views.execute_runs_sequence_task.delay",
             return_value=SimpleNamespace(id="task-123"),
         ):
             response = self.client.post(
                 "/api/pipeline/run/",
-                {"step": "step2", "scope": scope},
+                {"step": "step2", "mode": "rule", "scope": scope},
                 format="json",
             )
 
         self.assertEqual(response.status_code, 200)
-        mock_create.assert_called_once_with("step2", scope=scope, created_by=self.user)
+        mock_create.assert_called_once_with(
+            "step2", mode="rule", scope=scope, created_by=self.user
+        )
         self.assertEqual(response.data["processing_runs"][0]["message"], "ok")
 
     def test_pipeline_run_accepts_selected_force_reprocess_scope(self):
@@ -288,19 +290,21 @@ class PipelineRunApiTests(TestCase):
         scope = {"candidate_ids": [3, 5], "force_reprocess": True}
 
         with patch(
-            "apps.api.views.runner.create_configured_run", return_value=run
+            "apps.api.views.runner.create_run", return_value=run
         ) as mock_create, patch(
             "apps.api.views.execute_runs_sequence_task.delay",
             return_value=SimpleNamespace(id="task-force"),
         ):
             response = self.client.post(
                 "/api/pipeline/run/",
-                {"step": "step2", "scope": scope},
+                {"step": "step2", "mode": "rule", "scope": scope},
                 format="json",
             )
 
         self.assertEqual(response.status_code, 200)
-        mock_create.assert_called_once_with("step2", scope=scope, created_by=self.user)
+        mock_create.assert_called_once_with(
+            "step2", mode="rule", scope=scope, created_by=self.user
+        )
 
     def test_pipeline_run_rejects_invalid_force_reprocess_scopes(self):
         invalid_requests = [
@@ -376,16 +380,16 @@ class PipelineRunApiTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("系统参数", response.data["detail"])
+        self.assertIn("不接受 modes", response.data["detail"])
 
-    def test_pipeline_run_rejects_ai_when_connection_is_not_enabled(self):
+    def test_pipeline_run_rejects_ai_when_connection_is_not_ready(self):
         with patch(
-            "apps.pipeline.runner.ai_config.allocation_mode",
-            side_effect=ValueError("AI 分配已开启，但当前模型连接尚未测试成功"),
+            "apps.pipeline.ai_config.is_ai_connection_tested",
+            return_value=False,
         ):
             response = self.client.post(
                 "/api/pipeline/run/",
-                {"step": "step2"},
+                {"step": "step2", "mode": "ai"},
                 format="json",
             )
 
@@ -400,7 +404,15 @@ class PipelineRunApiTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("系统参数", response.data["detail"])
+        self.assertIn("不接受 modes", response.data["detail"])
+
+    def test_pipeline_run_requires_one_explicit_mode(self):
+        response = self.client.post(
+            "/api/pipeline/run/", {"step": "step2"}, format="json"
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("rule 或 ai", response.data["detail"])
 
     def test_pipeline_run_rejects_reserved_ai_retry_scope(self):
         response = self.client.post(
@@ -447,7 +459,7 @@ class PipelineRunApiTests(TestCase):
     def test_pending_processing_run_can_be_cancelled(self):
         run = m.ProcessingRun.objects.create(step="step2", mode="ai", status="pending")
         stage = m.ProcessingRunStage.objects.create(
-            run=run, sequence=1, step="step2", label="简历分类、分配与下发"
+            run=run, sequence=1, step="step2", label="院校分类与学历/院校准入"
         )
 
         response = self.client.post(f"/api/pipeline/runs/{run.id}/cancel/")
@@ -893,11 +905,39 @@ class RbacApiTests(TestCase):
 
         self.assertEqual(response.status_code, 403)
 
-    def test_admin_can_update_known_config_value(self):
+    def test_department_manager_can_update_welink_notification_setting(self):
+        manager = User.objects.create_user(username="department-manager", password="pass")
+        manager.user_permissions.add(
+            Permission.objects.get(codename=permission_codename("department.manage"))
+        )
+        self.client.force_authenticate(manager)
+
+        response = self.client.patch(
+            "/api/configs/welink_enabled/", {"value": True}, format="json"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["value"])
+        self.assertTrue(m.Config.objects.get(key="welink_enabled").value)
+
+    def test_resume_import_permission_can_read_allocation_mode_without_pipeline_run(self):
+        importer = User.objects.create_user(username="import-only", password="pass")
+        importer.user_permissions.add(
+            Permission.objects.get(codename=permission_codename("resume.import"))
+        )
+        self.client.force_authenticate(importer)
+
+        response = self.client.get("/api/allocation-mode/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["default_mode"], "rule")
+        self.assertEqual(response.data["available_modes"], ["rule"])
+
+    def test_admin_can_update_known_ai_setting(self):
         self.client.force_authenticate(self.admin)
 
         response = self.client.patch(
-            "/api/configs/ai_dispatch_threshold/",
+            "/api/ai-connection/settings/ai_dispatch_threshold/",
             {"value": 0.82},
             format="json",
         )
@@ -907,15 +947,60 @@ class RbacApiTests(TestCase):
         self.assertEqual(response.data["value"], 0.82)
         self.assertEqual(m.Config.objects.get(key="ai_dispatch_threshold").value, 0.82)
 
-    def test_ai_switch_requires_current_successful_connection_test(self):
+    def test_admin_can_enable_valid_ai_special_route_config(self):
         self.client.force_authenticate(self.admin)
+        for key, value in [
+            ("ai_special_route_secondary_contact_id", self.secondary_a.id),
+            ("ai_special_route_tertiary_contact_id", self.tertiary_a.id),
+            ("ai_special_route_threshold", 0.9),
+            ("ai_special_route_enabled", True),
+        ]:
+            response = self.client.patch(
+                f"/api/ai-connection/settings/{key}/", {"value": value}, format="json"
+            )
+            self.assertEqual(response.status_code, 200, (key, response.data))
 
-        blocked_response = self.client.patch(
-            "/api/configs/ai_enabled/", {"value": True}, format="json"
+        config = ai_config.get_ai_special_route_config(validate=True)
+        self.assertTrue(config.enabled)
+        self.assertEqual(config.secondary_contact_id, self.secondary_a.id)
+        self.assertEqual(config.tertiary_contact_id, self.tertiary_a.id)
+
+    def test_special_route_rejects_contacts_outside_same_department_tree(self):
+        wrong_tertiary = m.Contact.objects.create(
+            name="产品三级接口人",
+            employee_no="T-B",
+            department=m.Department.objects.create(
+                name="产品三级组", level=3, parent=self.dept_b
+            ),
+            contact_level=m.Contact.LEVEL_TERTIARY,
+        )
+        self.client.force_authenticate(self.admin)
+        for key, value in [
+            ("ai_special_route_secondary_contact_id", self.secondary_a.id),
+            ("ai_special_route_tertiary_contact_id", wrong_tertiary.id),
+        ]:
+            response = self.client.patch(
+                f"/api/ai-connection/settings/{key}/", {"value": value}, format="json"
+            )
+            self.assertEqual(response.status_code, 200)
+
+        response = self.client.patch(
+            "/api/ai-connection/settings/ai_special_route_enabled/",
+            {"value": True},
+            format="json",
         )
 
-        self.assertEqual(blocked_response.status_code, 400)
-        self.assertIn("尚未测试成功", blocked_response.data["detail"])
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("上下级部门", response.data["detail"])
+
+    def test_ai_mode_becomes_available_after_successful_connection_test(self):
+        self.client.force_authenticate(self.admin)
+
+        unavailable_response = self.client.get("/api/allocation-mode/")
+        self.assertEqual(
+            unavailable_response.data,
+            {"default_mode": "rule", "available_modes": ["rule"], "ai_ready": False},
+        )
 
         ai_config.save_ai_connection_config(
             {
@@ -934,21 +1019,26 @@ class RbacApiTests(TestCase):
             },
         ):
             test_response = self.client.post("/api/ai-connection/test/")
-        enabled_response = self.client.patch(
-            "/api/configs/ai_enabled/", {"value": True}, format="json"
-        )
         mode_response = self.client.get("/api/allocation-mode/")
 
         self.assertEqual(test_response.status_code, 200)
         self.assertTrue(test_response.data["ok"])
-        self.assertEqual(enabled_response.status_code, 200)
-        self.assertTrue(enabled_response.data["value"])
         self.assertEqual(
             mode_response.data,
-            {"mode": "ai", "ai_enabled": True, "ai_ready": True},
+            {
+                "default_mode": "rule",
+                "available_modes": ["rule", "ai"],
+                "ai_ready": True,
+            },
+        )
+        self.assertEqual(
+            self.client.patch(
+                "/api/configs/ai_enabled/", {"value": True}, format="json"
+            ).status_code,
+            404,
         )
 
-    def test_saving_ai_connection_invalidates_test_and_disables_ai(self):
+    def test_saving_ai_connection_invalidates_test_and_removes_legacy_switch(self):
         self.client.force_authenticate(self.admin)
         ai_config.save_ai_connection_config(
             {
@@ -969,8 +1059,8 @@ class RbacApiTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.data["test_passed"])
-        self.assertFalse(m.Config.objects.get(key="ai_enabled").value)
-        self.assertEqual(ai_config.allocation_mode(), "rule")
+        self.assertFalse(m.Config.objects.filter(key="ai_enabled").exists())
+        self.assertEqual(ai_config.available_allocation_modes(), ["rule"])
 
     def test_admin_config_api_excludes_ai_connection_settings(self):
         self.client.force_authenticate(self.admin)
@@ -979,7 +1069,8 @@ class RbacApiTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         keys = {item["key"] for item in response.data}
-        self.assertIn("ai_dispatch_threshold", keys)
+        self.assertNotIn("ai_dispatch_threshold", keys)
+        self.assertNotIn("ai_enabled", keys)
         self.assertNotIn("AI_MODEL_NAME", keys)
         self.assertNotIn("AI_API_KEY_ENV", keys)
         self.assertNotIn("AI_BASE_URL_ENV", keys)
@@ -995,9 +1086,17 @@ class RbacApiTests(TestCase):
         )
         self.assertEqual(update_response.status_code, 404)
 
+        ai_settings_response = self.client.get("/api/ai-connection/settings/")
+        self.assertEqual(ai_settings_response.status_code, 200)
+        ai_keys = {item["key"] for item in ai_settings_response.data["settings"]}
+        self.assertIn("ai_dispatch_threshold", ai_keys)
+        self.assertIn("ai_special_route_enabled", ai_keys)
+        self.assertNotIn("ai_enabled", ai_keys)
+
     def test_only_users_with_ai_connection_permission_can_save_and_view_redacted_connection(self):
         self.client.force_authenticate(self.hr)
         self.assertEqual(self.client.get("/api/ai-connection/").status_code, 403)
+        self.assertEqual(self.client.get("/api/ai-connection/settings/").status_code, 403)
 
         self.client.force_authenticate(self.admin)
         payload = {
@@ -1171,7 +1270,7 @@ class RbacApiTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.data["api_key_configured"])
-        self.assertFalse(ai_config.is_ai_enabled())
+        self.assertFalse(ai_config.is_ai_available())
 
     def test_permissions_endpoint_returns_tree_for_admin(self):
         self.client.force_authenticate(self.admin)
@@ -1410,7 +1509,14 @@ class ListFilteringPaginationApiTests(TestCase):
     def test_candidate_list_filters_by_processing_run_result(self):
         run = m.ProcessingRun.objects.create(step="step2", mode="ai")
 
-        def create_result_candidate(code, scope_status, recommendation=None):
+        def create_result_candidate(
+            code,
+            scope_status,
+            recommendation=None,
+            *,
+            result_type="completed",
+            reason_code="",
+        ):
             candidate = m.Candidate.objects.create(
                 identity_hash=f"candidate-run-{code}",
                 name=f"任务{code}",
@@ -1434,6 +1540,8 @@ class ListFilteringPaginationApiTests(TestCase):
                 run=run,
                 candidate=candidate,
                 status=scope_status,
+                result_type=result_type,
+                reason_code=reason_code,
             )
             if recommendation:
                 m.AgentDispatchDecision.objects.create(
@@ -1445,15 +1553,32 @@ class ListFilteringPaginationApiTests(TestCase):
             return candidate
 
         success = create_result_candidate("success", "success")
-        failed = create_result_candidate("failed", "failed")
+        attention = create_result_candidate(
+            "attention",
+            "needs_attention",
+            result_type="needs_attention",
+            reason_code="ai_rate_limited",
+        )
+        failed = create_result_candidate(
+            "failed",
+            "failed",
+            result_type="failed",
+            reason_code="llm_timeout",
+        )
         review = create_result_candidate("review", "success", "review")
         dispatch = create_result_candidate("dispatch", "success", "dispatch")
         archive = create_result_candidate("archive", "success", "archive")
-        skipped = create_result_candidate("skipped", "skipped_manual_change")
-        cancelled = create_result_candidate("cancelled", "cancelled")
+        skipped = create_result_candidate(
+            "skipped", "skipped_manual_change", result_type=""
+        )
+        cancelled = create_result_candidate(
+            "cancelled", "cancelled", result_type="cancelled"
+        )
 
         expected_ids = {
             "success": {success.id, review.id, dispatch.id, archive.id},
+            "completed": {success.id, review.id, dispatch.id, archive.id},
+            "needs_attention": {attention.id},
             "failed": {failed.id},
             "review": {review.id},
             "dispatch": {dispatch.id},
@@ -1470,6 +1595,20 @@ class ListFilteringPaginationApiTests(TestCase):
             self.assertEqual(
                 {item["id"] for item in response.data["results"]}, ids, result
             )
+
+        response = self.client.get(
+            "/api/candidates/",
+            {
+                "processing_run_id": run.id,
+                "result_type": "needs_attention",
+                "reason_code": "ai_rate_limited",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            {item["id"] for item in response.data["results"]},
+            {attention.id},
+        )
 
     def test_candidate_header_filters_match_current_resume_and_school_tag(self):
         keep = m.Candidate.objects.create(
@@ -2249,6 +2388,7 @@ class ListFilteringPaginationApiTests(TestCase):
             job_family="研发",
             location="深圳",
             education="本科",
+            responsibilities="负责后端服务开发和性能优化。",
             headcount=3,
             is_public=True,
         )
@@ -2260,6 +2400,7 @@ class ListFilteringPaginationApiTests(TestCase):
             job_family="产品",
             location="上海",
             education="硕士",
+            responsibilities="负责产品规划和项目推进。",
             headcount=1,
             is_public=False,
         )
@@ -2273,6 +2414,7 @@ class ListFilteringPaginationApiTests(TestCase):
                 "job_family": "研发",
                 "location": "深圳",
                 "education": "本科",
+                "responsibilities": "性能优化",
                 "headcount": 3,
                 "is_public": "true",
             },
@@ -2396,6 +2538,7 @@ class ListFilteringPaginationApiTests(TestCase):
                 "public_name": "后端开发",
                 "position_name": "后端工程师",
                 "category": "技术类",
+                "responsibilities": "负责后端服务开发和性能优化。",
                 "major_names": ["计算机", "软件工程"],
                 "headcount": 3,
             },
@@ -2403,6 +2546,10 @@ class ListFilteringPaginationApiTests(TestCase):
         )
 
         self.assertEqual(create_response.status_code, 201)
+        self.assertEqual(
+            create_response.data["responsibilities"],
+            "负责后端服务开发和性能优化。",
+        )
         self.assertEqual(create_response.data["majors"], ["计算机", "软件工程"])
         job_id = create_response.data["id"]
         self.assertEqual(
@@ -2442,6 +2589,7 @@ class ListFilteringPaginationApiTests(TestCase):
                 "public_name": "后端开发",
                 "position_name": "后端工程师",
                 "category": "技术类",
+                "responsibilities": "负责后端服务开发。",
                 "major_names": ["计算机"],
                 "headcount": 3,
             },
@@ -2450,6 +2598,32 @@ class ListFilteringPaginationApiTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("department", response.data)
+
+    def test_job_create_and_legacy_update_require_responsibilities(self):
+        create_response = self.client.post(
+            "/api/jobs/",
+            {
+                "public_name": "缺少职责岗位",
+                "position_name": "缺少职责岗位",
+                "responsibilities": "   ",
+            },
+            format="json",
+        )
+        legacy_job = m.Job.objects.create(
+            public_name="历史岗位",
+            position_name="历史岗位",
+            responsibilities="",
+        )
+        update_response = self.client.patch(
+            f"/api/jobs/{legacy_job.id}/",
+            {"headcount": 2},
+            format="json",
+        )
+
+        self.assertEqual(create_response.status_code, 400)
+        self.assertIn("responsibilities", create_response.data)
+        self.assertEqual(update_response.status_code, 400)
+        self.assertIn("responsibilities", update_response.data)
 
     def test_delete_job_deactivates_instead_of_removing_record(self):
         department = m.Department.objects.create(name="研发中心", level=2)
@@ -3225,11 +3399,96 @@ class ImportApiTests(TestCase):
         self.hr.groups.add(Group.objects.get(name="HR"))
         self.client.force_authenticate(self.hr)
 
-    @patch("apps.api.views.execute_runs_sequence_task.delay")
-    @patch("apps.api.views.runner.create_configured_run")
     @patch("apps.api.views.snapshot.take_snapshot")
     @patch("apps.api.views.import_files")
-    def test_resume_upload_starts_one_run_with_configured_mode(
+    def test_resume_upload_requires_processing_mode(
+        self,
+        mock_import_files,
+        mock_take_snapshot,
+    ):
+        response = self.client.post(
+            "/api/import/",
+            {"resume_package": SimpleUploadedFile("简历包.zip", b"zip")},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("分配模式必须是 rule 或 ai", response.data["detail"])
+        mock_take_snapshot.assert_not_called()
+        mock_import_files.assert_not_called()
+
+    @patch("apps.api.views.snapshot.take_snapshot")
+    @patch("apps.api.views.import_files")
+    def test_resume_upload_rejects_unavailable_ai_mode(
+        self,
+        mock_import_files,
+        mock_take_snapshot,
+    ):
+        response = self.client.post(
+            "/api/import/",
+            {
+                "processing_mode": "ai",
+                "resume_package": SimpleUploadedFile("简历包.zip", b"zip"),
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("模型连接尚未测试成功", response.data["detail"])
+        mock_take_snapshot.assert_not_called()
+        mock_import_files.assert_not_called()
+
+    @patch("apps.api.views.import_files")
+    def test_job_import_returns_skipped_responsibility_warning(self, mock_import_files):
+        mock_import_files.return_value = {
+            "jobs": 1,
+            "jobs_skipped": 2,
+            "_warnings": [
+                {
+                    "code": "job_responsibility_missing",
+                    "count": 2,
+                    "rows": [3, 5],
+                    "message": "工作职责为空的岗位已跳过",
+                }
+            ],
+        }
+
+        response = self.client.post(
+            "/api/import/",
+            {
+                "jobs": SimpleUploadedFile(
+                    "岗位.xlsx",
+                    b"spreadsheet",
+                    content_type=(
+                        "application/vnd.openxmlformats-officedocument."
+                        "spreadsheetml.sheet"
+                    ),
+                )
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["counts"]["jobs"], 1)
+        self.assertEqual(response.data["counts"]["jobs_skipped"], 2)
+        self.assertEqual(
+            response.data["detail"], "导入完成，已跳过 2 条缺少工作职责的岗位"
+        )
+        self.assertEqual(
+            response.data["warnings"][0],
+            {
+                "code": "job_responsibility_missing",
+                "count": 2,
+                "rows": [3, 5],
+                "message": "工作职责为空的岗位已跳过",
+            },
+        )
+
+    @patch("apps.api.views.execute_runs_sequence_task.delay")
+    @patch("apps.api.views.runner.create_run")
+    @patch("apps.api.views.snapshot.take_snapshot")
+    @patch("apps.api.views.import_files")
+    def test_resume_upload_starts_one_run_with_selected_mode(
         self,
         mock_import_files,
         mock_take_snapshot,
@@ -3250,15 +3509,22 @@ class ImportApiTests(TestCase):
         mock_create_run.return_value = ai_run
         mock_execute.return_value = SimpleNamespace(id="upload-modes")
 
-        response = self.client.post(
-            "/api/import/",
-            {"resume_package": SimpleUploadedFile("简历包.zip", b"zip")},
-            format="multipart",
-        )
+        with patch(
+            "apps.api.views.ai_config.validate_allocation_mode", return_value="ai"
+        ):
+            response = self.client.post(
+                "/api/import/",
+                {
+                    "processing_mode": "ai",
+                    "resume_package": SimpleUploadedFile("简历包.zip", b"zip"),
+                },
+                format="multipart",
+            )
 
         self.assertEqual(response.status_code, 202)
         mock_create_run.assert_called_once_with(
             "resume_process",
+            mode="ai",
             scope={"candidate_ids": [candidate.id], "source": "resume_import"},
             created_by=self.hr,
         )
@@ -3403,7 +3669,11 @@ class ImportApiTests(TestCase):
 
         response = self.client.post(
             "/api/import/",
-            {"mode": "incremental", "resume_package": large_package},
+            {
+                "mode": "incremental",
+                "processing_mode": "rule",
+                "resume_package": large_package,
+            },
             format="multipart",
         )
 

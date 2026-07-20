@@ -1,9 +1,16 @@
-import { useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { PageContainer } from '@ant-design/pro-components'
-import { message, Popconfirm, Space, Tag } from 'antd'
-import { deleteContact, fetchContactFilterOptions, fetchContacts } from '../api/services'
+import { message, Popconfirm, Space, Switch, Tag } from 'antd'
+import {
+  deleteContact,
+  fetchConfig,
+  fetchContactFilterOptions,
+  fetchContacts,
+  updateConfig,
+} from '../api/services'
 import ImportButton from '../components/ImportButton'
 import SmartDataTable from '../components/SmartDataTable'
+import { useRole } from '../contexts/roleState'
 
 const IMPORT_FIELDS = [
   { key: 'contacts', label: '部门接口人信息 (.xlsx/.xls/.csv)', accept: '.xlsx,.xls,.csv' },
@@ -11,6 +18,40 @@ const IMPORT_FIELDS = [
 
 export default function DepartmentsPage() {
   const actionRef = useRef()
+  const role = useRole()
+  const canManageContacts = Boolean(role?.hasPermission?.('department.manage'))
+  const [welinkEnabled, setWelinkEnabled] = useState(false)
+  const [welinkLoading, setWelinkLoading] = useState(false)
+
+  useEffect(() => {
+    if (!canManageContacts) return
+    let active = true
+    setWelinkLoading(true)
+    fetchConfig('welink_enabled')
+      .then(({ data }) => {
+        if (active) setWelinkEnabled(Boolean(data?.value))
+      })
+      .catch(() => {
+        if (active) setWelinkEnabled(false)
+      })
+      .finally(() => {
+        if (active) setWelinkLoading(false)
+      })
+    return () => {
+      active = false
+    }
+  }, [canManageContacts])
+
+  const handleWelinkChange = async (checked) => {
+    setWelinkLoading(true)
+    try {
+      const { data } = await updateConfig('welink_enabled', checked)
+      setWelinkEnabled(Boolean(data?.value))
+      message.success(checked ? '已开启 WeLink 通知' : '已关闭 WeLink 通知')
+    } finally {
+      setWelinkLoading(false)
+    }
+  }
 
   const handleDelete = async (record) => {
     try {
@@ -113,8 +154,36 @@ export default function DepartmentsPage() {
       title="部门接口人"
       content="二级/三级部门接口人名单，可导入维护；二级接口人负责转派，三级接口人负责反馈。"
     >
+      {canManageContacts && (
+        <div
+          style={{
+            alignItems: 'center',
+            background: '#fff',
+            border: '1px solid #f0f0f0',
+            borderRadius: 8,
+            display: 'flex',
+            justifyContent: 'space-between',
+            marginBottom: 16,
+            padding: '14px 16px',
+          }}
+        >
+          <div>
+            <div style={{ fontWeight: 600 }}>WeLink 通知</div>
+            <div style={{ color: '#8c8c8c', marginTop: 4 }}>
+              开启后，HR 下发简历时向对应二级接口人发送 WeLink 通知。
+            </div>
+          </div>
+          <Switch
+            aria-label="WeLink 通知"
+            checked={welinkEnabled}
+            loading={welinkLoading}
+            onChange={handleWelinkChange}
+          />
+        </div>
+      )}
       <SmartDataTable
         tableId="contacts"
+        stickyPagination
         actionRef={actionRef}
         rowKey="id"
         columns={baseColumns}

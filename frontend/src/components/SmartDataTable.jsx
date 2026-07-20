@@ -21,6 +21,13 @@ import {
 
 const DEFAULT_COLUMN_WIDTH = 120
 const EMPTY_COLUMN_STATE = {}
+const EMPTY_STICKY_PAGINATION_METRICS = {
+  fixed: false,
+  height: 0,
+  left: 0,
+  width: 0,
+}
+const STICKY_PAGINATION_CLASS = 'srf-table-pagination-sticky'
 const INTERACTIVE_SELECTOR = [
   'a',
   'button',
@@ -142,6 +149,17 @@ function sameState(left, right) {
   return JSON.stringify(left || {}) === JSON.stringify(right || {})
 }
 
+function sameStickyPaginationMetrics(left, right) {
+  return left.fixed === right.fixed
+    && left.height === right.height
+    && left.left === right.left
+    && left.width === right.width
+}
+
+function appendClassName(current, next) {
+  return [current, next].filter(Boolean).join(' ')
+}
+
 const SmartDataTable = forwardRef(function SmartDataTable(
   {
     tableId,
@@ -159,6 +177,7 @@ const SmartDataTable = forwardRef(function SmartDataTable(
     params: externalParams,
     options,
     scroll,
+    stickyPagination = false,
     ...tableProps
   },
   forwardedRef,
@@ -181,6 +200,113 @@ const SmartDataTable = forwardRef(function SmartDataTable(
   const [columnsState, setColumnsState] = useState(columnsStateRef.current)
   const [selectedRowKeys, setSelectedRowKeys] = useState([])
   const [selectedRows, setSelectedRows] = useState([])
+  const tableRootRef = useRef()
+  const stickyPaginationFrameRef = useRef()
+  const [stickyPaginationMetrics, setStickyPaginationMetrics] = useState(
+    EMPTY_STICKY_PAGINATION_METRICS,
+  )
+  const hasDataRequest = Boolean(dataRequest)
+
+  const resolvedPagination = useMemo(() => {
+    if (pagination !== undefined) return pagination
+    return hasDataRequest ? { defaultPageSize: 10, showSizeChanger: true } : false
+  }, [hasDataRequest, pagination])
+  const stickyPaginationEnabled = Boolean(
+    stickyPagination && resolvedPagination && resolvedPagination !== false,
+  )
+  const mergedPagination = useMemo(() => {
+    if (!stickyPaginationEnabled) return resolvedPagination
+    const paginationProps = resolvedPagination === true ? {} : resolvedPagination
+    return {
+      ...paginationProps,
+      className: appendClassName(paginationProps.className, STICKY_PAGINATION_CLASS),
+    }
+  }, [resolvedPagination, stickyPaginationEnabled])
+
+  const updateStickyPagination = useCallback(() => {
+    const root = tableRootRef.current
+    const paginationElement = root?.querySelector(`.${STICKY_PAGINATION_CLASS}`)
+    if (!stickyPaginationEnabled || !root || !paginationElement) {
+      setStickyPaginationMetrics((previous) =>
+        sameStickyPaginationMetrics(previous, EMPTY_STICKY_PAGINATION_METRICS)
+          ? previous
+          : EMPTY_STICKY_PAGINATION_METRICS)
+      return
+    }
+
+    const rootRect = root.getBoundingClientRect()
+    const anchor = paginationElement.closest('.ant-pro-table') || root
+    const anchorRect = anchor.getBoundingClientRect()
+    const paginationRect = paginationElement.getBoundingClientRect()
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth
+    const isFullscreen = Boolean(
+      document.fullscreenElement?.contains(paginationElement),
+    )
+    const isVisible = isFullscreen || (
+      rootRect.width > 0
+      && rootRect.height > 0
+      && rootRect.bottom > 0
+      && rootRect.top < viewportHeight
+    )
+    const left = Math.max(0, Math.round(anchorRect.left))
+    const width = Math.max(0, Math.min(
+      Math.round(anchorRect.width),
+      viewportWidth - left,
+    ))
+    const next = isVisible && width > 0
+      ? {
+          fixed: true,
+          height: Math.ceil(paginationRect.height),
+          left,
+          width,
+        }
+      : EMPTY_STICKY_PAGINATION_METRICS
+
+    setStickyPaginationMetrics((previous) =>
+      sameStickyPaginationMetrics(previous, next) ? previous : next)
+  }, [stickyPaginationEnabled])
+
+  const scheduleStickyPaginationUpdate = useCallback(() => {
+    if (stickyPaginationFrameRef.current !== undefined) return
+    stickyPaginationFrameRef.current = window.requestAnimationFrame(() => {
+      stickyPaginationFrameRef.current = undefined
+      updateStickyPagination()
+    })
+  }, [updateStickyPagination])
+
+  useEffect(() => {
+    if (!stickyPaginationEnabled) {
+      setStickyPaginationMetrics((previous) =>
+        sameStickyPaginationMetrics(previous, EMPTY_STICKY_PAGINATION_METRICS)
+          ? previous
+          : EMPTY_STICKY_PAGINATION_METRICS)
+      return undefined
+    }
+
+    const root = tableRootRef.current
+    if (!root) return undefined
+    const resizeObserver = new ResizeObserver(scheduleStickyPaginationUpdate)
+    const mutationObserver = new MutationObserver(scheduleStickyPaginationUpdate)
+    resizeObserver.observe(root)
+    mutationObserver.observe(root, { childList: true, subtree: true })
+    window.addEventListener('resize', scheduleStickyPaginationUpdate)
+    window.addEventListener('scroll', scheduleStickyPaginationUpdate, true)
+    document.addEventListener('fullscreenchange', scheduleStickyPaginationUpdate)
+    scheduleStickyPaginationUpdate()
+
+    return () => {
+      resizeObserver.disconnect()
+      mutationObserver.disconnect()
+      window.removeEventListener('resize', scheduleStickyPaginationUpdate)
+      window.removeEventListener('scroll', scheduleStickyPaginationUpdate, true)
+      document.removeEventListener('fullscreenchange', scheduleStickyPaginationUpdate)
+      if (stickyPaginationFrameRef.current !== undefined) {
+        window.cancelAnimationFrame(stickyPaginationFrameRef.current)
+        stickyPaginationFrameRef.current = undefined
+      }
+    }
+  }, [scheduleStickyPaginationUpdate, stickyPaginationEnabled])
 
   const loadOptions = useCallback(async () => {
     if (!filterOptionsRequest) return
@@ -335,8 +461,25 @@ const SmartDataTable = forwardRef(function SmartDataTable(
       })
     : null
 
+  const tableRootClassName = appendClassName(
+    'srf-smart-data-table',
+    stickyPaginationMetrics.fixed ? 'srf-smart-data-table--pagination-fixed' : '',
+  )
+  const tableRootStyle = {
+    width: '100%',
+    '--srf-sticky-pagination-height': `${stickyPaginationMetrics.height}px`,
+    '--srf-sticky-pagination-left': `${stickyPaginationMetrics.left}px`,
+    '--srf-sticky-pagination-width': `${stickyPaginationMetrics.width}px`,
+  }
+
   return (
-    <Space className="srf-smart-data-table" direction="vertical" size={12} style={{ width: '100%' }}>
+    <Space
+      ref={tableRootRef}
+      className={tableRootClassName}
+      direction="vertical"
+      size={12}
+      style={tableRootStyle}
+    >
       {batchContent ? (
         <Alert
           type="info"
@@ -376,9 +519,7 @@ const SmartDataTable = forwardRef(function SmartDataTable(
           setting: { draggable: true },
           ...options,
         }}
-        pagination={pagination === undefined
-          ? dataRequest ? { defaultPageSize: 10, showSizeChanger: true } : false
-          : pagination}
+        pagination={mergedPagination}
         params={externalParams}
         request={dataRequest ? async (params) => {
           try {

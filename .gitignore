@@ -9,6 +9,7 @@ build/
 *.log
 .DS_Store
 release/
+backups/
 
 # 后端运行时产物
 *.sqlite3

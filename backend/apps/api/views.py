@@ -38,7 +38,6 @@ from apps.ingestion.sources import (
     RESUME_SUBDIR,
     import_files,
 )
-from apps.pipeline.ai_config import PUBLIC_AI_CONFIG_REGISTRY
 from apps.pipeline import ai_config, cancellation, runner
 from apps.pipeline.tasks import execute_runs_sequence_task
 from apps.pipeline.services import allocate as allocate_service
@@ -49,7 +48,6 @@ from .result_report import build_result_report
 
 
 CONFIG_REGISTRY = {
-    **PUBLIC_AI_CONFIG_REGISTRY,
     "welink_enabled": {
         "label": "WeLink 下发开关",
         "description": "关闭时仅记录下发状态，不调用真实 WeLink。",
@@ -305,15 +303,15 @@ class MeView(APIView):
 
 class AllocationModeView(APIView):
     permission_classes = [HasPermissionCode]
-    permission_code = "pipeline.run"
+    permission_code = ["pipeline.run", "resume.import"]
 
     def get(self, request):
-        ai_enabled = ai_config.is_ai_switch_enabled()
+        ai_ready = ai_config.is_ai_available()
         return Response(
             {
-                "mode": "ai" if ai_enabled else "rule",
-                "ai_enabled": ai_enabled,
-                "ai_ready": ai_config.is_ai_connection_tested(),
+                "default_mode": "rule",
+                "available_modes": ai_config.available_allocation_modes(),
+                "ai_ready": ai_ready,
             }
         )
 
@@ -336,7 +334,16 @@ class ImportView(APIView):
         mode = request.data.get("mode", "incremental")
         # 含简历数据的上传：先存撤销快照（上传前状态），再导入
         takes_resume = bool(files.get("resume_list") or files.get("resume_package"))
+        processing_mode = None
         if takes_resume:
+            try:
+                processing_mode = ai_config.validate_allocation_mode(
+                    request.data.get("processing_mode")
+                )
+            except ValueError as exc:
+                return Response(
+                    {"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST
+                )
             snapshot.take_snapshot(label="上传简历前")
         try:
             counts = import_files(files, mode=mode)
@@ -345,19 +352,28 @@ class ImportView(APIView):
                 {"detail": f"导入失败: {exc}"}, status=status.HTTP_400_BAD_REQUEST
             )
         candidate_ids = counts.pop("_candidate_ids", [])
+        warnings = counts.pop("_warnings", [])
         processing_runs = []
         if takes_resume and candidate_ids:
-            run = runner.create_configured_run(
+            run = runner.create_run(
                 "resume_process",
+                mode=processing_mode,
                 scope={"candidate_ids": candidate_ids, "source": "resume_import"},
                 created_by=request.user,
             )
             processing_runs = [run]
             submit_processing_runs(processing_runs)
+        skipped_jobs = counts.get("jobs_skipped", 0)
+        detail = (
+            f"导入完成，已跳过 {skipped_jobs} 条缺少工作职责的岗位"
+            if skipped_jobs
+            else "导入完成"
+        )
         return Response(
             {
-                "detail": "导入完成",
+                "detail": detail,
                 "counts": counts,
+                "warnings": warnings,
                 "undo_available": takes_resume,
                 "processing_runs": serializers.ProcessingRunSerializer(
                     processing_runs, many=True
@@ -560,6 +576,10 @@ class CandidateViewSet(PermissionedModelViewSet):
                 "resumes",
                 "resumes__job__department__parent",
                 Prefetch("workflow__attempts", queryset=attempts),
+                Prefetch(
+                    "processing_scope_items",
+                    queryset=m.ProcessingRunScopeItem.objects.order_by("created_at", "id"),
+                ),
             )
             .select_related(
                 "first_degree_tag",
@@ -845,6 +865,8 @@ class JobViewSet(PermissionedModelViewSet):
             qs = qs.filter(education__in=education_values)
         elif p.get("education"):
             qs = qs.filter(education__icontains=p["education"])
+        if p.get("responsibilities"):
+            qs = qs.filter(responsibilities__icontains=p["responsibilities"])
         if p.get("headcount"):
             qs = qs.filter(headcount=p["headcount"])
         is_public = bool_query_value(p.get("is_public"))
@@ -1493,9 +1515,9 @@ class AgentDispatchDecisionViewSet(PermissionedReadOnlyModelViewSet):
 
     @action(detail=True, methods=["post"], url_path="retry")
     def retry(self, request, pk=None):
-        if not ai_config.is_ai_enabled():
+        if not ai_config.is_ai_available():
             return Response(
-                {"detail": "AI 分配当前未开启或模型连接尚未测试成功"},
+                {"detail": "当前模型连接尚未测试成功，不能重试 AI"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         decision = self.get_object()
@@ -1553,9 +1575,9 @@ class PipelineRunView(APIView):
 
     def post(self, request):
         step = request.data.get("step", "all")
-        if "modes" in request.data or "mode" in request.data:
+        if "modes" in request.data:
             return Response(
-                {"detail": "分配方式由系统参数统一决定，请勿在请求中指定模式"},
+                {"detail": "单次处理只能选择一个 mode，不接受 modes"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         scope = request.data.get("scope") or {}
@@ -1605,7 +1627,13 @@ class PipelineRunView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
         try:
-            run = runner.create_configured_run(step, scope=scope, created_by=request.user)
+            mode = ai_config.validate_allocation_mode(request.data.get("mode"))
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            run = runner.create_run(
+                step, mode=mode, scope=scope, created_by=request.user
+            )
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         runs = [run]
@@ -1670,7 +1698,7 @@ class PermissionTreeView(APIView):
 
 class ConfigViewSet(viewsets.ViewSet):
     permission_classes = [HasPermissionCode]
-    permission_code = "settings.manage_config"
+    permission_code = ["settings.manage_config", "department.manage"]
 
     def _item_data(self, key):
         meta = CONFIG_REGISTRY[key]
@@ -1716,23 +1744,55 @@ class ConfigViewSet(viewsets.ViewSet):
                     {"detail": f"配置值必须在 {meta.get('min')} 到 {meta.get('max')} 之间"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-        if pk == "ai_review_threshold":
-            dispatch = ai_config._config_float("ai_dispatch_threshold")
-            if float(value) > dispatch:
-                return Response({"detail": "人工复核阈值不能高于自动下发阈值"}, status=status.HTTP_400_BAD_REQUEST)
-        if pk == "ai_dispatch_threshold":
-            review = ai_config._config_float("ai_review_threshold")
-            if float(value) < review:
-                return Response({"detail": "自动下发阈值不能低于人工复核阈值"}, status=status.HTTP_400_BAD_REQUEST)
-        if pk == "ai_enabled" and value and not ai_config.is_ai_connection_tested():
-            return Response(
-                {"detail": "当前模型连接尚未测试成功，不能开启 AI 分配"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
         m.Config.objects.update_or_create(
             key=pk, defaults={"value": value}
         )
         return Response(self._item_data(pk))
+
+
+class AIConnectionSettingsView(APIView):
+    """AI 运行参数与专项分流配置，和模型连接使用同一权限边界。"""
+
+    permission_classes = [HasPermissionCode]
+    permission_code = "settings.manage_ai_connection"
+
+    def get(self, request):
+        contacts = m.Contact.objects.filter(is_active=True).select_related("department")
+        return Response(
+            {
+                "settings": ai_config.list_public_ai_config_items(),
+                "contacts": [
+                    {
+                        "id": contact.id,
+                        "name": contact.name,
+                        "employee_no": contact.employee_no,
+                        "contact_level": contact.contact_level,
+                        "department": contact.department_id,
+                        "department_name": contact.department.name if contact.department else "",
+                        "parent_department": (
+                            contact.department.parent_id if contact.department else None
+                        ),
+                    }
+                    for contact in contacts
+                ],
+            }
+        )
+
+
+class AIConnectionSettingDetailView(APIView):
+    permission_classes = [HasPermissionCode]
+    permission_code = "settings.manage_ai_connection"
+
+    def patch(self, request, key):
+        if key not in ai_config.PUBLIC_AI_CONFIG_REGISTRY:
+            return Response(
+                {"detail": "未知 AI 配置项"}, status=status.HTTP_404_NOT_FOUND
+            )
+        try:
+            item = ai_config.save_public_ai_config(key, request.data.get("value"))
+        except (TypeError, ValueError) as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(item)
 
 
 class AIConnectionConfigView(APIView):

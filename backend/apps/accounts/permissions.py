@@ -49,6 +49,13 @@ PERMISSION_TREE = [
         ],
     },
     {
+        "code": "analytics",
+        "name": "招聘分析",
+        "children": [
+            {"code": "analytics.view", "name": "查看招聘分析"},
+        ],
+    },
+    {
         "code": "settings",
         "name": "系统设置",
         "children": [
@@ -78,6 +85,7 @@ ROLE_PERMISSION_CODES = {
         "attempt.export",
         "pipeline.run",
         "pipeline.view",
+        "analytics.view",
         "settings.manage_config",
     ],
     "二级接口人": [

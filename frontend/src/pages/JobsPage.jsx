@@ -6,6 +6,7 @@ import {
   ProFormSelect,
   ProFormSwitch,
   ProFormText,
+  ProFormTextArea,
 } from '@ant-design/pro-components'
 import { Button, Popconfirm, Space, Tag, message } from 'antd'
 import {
@@ -70,6 +71,14 @@ export default function JobsPage() {
       dataIndex: 'category',
       width: 120,
       filter: { type: 'select', param: 'category_in', multiple: true, options: 'category' },
+    },
+    {
+      title: '工作职责',
+      dataIndex: 'responsibilities',
+      width: 280,
+      ellipsis: { showTitle: true },
+      filter: { type: 'text', param: 'responsibilities', placeholder: '筛选工作职责' },
+      render: (value) => value || '-',
     },
     {
       title: '岗位族',
@@ -150,6 +159,7 @@ export default function JobsPage() {
     <PageContainer title="岗位需求" content="校招岗位分类及专业要求，可导入维护。">
       <SmartDataTable
         tableId="jobs"
+        stickyPagination
         actionRef={actionRef}
         rowKey="id"
         columns={baseColumns}
@@ -232,6 +242,16 @@ export default function JobsPage() {
         />
         <ProFormText name="location" label="工作地点" />
         <ProFormText name="education" label="学历要求" />
+        <ProFormTextArea
+          name="responsibilities"
+          label="工作职责"
+          rules={[{ required: true, whitespace: true, message: '请输入工作职责' }]}
+          fieldProps={{
+            autoSize: { minRows: 4, maxRows: 10 },
+            showCount: true,
+          }}
+          placeholder="详细描述岗位负责内容，AI 将结合简历项目、实习和技能进行匹配分析"
+        />
         <ProFormText
           name="major_names"
           label="需求专业"

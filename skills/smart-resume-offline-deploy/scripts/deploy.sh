@@ -95,6 +95,7 @@ fi
 require_value DJANGO_SECRET_KEY
 require_value DJANGO_ALLOWED_HOSTS
 require_value POSTGRES_PASSWORD
+require_value RESTIC_PASSWORD
 
 case "$DEPLOY_MODE" in
   auto)
@@ -135,7 +136,7 @@ if [[ "$DEPLOY_MODE" == "source" ]]; then
   fi
 fi
 
-for service in db redis backend worker ai-worker frontend; do
+for service in db redis backend worker ai-worker frontend backup-scheduler; do
   if ! compose config --services | grep -Fxq "$service"; then
     echo "Compose 缺少必需服务：${service}。AI 分配需要 default worker 和 ai-worker 同时运行。"
     exit 1

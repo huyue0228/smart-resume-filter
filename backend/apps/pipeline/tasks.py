@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 @shared_task
 def execute_runs_sequence_task(run_ids):
-    """依次领取已创建的运行；当前入口通常只提交全局模式对应的一条运行。"""
+    """依次领取已创建的运行；每条运行在提交时已固化用户选择的单一模式。"""
     return [runner.execute_run(run_id).id for run_id in run_ids]
 
 
@@ -94,7 +94,7 @@ def dispatch_ai_run_task(self, run_id):
                 last_heartbeat_at=now,
             )
             m.ProcessingRunStage.objects.filter(
-                run_id=run_id, step="step2", status="running"
+                run_id=run_id, step="step4", status="running"
             ).update(
                 status="failed",
                 error="ai_task_dispatch_failed",
@@ -116,19 +116,29 @@ def _mark_infrastructure_failure(run_id, scope_item_id):
         if item.status in allocate.AI_SCOPE_TERMINAL_STATUSES:
             return {"status": item.status, "already_terminal": True}
         allocate.release_ai_scope_claim(scope_item_id)
-        item.status = "failed"
-        item.error_code = "task_execution_error"
+        item.status = "needs_attention"
+        item.result_type = m.ProcessingRunScopeItem.RESULT_NEEDS_ATTENTION
+        item.reason_code = "ai_connection_error"
+        item.result_message = "AI 候选人任务多次异常，请检查 worker 日志后重试"
+        item.error_code = "ai_connection_error"
         item.error_message = "AI 候选人任务多次异常，请检查 worker 日志后重试"
         item.finished_at = timezone.now()
         item.save(
             update_fields=[
                 "status",
+                "result_type",
+                "reason_code",
+                "result_message",
                 "error_code",
                 "error_message",
                 "finished_at",
             ]
         )
-        return {"status": "failed"}
+        return {
+            "status": "needs_attention",
+            "result_type": m.ProcessingRunScopeItem.RESULT_NEEDS_ATTENTION,
+            "reason_code": "ai_connection_error",
+        }
 
 
 @shared_task(

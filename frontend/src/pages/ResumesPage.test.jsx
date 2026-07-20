@@ -207,7 +207,7 @@ describe('ResumesPage detail', () => {
     runProcess.mockResolvedValue({ success: true })
     fetchAllocationMode.mockReset()
     fetchAllocationMode.mockResolvedValue({
-      data: { mode: 'rule', ai_enabled: false, ai_ready: false },
+      data: { default_mode: 'rule', available_modes: ['rule'], ai_ready: false },
     })
   })
 
@@ -317,9 +317,10 @@ describe('ResumesPage detail', () => {
     await userEvent.click(screen.getByRole('button', { name: '开始处理' }))
 
     await waitFor(() => expect(runProcess).toHaveBeenCalledWith(
-      [{ step: 'step2', label: '简历分类、分配与下发' }],
+      [{ step: 'step2', label: '院校分类 → Rule 前检 → AI 深度筛选' }],
       expect.any(String),
       {
+        mode: 'rule',
         scope: {
           candidate_ids: [1, 2],
           force_reprocess: true,
@@ -332,7 +333,7 @@ describe('ResumesPage detail', () => {
   it('submits status processing with the current table and task filters', async () => {
     roleState.permissions = new Set(['pipeline.run'])
     render(
-      <MemoryRouter initialEntries={['/resumes?processing_run_id=18&processing_result=success']}>
+      <MemoryRouter initialEntries={['/resumes?processing_run_id=18&processing_result=completed']}>
         <ResumesPage />
       </MemoryRouter>,
     )
@@ -343,16 +344,42 @@ describe('ResumesPage detail', () => {
     await userEvent.click(screen.getByRole('button', { name: '开始处理' }))
 
     await waitFor(() => expect(runProcess).toHaveBeenCalledWith(
-      [{ step: 'step2', label: '简历分类、分配与下发' }],
+      [{ step: 'step2', label: '院校分类 → Rule 前检 → AI 深度筛选' }],
       expect.any(String),
       {
+        mode: 'rule',
         scope: {
           system_statuses: ['screening_passed'],
           candidate_filters: {
             name: '张三',
             processing_run_id: '18',
-            processing_result: 'success',
+            processing_result: 'completed',
           },
+        },
+      },
+    ))
+  })
+
+  it('allows selecting AI per processing run only when the connection is ready', async () => {
+    roleState.permissions = new Set(['pipeline.run'])
+    fetchAllocationMode.mockResolvedValue({
+      data: { default_mode: 'rule', available_modes: ['rule', 'ai'], ai_ready: true },
+    })
+    render(<MemoryRouter><ResumesPage /></MemoryRouter>)
+
+    await userEvent.click(screen.getByRole('button', { name: /处理简历/ }))
+    await userEvent.click(await screen.findByText('AI'))
+    await userEvent.click(screen.getByRole('checkbox', { name: '待处理' }))
+    await userEvent.click(screen.getByRole('button', { name: '开始处理' }))
+
+    await waitFor(() => expect(runProcess).toHaveBeenCalledWith(
+      [{ step: 'step2', label: '院校分类 → Rule 前检 → AI 深度筛选' }],
+      '正在重新处理简历（AI）',
+      {
+        mode: 'ai',
+        scope: {
+          system_statuses: ['raw'],
+          candidate_filters: {},
         },
       },
     ))
@@ -361,13 +388,13 @@ describe('ResumesPage detail', () => {
   it('keeps selection but closes old detail when clearing a task result filter', async () => {
     roleState.permissions = new Set(['pipeline.run', 'resume.import'])
     render(
-      <MemoryRouter initialEntries={['/resumes?processing_run_id=18&processing_result=success']}>
+      <MemoryRouter initialEntries={['/resumes?processing_run_id=18&processing_result=completed']}>
         <ResumesPage />
       </MemoryRouter>,
     )
 
     expect(screen.getByTestId('table-candidates').dataset.params).toBe(
-      '{"processing_run_id":"18","processing_result":"success"}',
+      '{"processing_run_id":"18","processing_result":"completed"}',
     )
     await userEvent.click(screen.getByRole('button', { name: '选择两名候选人' }))
     await userEvent.click(screen.getByRole('button', { name: '打开候选人' }))

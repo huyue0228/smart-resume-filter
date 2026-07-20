@@ -221,6 +221,7 @@ export default function UsersPage() {
             children: (
               <SmartDataTable
                 tableId="users"
+                stickyPagination
                 actionRef={userActionRef}
                 rowKey="id"
                 columns={userBaseColumns}
@@ -243,6 +244,7 @@ export default function UsersPage() {
             children: (
               <SmartDataTable
                 tableId="roles"
+                stickyPagination
                 actionRef={roleActionRef}
                 rowKey="id"
                 columns={roleBaseColumns}

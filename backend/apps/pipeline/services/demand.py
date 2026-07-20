@@ -1,4 +1,4 @@
-"""Step4 需求录入：岗位需求在导入时已结构化，此步做汇总核对。"""
+"""岗位需求汇总兼容工具；需求维护属于基础数据准备，不再占用流水线步骤。"""
 from django.db.models import Sum
 
 from apps.core import models as m

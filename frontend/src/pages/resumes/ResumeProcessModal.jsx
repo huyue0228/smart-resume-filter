@@ -1,14 +1,17 @@
-import { Checkbox, Modal, Space, Tag, Typography } from 'antd'
+import { Checkbox, Modal, Space, Typography } from 'antd'
+import AllocationModeToggle from '../../components/AllocationModeToggle'
 
 export default function ResumeProcessModal({
   open,
   processing,
-  allocationMode,
+  allocationAvailability,
+  selectedMode,
   processCurrentSelected,
   processCandidateCount,
   processStatusSelection,
   statusOptions,
   onCurrentSelectedChange,
+  onModeChange,
   onStatusChange,
   onConfirm,
   onCancel,
@@ -20,7 +23,12 @@ export default function ResumeProcessModal({
       okText="开始处理"
       cancelText="取消"
       confirmLoading={processing}
-      okButtonProps={{ disabled: !processCurrentSelected && !processStatusSelection.length }}
+      okButtonProps={{
+        disabled: (
+          (!processCurrentSelected && !processStatusSelection.length)
+          || (selectedMode === 'ai' && !allocationAvailability.ai_ready)
+        ),
+      }}
       onOk={onConfirm}
       onCancel={onCancel}
     >
@@ -28,13 +36,15 @@ export default function ResumeProcessModal({
         <Typography.Text>
           选择当前勾选的候选人，或按简历状态重新处理。两种范围互斥，系统会保留历史分配与反馈记录。
         </Typography.Text>
-        <Space>
-          <Typography.Text>当前系统分配模式：</Typography.Text>
-          <Tag color={allocationMode.mode === 'ai' ? 'purple' : 'blue'}>
-            {allocationMode.mode === 'ai' ? 'AI 分配' : '规则分配'}
-          </Tag>
-          {allocationMode.mode === 'ai' && !allocationMode.ai_ready && (
-            <Typography.Text type="danger">模型连接尚未测试成功</Typography.Text>
+        <Space direction="vertical" size={6}>
+          <Typography.Text strong>分配模式</Typography.Text>
+          <AllocationModeToggle
+            value={selectedMode}
+            aiReady={allocationAvailability.ai_ready}
+            onChange={onModeChange}
+          />
+          {!allocationAvailability.ai_ready && (
+            <Typography.Text type="secondary">AI 当前不可用，本次只能选择 Rule。</Typography.Text>
           )}
         </Space>
         <Checkbox

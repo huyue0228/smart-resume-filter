@@ -64,14 +64,54 @@ const RESUME_IMPORT_FIELDS = [
   { key: 'resume_package', label: '② 简历包 (.zip，文件名含应聘ID)', accept: '.zip' },
 ]
 
+const DEFAULT_ALLOCATION_AVAILABILITY = {
+  default_mode: 'rule',
+  available_modes: ['rule'],
+  ai_ready: false,
+}
+
 const PROCESSING_RESULT_LABELS = {
-  success: '成功',
+  success: '处理完成',
+  completed: '处理完成',
+  needs_attention: '需处理',
   failed: '失败',
   review: '待复核',
   dispatch: '待下发',
   archive: '归档',
   skipped: '跳过',
   cancelled: '取消',
+}
+
+const PROCESSING_RESULT_META = {
+  completed: { text: '处理完成', color: 'success' },
+  needs_attention: { text: '需处理', color: 'warning' },
+  failed: { text: '失败', color: 'error' },
+  cancelled: { text: '已取消', color: 'default' },
+}
+
+const REASON_CODE_OPTIONS = {
+  education_not_eligible: '学历不符合',
+  school_not_eligible: '院校不符合',
+  job_not_found: '缺少匹配岗位',
+  job_responsibility_missing: '岗位缺少工作职责',
+  secondary_department_missing: '缺少岗位二级部门',
+  secondary_contact_missing: '缺少二级接口人',
+  major_not_matched: '专业不匹配',
+  llm_timeout: '模型超时',
+  resume_text_unavailable: '简历正文不可用',
+  ai_connection_error: 'AI 连接异常',
+  ai_rate_limited: 'AI 限流',
+  ai_invalid_output: 'AI 输出不合法',
+  ai_reference_invalidated: 'AI 引用已失效',
+  ai_special_route_unavailable: 'AI 专项分流配置不可用',
+  ai_special_route: 'AI 专项强制分配',
+  rule_assigned: 'Rule 分配成功',
+  ai_dispatched: 'AI 建议下发',
+  ai_review: 'AI 待复核',
+  ai_archived: 'AI 建议归档',
+  terminal_workflow: '已处于终态',
+  no_resume_available: '无可处理志愿',
+  cancelled: '任务已取消',
 }
 
 const ENTITY_TAG_COLORS = [
@@ -196,7 +236,8 @@ export default function ResumesPage() {
   const [processStatusSelection, setProcessStatusSelection] = useState([])
   const [processCurrentSelected, setProcessCurrentSelected] = useState(false)
   const [processCandidateSnapshot, setProcessCandidateSnapshot] = useState([])
-  const [allocationMode, setAllocationMode] = useState({ mode: 'rule', ai_enabled: false, ai_ready: false })
+  const [allocationAvailability, setAllocationAvailability] = useState(DEFAULT_ALLOCATION_AVAILABILITY)
+  const [processMode, setProcessMode] = useState('rule')
   const [lastQuery, setLastQuery] = useState({})
   const [selectedRowKeys, setSelectedRowKeys] = useState([])
   const [bulkDispatching, setBulkDispatching] = useState(false)
@@ -300,14 +341,25 @@ export default function ResumesPage() {
     }
   }
 
-  useEffect(() => {
-    if (canImport) refreshUndo()
-    if (canRunPipeline) {
-      fetchAllocationMode()
-        .then(({ data }) => setAllocationMode(data || { mode: 'rule', ai_enabled: false, ai_ready: false }))
-        .catch(() => setAllocationMode({ mode: 'rule', ai_enabled: false, ai_ready: false }))
+  const refreshAllocationAvailability = useCallback(async () => {
+    if (!canRunPipeline && !canImport) return DEFAULT_ALLOCATION_AVAILABILITY
+    try {
+      const { data } = await fetchAllocationMode()
+      const availability = data || DEFAULT_ALLOCATION_AVAILABILITY
+      setAllocationAvailability(availability)
+      if (!availability.ai_ready) setProcessMode('rule')
+      return availability
+    } catch {
+      setAllocationAvailability(DEFAULT_ALLOCATION_AVAILABILITY)
+      setProcessMode('rule')
+      return DEFAULT_ALLOCATION_AVAILABILITY
     }
   }, [canImport, canRunPipeline])
+
+  useEffect(() => {
+    if (canImport) refreshUndo()
+    refreshAllocationAvailability()
+  }, [canImport, refreshAllocationAvailability])
 
   useEffect(() => {
     if (!detailRecord) {
@@ -482,7 +534,7 @@ export default function ResumesPage() {
     }
   }
 
-  // 导入接口已在服务端创建并提交 Step1 → Step2 后台任务，页面无需等待执行完成。
+  // 导入接口已在服务端创建完整 Rule-first 后台任务，页面无需等待执行完成。
   const handleImported = async (data) => {
     await refreshUndo()
     await actionRef.current?.reloadOptions()
@@ -604,7 +656,9 @@ export default function ResumesPage() {
     setProcessCandidateSnapshot([...selectedRowKeys])
     setProcessCurrentSelected(false)
     setProcessStatusSelection([])
+    setProcessMode('rule')
     setProcessModalOpen(true)
+    refreshAllocationAvailability()
   }
 
   const handleCurrentSelectedChange = (event) => {
@@ -624,6 +678,10 @@ export default function ResumesPage() {
       message.warning('请先勾选当前选中或需要处理的简历状态')
       return
     }
+    if (processMode === 'ai' && !allocationAvailability.ai_ready) {
+      message.warning('当前模型连接尚未测试成功，不能选择 AI 分配')
+      return
+    }
     setProcessing(true)
     try {
       const scope = buildResumeProcessingScope({
@@ -633,9 +691,9 @@ export default function ResumesPage() {
         lastQuery,
       })
       const r = await run(
-        [{ step: 'step2', label: '简历分类、分配与下发' }],
-        `正在重新处理简历（${allocationMode.mode === 'ai' ? 'AI' : '规则'}）`,
-        { scope },
+        [{ step: 'step2', label: '院校分类 → Rule 前检 → AI 深度筛选' }],
+        `正在重新处理简历（${processMode === 'ai' ? 'AI' : '规则'}）`,
+        { scope, mode: processMode },
       )
       if (r.success) {
         message.success('已提交重新处理任务，可继续操作并在任务中心查看进度')
@@ -857,6 +915,23 @@ export default function ResumesPage() {
       },
     },
     {
+      title: '处理结果',
+      dataIndex: 'processing_result',
+      width: 110,
+      filter: {
+        type: 'select',
+        param: 'result_type',
+        options: Object.entries(PROCESSING_RESULT_META).map(([value, item]) => ({
+          value,
+          label: item.text,
+        })),
+      },
+      render: (value) => {
+        const item = PROCESSING_RESULT_META[value]
+        return item ? <Tag color={item.color}>{item.text}</Tag> : '-'
+      },
+    },
+    {
       title: '原因',
       dataIndex: 'reason_type',
       width: 240,
@@ -868,7 +943,11 @@ export default function ResumesPage() {
           { text: item.text },
         ]),
       ),
-      filter: { type: 'select', param: 'reason_type', options: Object.entries(REASON_TYPE).filter(([value]) => value !== 'none').map(([value, item]) => ({ value, label: item.text })) },
+      filter: {
+        type: 'select',
+        param: 'reason_code',
+        options: Object.entries(REASON_CODE_OPTIONS).map(([value, label]) => ({ value, label })),
+      },
       render: (_, record) => {
         const type = record.reason_type || 'none'
         const item = REASON_TYPE[type] || REASON_TYPE.none
@@ -876,7 +955,9 @@ export default function ResumesPage() {
         return (
           <Tooltip title={reasonText}>
             <Space size={4}>
-              <Tag color={item.color}>{item.text}</Tag>
+              <Tag color={item.color}>
+                {REASON_CODE_OPTIONS[record.reason_code] || item.text}
+              </Tag>
               <Typography.Text ellipsis style={{ maxWidth: 150 }}>
                 {reasonText}
               </Typography.Text>
@@ -903,6 +984,7 @@ export default function ResumesPage() {
       )}
       <SmartDataTable
         tableId="candidates"
+        stickyPagination
         actionRef={actionRef}
         rowKey="id"
         columns={baseColumns}
@@ -989,7 +1071,10 @@ export default function ResumesPage() {
             buttonText="上传简历"
             title="上传简历（简历列表 + 简历包），上传后自动处理"
             fields={RESUME_IMPORT_FIELDS}
-              onDone={handleImported}
+            selectProcessingMode
+            aiReady={allocationAvailability.ai_ready}
+            onBeforeOpen={refreshAllocationAvailability}
+            onDone={handleImported}
           />,
           canRunPipeline && <Button
             key="process"
@@ -1045,12 +1130,14 @@ export default function ResumesPage() {
       <ResumeProcessModal
         open={processModalOpen}
         processing={processing}
-        allocationMode={allocationMode}
+        allocationAvailability={allocationAvailability}
+        selectedMode={processMode}
         processCurrentSelected={processCurrentSelected}
         processCandidateCount={processCandidateSnapshot.length}
         processStatusSelection={processStatusSelection}
         statusOptions={SYSTEM_STATUS_OPTIONS}
         onCurrentSelectedChange={handleCurrentSelectedChange}
+        onModeChange={setProcessMode}
         onStatusChange={handleProcessStatusChange}
         onConfirm={handleConfirmProcess}
         onCancel={() => {
@@ -1275,8 +1362,18 @@ export default function ResumesPage() {
                     render: (value) => (value == null ? '-' : `${Math.round(value * 100)}%`),
                   },
                   {
-                    title: '推荐岗位',
-                    dataIndex: 'recommended_job_name',
+                    title: 'AI 专项',
+                    key: 'ai_specialist',
+                    width: 120,
+                    render: (_, decision) => decision.ai_specialist_match ? (
+                      <Tag color={decision.special_route_applied ? 'purple' : 'blue'}>
+                        {decision.special_route_applied ? '已强制分配' : `${Math.round((decision.ai_specialist_confidence || 0) * 100)}%`}
+                      </Tag>
+                    ) : '-',
+                  },
+                  {
+                    title: '固定评估岗位',
+                    dataIndex: 'evaluated_job_name',
                     ellipsis: true,
                   },
                   {
@@ -1294,11 +1391,11 @@ export default function ResumesPage() {
                       <Space>
                         <a onClick={() => setAgentDecisionDetail(decision)}>详情</a>
                         {(decision.error_code || decision.recommendation === 'archive') && hasPermission('attempt.dispatch') && (
-                          <Tooltip title={allocationMode.mode !== 'ai' || !allocationMode.ai_ready ? 'AI 分配未开启或模型连接未测试成功' : ''}>
+                          <Tooltip title={!allocationAvailability.ai_ready ? '模型连接尚未测试成功' : ''}>
                             <Button
                               type="link"
                               size="small"
-                              disabled={allocationMode.mode !== 'ai' || !allocationMode.ai_ready}
+                              disabled={!allocationAvailability.ai_ready}
                               loading={retryingDecisionId === decision.id}
                               onClick={() => handleRetryAgentDecision(decision)}
                             >
@@ -1330,8 +1427,16 @@ export default function ResumesPage() {
             <Descriptions.Item label="置信度">
               {agentDecisionDetail.confidence_score == null ? '-' : `${Math.round(agentDecisionDetail.confidence_score * 100)}%`}
             </Descriptions.Item>
-            <Descriptions.Item label="推荐岗位">{agentDecisionDetail.recommended_job_name || '-'}</Descriptions.Item>
-            <Descriptions.Item label="推荐二级部门">{agentDecisionDetail.recommended_department_name || '-'}</Descriptions.Item>
+            <Descriptions.Item label="固定评估岗位">{agentDecisionDetail.evaluated_job_name || '-'}</Descriptions.Item>
+            <Descriptions.Item label="Rule 固定二级部门">{agentDecisionDetail.recommended_department_name || '-'}</Descriptions.Item>
+            <Descriptions.Item label="AI 专项匹配">
+              {agentDecisionDetail.ai_specialist_match
+                ? `${Math.round((agentDecisionDetail.ai_specialist_confidence || 0) * 100)}%${agentDecisionDetail.special_route_applied ? '（已强制分配）' : ''}`
+                : '未命中'}
+            </Descriptions.Item>
+            <Descriptions.Item label="专项证据" span={2}>
+              {(agentDecisionDetail.ai_specialist_evidence || []).join('；') || '-'}
+            </Descriptions.Item>
             <Descriptions.Item label="摘要" span={2}>{agentDecisionDetail.summary || '-'}</Descriptions.Item>
             <Descriptions.Item label="理由" span={2}>{agentDecisionDetail.reason || '-'}</Descriptions.Item>
             <Descriptions.Item label="简历证据" span={2}>{(agentDecisionDetail.evidence || []).join('；') || '-'}</Descriptions.Item>

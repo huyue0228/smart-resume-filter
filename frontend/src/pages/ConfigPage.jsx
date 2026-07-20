@@ -3,11 +3,9 @@ import { Tabs } from 'antd'
 import MajorDictionaryTab from './config/MajorDictionaryTab'
 import SchoolAdmissionRulesTab from './config/SchoolAdmissionRulesTab'
 import SchoolTagsTab from './config/SchoolTagsTab'
-import SystemConfigTab from './config/SystemConfigTab'
 
 export default function ConfigPage() {
   const items = [
-    { key: 'configs', label: '系统参数', children: <SystemConfigTab /> },
     { key: 'school-tags', label: '院校标签字典', children: <SchoolTagsTab /> },
     {
       key: 'school-rules',
@@ -21,8 +19,13 @@ export default function ConfigPage() {
     },
   ]
   return (
-    <PageContainer title="配置项">
-      <Tabs items={items} />
+    <PageContainer title="配置项" className="config-page">
+      <Tabs
+        className="config-page-tabs"
+        defaultActiveKey="school-tags"
+        tabPosition="top"
+        items={items}
+      />
     </PageContainer>
   )
 }

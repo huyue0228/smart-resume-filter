@@ -14,15 +14,10 @@ from django.db import transaction
 from django.utils import timezone
 
 PUBLIC_AI_CONFIG_REGISTRY = {
-    "ai_enabled": {
-        "label": "AI 分配开关",
-        "description": "关闭时新任务只运行规则分配；开启时新任务只运行 AI 分配。",
-        "value_type": "boolean",
-        "default": False,
-    },
     "ai_dispatch_threshold": {
         "label": "AI 自动下发阈值",
         "description": "置信度大于等于该值时，AI 建议可进入待下发。",
+        "section": "runtime",
         "value_type": "number",
         "default": 0.75,
         "min": 0,
@@ -31,6 +26,7 @@ PUBLIC_AI_CONFIG_REGISTRY = {
     "ai_review_threshold": {
         "label": "AI 人工复核阈值",
         "description": "置信度大于等于该值且低于自动下发阈值时，进入 HR 复核。",
+        "section": "runtime",
         "value_type": "number",
         "default": 0.5,
         "min": 0,
@@ -39,6 +35,7 @@ PUBLIC_AI_CONFIG_REGISTRY = {
     "ai_timeout_seconds": {
         "label": "AI 超时时间",
         "description": "单次 AI 调用超时时间，单位秒。",
+        "section": "runtime",
         "value_type": "integer",
         "default": 60,
         "min": 5,
@@ -47,6 +44,7 @@ PUBLIC_AI_CONFIG_REGISTRY = {
     "ai_concurrency": {
         "label": "AI 并发上限",
         "description": "所有后台任务共享的模型调用并发上限；系统会根据限流情况自动升降。",
+        "section": "runtime",
         "value_type": "integer",
         "default": 8,
         "min": 1,
@@ -55,6 +53,7 @@ PUBLIC_AI_CONFIG_REGISTRY = {
     "ai_retry_count": {
         "label": "AI 重试次数",
         "description": "AI 失败后允许自动重试的次数。",
+        "section": "runtime",
         "value_type": "integer",
         "default": 1,
         "min": 0,
@@ -63,10 +62,43 @@ PUBLIC_AI_CONFIG_REGISTRY = {
     "ai_retry_backoff_seconds": {
         "label": "AI 重试退避",
         "description": "AI 重试间隔，单位秒。",
+        "section": "runtime",
         "value_type": "integer",
         "default": 10,
         "min": 0,
         "max": 300,
+    },
+    "ai_special_route_enabled": {
+        "label": "AI 专项强制分配",
+        "description": "命中 AI 专项人才条件后，自动强制分配至配置的三级接口人。",
+        "section": "special_route",
+        "value_type": "boolean",
+        "default": False,
+    },
+    "ai_special_route_threshold": {
+        "label": "AI 专项分流阈值",
+        "description": "专项置信度必须严格大于该值才触发；默认 0.90。",
+        "section": "special_route",
+        "value_type": "number",
+        "default": 0.9,
+        "min": 0.9,
+        "max": 1,
+    },
+    "ai_special_route_secondary_contact_id": {
+        "label": "AI 专项父级二级接口人",
+        "description": "专项强制分配写入的父级二级接口人；0 表示未配置。",
+        "section": "special_route",
+        "value_type": "integer",
+        "default": 0,
+        "min": 0,
+    },
+    "ai_special_route_tertiary_contact_id": {
+        "label": "AI 专项目标三级接口人",
+        "description": "专项强制分配的固定三级接口人；0 表示未配置。",
+        "section": "special_route",
+        "value_type": "integer",
+        "default": 0,
+        "min": 0,
     },
 }
 
@@ -102,6 +134,26 @@ class AIRuntimeConfig:
     concurrency: int
     retry_count: int
     retry_backoff_seconds: int
+
+
+@dataclass(frozen=True)
+class AISpecialRouteConfig:
+    enabled: bool
+    threshold: float
+    secondary_contact_id: int
+    tertiary_contact_id: int
+
+    def snapshot(self):
+        payload = {
+            "enabled": self.enabled,
+            "threshold": self.threshold,
+            "secondary_contact_id": self.secondary_contact_id,
+            "tertiary_contact_id": self.tertiary_contact_id,
+        }
+        payload["version"] = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:16]
+        return payload
 
 
 def _connection_value(name):
@@ -153,6 +205,7 @@ def save_ai_connection_config(payload):
     api_key_value = (api_key_value or "").strip()
     from apps.core import models as m
 
+    m.Config.objects.filter(key="ai_enabled").delete()
     previous_base_url = _connection_value("base_url")
     base_url_unchanged = _base_urls_match(previous_base_url, normalized_base_url)
     for field in ["api_style", "model_name", "base_url"]:
@@ -172,7 +225,7 @@ def save_ai_connection_config(payload):
     elif not base_url_unchanged:
         # 访问令牌只绑定原 Base URL，不得在地址变化后静默转发到新服务。
         m.Config.objects.filter(key=AI_CONNECTION_CONFIG_KEYS["api_key"]).delete()
-    invalidate_ai_connection_test(disable_ai=True)
+    invalidate_ai_connection_test()
 
 
 def _connection_fingerprint():
@@ -189,14 +242,12 @@ def _connection_fingerprint():
     ).hexdigest()
 
 
-def invalidate_ai_connection_test(*, disable_ai=False):
+def invalidate_ai_connection_test():
     from apps.core import models as m
 
     m.Config.objects.filter(
         key__in=[AI_CONNECTION_TEST_FINGERPRINT_KEY, AI_CONNECTION_TESTED_AT_KEY]
     ).delete()
-    if disable_ai:
-        m.Config.objects.update_or_create(key="ai_enabled", defaults={"value": False})
 
 
 def mark_ai_connection_tested():
@@ -229,16 +280,19 @@ def is_ai_connection_tested():
         return False
 
 
-def is_ai_switch_enabled():
-    return bool(_config_value("ai_enabled", False))
+def available_allocation_modes():
+    modes = ["rule"]
+    if is_ai_connection_tested():
+        modes.append("ai")
+    return modes
 
 
-def allocation_mode():
-    if not is_ai_switch_enabled():
-        return "rule"
-    if not is_ai_connection_tested():
-        raise ValueError("AI 分配已开启，但当前模型连接尚未测试成功")
-    return "ai"
+def validate_allocation_mode(mode):
+    if mode not in {"rule", "ai"}:
+        raise ValueError("分配模式必须是 rule 或 ai")
+    if mode == "ai" and not is_ai_connection_tested():
+        raise ValueError("当前模型连接尚未测试成功，不能选择 AI 分配")
+    return mode
 
 
 def get_ai_connection_status():
@@ -255,12 +309,9 @@ def get_ai_connection_status():
     }
 
 
-def is_ai_enabled():
-    """AI 仅在全局开关开启且当前连接测试通过时可提交新调用。"""
-    try:
-        return allocation_mode() == "ai"
-    except (RuntimeError, ValueError):
-        return False
+def is_ai_available():
+    """当前连接已通过与完整配置指纹一致的真实测试时，AI 模式可用。"""
+    return is_ai_connection_tested()
 
 
 def get_ai_model_config():
@@ -276,7 +327,7 @@ def get_ai_model_config():
     return AIModelConfig(
         api_style=api_style,
         model_name=model_name,
-        prompt_version="resume-screening-v1",
+        prompt_version="resume-screening-v2",
         decision_version="decision-v1",
         profile_version="profile-v1",
         parser_version="pypdf-ocr-v2",
@@ -363,3 +414,94 @@ def get_ai_runtime_config():
         retry_count=_config_int("ai_retry_count"),
         retry_backoff_seconds=_config_int("ai_retry_backoff_seconds"),
     )
+
+
+def get_ai_special_route_config(*, overrides=None, validate=False):
+    """读取专项强制分配配置，并在启用时校验接口人层级和部门关系。"""
+    overrides = overrides or {}
+
+    def value(key):
+        if key in overrides:
+            return overrides[key]
+        return _config_value(key, PUBLIC_AI_CONFIG_REGISTRY[key]["default"])
+
+    config = AISpecialRouteConfig(
+        enabled=bool(value("ai_special_route_enabled")),
+        threshold=float(value("ai_special_route_threshold")),
+        secondary_contact_id=int(value("ai_special_route_secondary_contact_id") or 0),
+        tertiary_contact_id=int(value("ai_special_route_tertiary_contact_id") or 0),
+    )
+    if not validate or not config.enabled:
+        return config
+
+    from apps.core import models as m
+
+    secondary = m.Contact.objects.select_related("department").filter(
+        pk=config.secondary_contact_id,
+        contact_level=m.Contact.LEVEL_SECONDARY,
+        is_active=True,
+    ).first()
+    tertiary = m.Contact.objects.select_related("department__parent").filter(
+        pk=config.tertiary_contact_id,
+        contact_level=m.Contact.LEVEL_TERTIARY,
+        is_active=True,
+    ).first()
+    if not secondary:
+        raise ValueError("AI 专项分流的二级接口人不存在、未启用或层级不正确")
+    if not tertiary:
+        raise ValueError("AI 专项分流的三级接口人不存在、未启用或层级不正确")
+    if (
+        not secondary.department
+        or secondary.department.level != 2
+        or not tertiary.department
+        or tertiary.department.level != 3
+        or tertiary.department.parent_id != secondary.department_id
+    ):
+        raise ValueError("AI 专项分流的二级、三级接口人不属于同一上下级部门")
+    return config
+
+
+def get_public_ai_config_item(key):
+    if key not in PUBLIC_AI_CONFIG_REGISTRY:
+        raise ValueError("未知 AI 配置项")
+    meta = PUBLIC_AI_CONFIG_REGISTRY[key]
+    return {
+        "key": key,
+        "value": _config_value(key, meta["default"]),
+        **meta,
+    }
+
+
+def list_public_ai_config_items():
+    return [get_public_ai_config_item(key) for key in PUBLIC_AI_CONFIG_REGISTRY]
+
+
+@transaction.atomic
+def save_public_ai_config(key, value):
+    """由 AI 模型连接权限维护运行参数和专项配置。"""
+    if key not in PUBLIC_AI_CONFIG_REGISTRY:
+        raise ValueError("未知 AI 配置项")
+    meta = PUBLIC_AI_CONFIG_REGISTRY[key]
+    value_type = meta["value_type"]
+    if value_type == "boolean":
+        if not isinstance(value, bool):
+            raise ValueError("配置值必须是布尔值")
+    elif value_type in {"number", "integer"}:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("配置值类型不正确")
+        if value_type == "integer" and not isinstance(value, int):
+            raise ValueError("配置值必须是整数")
+        if "min" in meta and value < meta["min"] or "max" in meta and value > meta["max"]:
+            raise ValueError(f"配置值必须在 {meta.get('min')} 到 {meta.get('max')} 之间")
+
+    if key == "ai_review_threshold" and float(value) > _config_float("ai_dispatch_threshold"):
+        raise ValueError("人工复核阈值不能高于自动下发阈值")
+    if key == "ai_dispatch_threshold" and float(value) < _config_float("ai_review_threshold"):
+        raise ValueError("自动下发阈值不能低于人工复核阈值")
+    if key.startswith("ai_special_route_"):
+        get_ai_special_route_config(overrides={key: value}, validate=True)
+
+    from apps.core import models as m
+
+    m.Config.objects.update_or_create(key=key, defaults={"value": value})
+    return get_public_ai_config_item(key)

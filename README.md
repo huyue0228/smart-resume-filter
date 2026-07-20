@@ -1,12 +1,12 @@
 # 智能简历筛选系统
 
-校招智能简历筛选系统。候选人主流程为「Step1 查重与志愿排序 → Step2 简历分类、分配与下发」；院校分类 Step3 和需求数据准备核对 Step4 是分配前置步骤，显式全流程按 `Step3 → Step4 → Step1 → Step2` 执行。系统按正式项目方式建设：后端启用登录与 RBAC 权限校验，前端菜单和按钮由后端权限码驱动；AI Agent 已接入，W3 认证和 WeLink 真实下发仍待外部接口确认。
+校招智能简历筛选系统。候选人采用 Rule-first 主流程：「Step1 查重与志愿排序 → Step2 院校分类及学历/院校准入 → Step3 Rule 前置检查 → Step4 AI 深度筛选（仅 AI 模式）」。岗位需求、部门和接口人是独立维护的基础数据。系统按正式项目方式建设：后端启用登录与 RBAC 权限校验，前端菜单和按钮由后端权限码驱动；AI Agent 与专项强制分流已接入，W3 认证和 WeLink 真实下发仍待外部接口确认。
 
 设计文档以 [`docs/需求描述.md`](docs/需求描述.md)、[`docs/后端设计.md`](docs/后端设计.md)、[`docs/数据库设计.md`](docs/数据库设计.md)、[`docs/前端设计.md`](docs/前端设计.md) 为准。
 
-当前实现已包含：候选人聚合简历库、表头筛选、可拖拽列宽、候选人/分配尝试 PDF 预览、按当前筛选导出单个原文件或 zip、Token 登录、RBAC 权限控制、部门接口人导入自动创建账号，以及真实 PDF 解析、OpenAI 结构化输出、后端评分护栏、AI 决策审计和 HR 处置闭环。
+当前实现已包含：候选人聚合简历库、招聘分析看板、精确处理结果/原因筛选、可拖拽列宽、PDF 预览和筛选导出、Token 登录、RBAC、加密增量备份与隔离恢复演练，以及 Rule-first 流程、真实 PDF/OCR 解析、OpenAI 结构化输出、AI 专项强制分配、决策审计和 HR 处置闭环。
 
-> 上生产前仍需完成真实数据隐私评审、模型评测、容量压测和外部系统联调；扫描件 PDF 当前不含 OCR，需要先转为可提取文本的 PDF。
+> 上生产前仍需完成真实数据隐私评审、模型评测、容量压测和外部系统联调；本轮不包含 worker heartbeat 超时恢复、Prometheus/集中日志/告警、3 万条压测、CI 或浏览器 E2E。
 
 关键实现落点：
 
@@ -123,11 +123,13 @@ cp .env.example .env
 
 - `DJANGO_SECRET_KEY`：换成随机长字符串。
 - `POSTGRES_PASSWORD`：换成强密码。
+- `RESTIC_PASSWORD`：换成独立强密码，不得与数据库密码或 `DJANGO_SECRET_KEY` 相同。
+- `BACKUP_TARGET_PATH`：生产环境指向异机挂载或外置磁盘，不要放在 Docker 数据卷所在的同一块本机磁盘。
 - `DJANGO_ALLOWED_HOSTS`：填服务器 IP 或域名，多个值用英文逗号分隔。
 - `APP_VERSION`：建议发布时改成明确版本号，如 `2026-07-03-1`，方便回滚和排查。
 - `DOCKER_PLATFORM`：内网服务器是常见 x86_64 Linux 时保持 `linux/amd64`；如果是 ARM 服务器，改成 `linux/arm64` 后重新构建镜像包。
 
-启用 AI 模式前，使用管理员账号进入「系统设置 → AI 模型连接」完成连接配置并执行测试。内网 DeepSeek V4 与 GLM 4.7 共用同一地址；页面配置 Base URL、可选访问令牌和 API 风格，并通过该地址的 OpenAI-compatible `GET /models` 获取模型 ID（也可直接输入），不配置服务商/Profile。模型连接只从系统设置中的数据库配置读取，部署环境变量不会参与决定。API Key 非空时仅允许写入并加密保存，页面和 API 均不会回显；无鉴权内网服务可留空。未配置可用连接时 AI 会写入 `ai_not_configured` 失败决策，不会回退 Rule。
+启用 AI 模式前，使用管理员账号进入「系统设置 → AI 模型连接」完成连接配置并执行测试。内网 DeepSeek V4 与 GLM 4.7 共用同一地址；页面配置 Base URL、可选访问令牌和 API 风格，并通过该地址的 OpenAI-compatible `GET /models` 获取模型 ID（也可直接输入），不配置服务商/Profile。模型连接只从系统设置中的数据库配置读取，部署环境变量不会参与决定。API Key 非空时仅允许写入并加密保存，页面和 API 均不会回显；无鉴权内网服务可留空。未配置可用连接时内部决策可记录 `ai_not_configured`，候选人级统一映射为 `needs_attention + ai_connection_error`，不会回退 Rule。
 
 `RUN_SEED_BASE` 默认保持 `0`。不要在长期运行环境里把它改成 `1`，否则每次 backend 重启都可能把配置页中的参数重置为种子默认值。首次初始化请使用下一节的一次性 `init` 命令。
 
@@ -141,7 +143,7 @@ docker compose --profile init run --rm init
 docker compose up -d
 ```
 
-首次执行 `docker compose build` 会下载基础镜像、安装依赖并生成后端、前端、PostgreSQL、Redis 四个项目镜像，时间会比较久。查看启动状态：
+首次执行 `docker compose build` 会下载基础镜像、安装依赖并生成后端、前端、PostgreSQL、Redis、backup 五个项目镜像，时间会比较久。查看启动状态：
 
 ```bash
 docker compose ps
@@ -257,7 +259,7 @@ docker compose up -d
 docker compose ps
 ```
 
-当前 compose 会在服务器本机构建 `smart-resume-filter-backend:${APP_VERSION}`、`smart-resume-filter-frontend:${APP_VERSION}`、`smart-resume-filter-postgres:${POSTGRES_VERSION}`、`smart-resume-filter-redis:${REDIS_VERSION}` 四个项目镜像。只改 `.env` 时不需要重新 build，只需 `docker compose up -d`。
+当前 compose 会在服务器本机构建 `smart-resume-filter-backend:${APP_VERSION}`、`smart-resume-filter-frontend:${APP_VERSION}`、`smart-resume-filter-postgres:${POSTGRES_VERSION}`、`smart-resume-filter-redis:${REDIS_VERSION}`、`smart-resume-filter-backup:${APP_VERSION}` 五个项目镜像。只改 `.env` 时不需要重新 build，只需 `docker compose up -d`。
 
 如果新版本明确要求重新初始化基础权限或新增种子字典，再手动执行：
 
@@ -278,39 +280,67 @@ docker compose logs --tail=100 ai-worker
 
 ### 9. 数据备份与恢复
 
-备份 PostgreSQL：
+备份工具以独立镜像运行，内含 PostgreSQL client、restic 和校验脚本，不要求宿主机额外安装这些工具。`backup-scheduler` 启动后立即备份一次，之后默认每小时执行；每个加密快照同时包含：
+
+- PostgreSQL custom-format dump。
+- `media_data` 内的简历和上传文件。
+- 应用版本、数据库版本、备份时间、文件数量、大小和 SHA-256 清单。
+- `BACKUP_TARGET_PATH/status/` 下的最近尝试（含失败原因）、最近成功和 Prometheus 文本格式状态文件（本轮不部署 Prometheus/告警服务）。
+
+生产环境必须先在 `.env` 配置独立的 `RESTIC_PASSWORD`，并把 `BACKUP_TARGET_PATH` 指向异机挂载或外置磁盘。仓库默认保留 48 个小时版本、30 个每日版本和 12 个每月版本。手工执行一次备份：
 
 ```bash
-set -a
-. ./.env
-set +a
-mkdir -p backups
-docker compose exec -T db pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" > backups/srf-$(date +%Y%m%d-%H%M%S).sql
+docker compose --profile backup run --rm backup
 ```
 
-如果 shell 没有加载 `.env`，可以直接写 `.env` 中的用户名和库名，例如：
+校验 restic 仓库、最新快照、数据库 dump 格式及 checksum：
 
 ```bash
-docker compose exec -T db pg_dump -U srf_user srf > backups/srf.sql
+docker compose --profile backup run --rm backup-verify
 ```
 
-恢复 PostgreSQL 前先确认目标库可以被覆盖。恢复示例：
+#### 隔离恢复演练（推荐）
+
+演练命令使用独立 Compose project、独立 PostgreSQL/media 卷和同一加密备份仓库，不覆盖生产数据：
 
 ```bash
-docker compose exec -T db psql -U srf_user -d srf < backups/srf.sql
+bash ops/backup/drill.sh
 ```
 
-上传简历文件保存在 Docker 命名卷 `media_data` 中，并挂载到 backend 的 `/app/media`。建议和数据库一起备份：
+演练依次恢复数据库和 media，运行迁移一致性、`manage.py check`、核心表/外键/简历文件检查，并启动恢复后的 backend 通过容器健康检查。报告写入 `BACKUP_TARGET_PATH/drill-reports/<UTC时间>.json`，包含开始/完成时间、快照、统计、状态和失败原因。建议每月执行一次隔离恢复演练，每季度另做一次整机恢复演练。
+
+#### 生产恢复（破坏性操作）
+
+恢复服务不会随正常启动自动运行。它默认恢复到 `srf_restore`，且任何恢复都要求 `CONFIRM_RESTORE=YES_I_UNDERSTAND`；目标库等于生产库时还必须设置 `ALLOW_PRODUCTION_OVERWRITE=YES`。恢复脚本发现目标库仍有活动连接时会拒绝执行。
+
+确认维护窗口和可用备份后，停止应用写入，再显式执行：
 
 ```bash
-MEDIA_BACKUP=media-$(date +%Y%m%d-%H%M%S)
-docker compose cp backend:/app/media "backups/$MEDIA_BACKUP"
-tar -czf "backups/$MEDIA_BACKUP.tar.gz" -C backups "$MEDIA_BACKUP"
+docker compose stop frontend backend worker ai-worker backup-scheduler
+CONFIRM_RESTORE=YES_I_UNDERSTAND \
+ALLOW_PRODUCTION_OVERWRITE=YES \
+RESTORE_DATABASE=srf \
+docker compose --profile restore run --rm restore
+docker compose run --rm -e RUN_MIGRATIONS=0 backend python manage.py migrate --check --plan
+docker compose run --rm -e RUN_MIGRATIONS=0 backend python manage.py check
+docker compose run --rm -e RUN_MIGRATIONS=0 backend python manage.py verify_restored_data
+docker compose up -d
 ```
+
+把示例中的 `srf` 换成 `.env` 的真实 `POSTGRES_DB`。固定恢复顺序为数据库 → media → 完整性检查 → 应用启动 → 登录、列表、预览和分配流程冒烟。不得跳过确认变量或在应用仍写入时强制恢复。
+
+#### 四类灾难处置
+
+- **数据库损坏**：停止应用写入，保留现场卷，校验最新快照后按生产恢复流程同时恢复数据库和对应 media 版本。
+- **media 丢失**：先手工备份当前数据库；可恢复到隔离项目核对快照与数据库一致后，再在维护窗口恢复整套快照，避免数据库记录与文件版本错配。
+- **Docker 卷丢失**：重新创建空环境，用相同应用版本和 `DJANGO_SECRET_KEY` 恢复数据库、media，再执行完整性和业务冒烟。
+- **整机丢失**：在新主机安装 Docker，取回离线发布包、异机 restic 仓库及独立保管的密钥，配置 `.env` 后执行隔离演练，再切换为正式服务。
+
+`DJANGO_SECRET_KEY`、数据库密码和 restic 密码不会进入备份包，必须由独立密钥保管流程保存。缺少原 `DJANGO_SECRET_KEY` 时，数据库和简历仍可恢复，但既有 AI 连接密文无法保证解密，不能声称 AI 连接配置已完整恢复。本方案仍是单机 Compose + 异机/外置备份，不提供 PostgreSQL 或 Redis 高可用集群。
 
 ### 10. AI Agent 配置
 
-以下 AI 运行阈值、超时、并发、重试参数在系统配置页维护：
+以下 AI 运行阈值、超时、并发、重试和专项分流参数统一在「系统设置 → AI 模型连接」的“AI 运行参数”“AI 专项配置”页签维护：
 
 - `ai_dispatch_threshold`
 - `ai_review_threshold`
@@ -318,8 +348,12 @@ tar -czf "backups/$MEDIA_BACKUP.tar.gz" -C backups "$MEDIA_BACKUP"
 - `ai_concurrency`（所有 worker/运行共享的自适应并发上限，默认 8，范围 1–20）
 - `ai_retry_count`
 - `ai_retry_backoff_seconds`
+- `ai_special_route_enabled`（默认关闭）
+- `ai_special_route_threshold`（默认 0.90，严格大于才触发）
+- `ai_special_route_secondary_contact_id`
+- `ai_special_route_tertiary_contact_id`
 
-大模型连接由拥有 `settings.manage_ai_connection` 的角色在「系统设置 → AI 模型连接」维护；管理员角色默认拥有该权限，也可在「用户权限」按角色授予。页面配置共享内网 Base URL、API 风格和可选 API Key，通过 `GET /models` 获取模型 ID，同时允许直接输入模型 ID，并执行一次最小真实模型测试，不展示服务商/Profile。API Key 非空时仅可写入；服务端用 Django `SECRET_KEY` 派生的 Fernet 密钥加密存储，GET、前端状态和测试结果都不会返回明文或密文。未获授权的 HR 和接口人不可见、不可调用相关配置、模型发现和测试接口。
+上述模型连接、运行参数和专项配置均由 `settings.manage_ai_connection` 保护；管理员角色默认拥有该权限，也可在「用户权限」按角色授予。模型连接页配置共享内网 Base URL、API 风格和可选 API Key，通过 `GET /models` 获取模型 ID，同时允许直接输入模型 ID，并执行一次最小真实模型测试，不展示服务商/Profile。API Key 非空时仅可写入；服务端用 Django `SECRET_KEY` 派生的 Fernet 密钥加密存储，GET、前端状态和测试结果都不会返回明文或密文。未获授权的 HR 和接口人不可见、不可调用相关配置、模型发现和测试接口。系统不再提供全局 AI 分配开关；当前完整连接配置测试有效时，上传和处理简历才可选择 AI。
 
 模型连接仅由管理员保存的数据库配置决定；运行时不会读取部署环境变量中的 API 风格、模型、Base URL 或 API Key，也不读取模型服务商/Profile 模板。通常无需为改动模型连接重启 backend/worker。
 
@@ -404,7 +438,7 @@ docker compose up -d
 - 二级接口人：只能查看下发给自己的分配，只能转派给本二级部门下的三级接口人。
 - 三级接口人：只能查看转派给自己的分配，并提交通过/未通过反馈。
 
-配置项页面维护：
+「系统设置 → AI 模型连接」的“AI 运行参数”和“AI 专项配置”页签维护：
 
 - `ai_dispatch_threshold`
 - `ai_review_threshold`
@@ -412,16 +446,21 @@ docker compose up -d
 - `ai_concurrency`（所有 worker/运行共享的自适应并发上限，默认 8，范围 1–20）
 - `ai_retry_count`
 - `ai_retry_backoff_seconds`
-- `welink_enabled`
+- `ai_special_route_enabled`（默认关闭）
+- `ai_special_route_threshold`（默认 0.90，严格大于才触发）
+- `ai_special_route_secondary_contact_id`
+- `ai_special_route_tertiary_contact_id`
 
-拥有 `settings.manage_ai_connection` 的角色可在「系统设置 → AI 模型连接」配置共享内网 Base URL、API 风格和可选 API Key，通过 `GET /models` 选择或直接输入模型 ID，并执行最小真实模型测试；管理员角色默认拥有该权限，HR/接口人未被授权时不可访问。页面不展示服务商/Profile。Key 非空时仅允许写入、不会被读取接口返回，服务端以由 Django `SECRET_KEY` 派生的 Fernet 密文存储。运行时只读取该数据库配置。日常修改连接请使用授权角色的配置页，避免在 shell、文档或工单中传播 API Key。
+「配置项」已删除“系统参数”页签，只保留院校标签、院校准入和专业词表等业务配置。`welink_enabled` 开关移动到「数据管理 → 部门接口人」页面，由部门接口人维护权限控制；全局 AI 分配开关不再提供。
+
+拥有 `settings.manage_ai_connection` 的角色可在「系统设置 → AI 模型连接」配置共享内网 Base URL、API 风格和可选 API Key，通过 `GET /models` 选择或直接输入模型 ID，并执行最小真实模型测试；同页还集中维护 AI 运行参数和 AI 专项配置。管理员角色默认拥有该权限，HR/接口人未被授权时不可访问。页面不展示服务商/Profile。Key 非空时仅允许写入、不会被读取接口返回，服务端以由 Django `SECRET_KEY` 派生的 Fernet 密文存储。运行时只读取该数据库配置。日常修改连接请使用授权角色的配置页，避免在 shell、文档或工单中传播 API Key。当前完整连接配置测试成功后，上传和“处理简历”弹窗才会开放 AI 模式；保存连接或清除 Key 后测试状态失效，只能选择 Rule，直至重新测试成功。
 
 ## 主要流程
 
 1. 使用 `admin` 或 `hr` 登录。
-2. 在简历库、岗位需求、院校清单、部门接口人页面导入对应 Excel/简历包；也可先执行 `gen_sample` 和 `load_sample`。
-3. 简历上传含候选人时按全局 `ai_enabled` 只创建当前模式的一条 `ProcessingRun`，并完成 Step1→Step2。Rule 模式按确定性规则执行；生产 AI 模式由有界调度器把候选人任务投递到专用 `ai` 队列，所有 AI worker 共享 Redis 自适应并发上限。使用 AI 模式前由管理员在「系统设置 → AI 模型连接」配置并测试模型，再用少量真实脱敏样本验收评分、护栏与并发吞吐。
-4. HR 在「简历分配」查看待下发、待复核、已下发等分配尝试。
+2. 在简历库、岗位需求、院校清单、部门接口人页面导入对应 Excel/简历包；岗位表的“工作职责”列必填，缺失职责的岗位行会被跳过并返回行号，其余行继续导入。也可先执行 `gen_sample` 和 `load_sample`。
+3. 上传简历和人工“处理简历”都选择本次 Rule / AI 模式并只创建一条运行：上传 Rule 执行 Step1–Step3、AI 执行 Step1–Step4，人工处理从 Step2 开始。Rule 始终可选，当前模型连接测试有效时才可选 AI。AI 会把当前岗位工作职责（最多 12,000 字符）纳入岗位要求分析；历史岗位未补工作职责时转为“需处理”，不调用模型。生产 AI Step4 由有界调度器投递专用 `ai` 队列，所有 AI worker 共享 Redis 自适应并发上限。
+4. HR 在简历库查看处理完成、需处理、模型超时失败及精确原因，并处置待下发、待复核和专项强制分配结果。
 5. HR 单条、批量或一键全部下发给二级接口人。
 6. 二级接口人登录后仅看到自己的分配，可导出简历并转派本部门三级接口人。
 7. 三级接口人登录后仅看到转派给自己的分配，可导出简历并提交反馈。
@@ -439,16 +478,18 @@ docker compose up -d
 | GET | `/api/permissions/` | 后端预置权限树 |
 | GET | `/api/configs/`、`/api/configs/{key}/` | 查询白名单内的非敏感配置项 |
 | PATCH | `/api/configs/{key}/` | 更新白名单配置值 |
-| POST | `/api/import/` | 上传简历列表、岗位、院校、接口人和简历包 |
+| POST | `/api/import/` | 上传简历列表、岗位、院校、接口人和简历包；岗位缺工作职责的行跳过并在 `warnings` 返回行号；含简历数据时必须提交 `processing_mode=rule|ai` |
 | GET/POST | `/api/import/undo/` | 查看并撤销最近一次简历上传 |
 | GET | `/api/resumes/` | 投递清单 |
 | GET | `/api/resumes/{id}/preview/` | 预览单条投递 PDF |
 | GET | `/api/candidates/` | 候选人聚合列表 |
 | GET | `/api/candidates/export/` | 按候选人 ID 或当前筛选条件导出单个原文件或 zip |
 | GET/POST/PATCH | `/api/jobs/` `/api/schools/` `/api/departments/` `/api/contacts/` | 主数据维护 |
-| POST | `/api/pipeline/run/` | 提交 `step + scope`，由后端按全局 `ai_enabled` 创建唯一 Rule 或 AI 运行；请求携带 `mode` / `modes` 返回 400。生产异步返回 202，本地 `CELERY_TASK_ALWAYS_EAGER=True` 同步完成返回 200，均返回 `processing_runs` |
+| POST | `/api/pipeline/run/` | 提交 `step + mode + scope` 并创建唯一 Rule 或 AI 运行；缺少 `mode`、提交 `modes` 或在连接未就绪时选择 AI 返回 400。生产异步返回 202，本地 `CELERY_TASK_ALWAYS_EAGER=True` 同步完成返回 200，均返回 `processing_runs` |
 | GET | `/api/pipeline/runs/` | 处理运行记录 |
-| GET | `/api/ai-availability/` | 具有 `pipeline.run` 权限时只返回 AI 是否可用的 `enabled` 布尔值 |
+| GET | `/api/analytics/recruitment-overview/` | 需要 `analytics.view`；按导入 cohort 返回招聘总览、转化、耗时、趋势和分布，默认最近 30 天，缓存 5 分钟 |
+| GET | `/api/allocation-mode/` | 具有 `pipeline.run` 或 `resume.import` 权限时返回 `default_mode`、`available_modes` 和 `ai_ready`，不泄露模型连接信息 |
+| GET/PATCH | `/api/ai-connection/settings/`、`/api/ai-connection/settings/{key}/` | 具有 `settings.manage_ai_connection` 权限时读取/更新 AI 运行参数和 AI 专项配置 |
 | GET | `/api/workflow-attempts/` | 分配尝试，后端按登录用户过滤数据范围 |
 | POST | `/api/workflow-attempts/{id}/dispatch/` | HR 单条下发 |
 | POST | `/api/workflow-attempts/bulk-dispatch/` | HR 批量或一键全部下发 |
@@ -483,6 +524,6 @@ npm run build
 ## 生产与外部系统预留
 
 - W3 认证：当前未实现；待接口方案确认后，应新增仅管理员可维护的认证适配层，按工号映射到 `User.username`，并继续复用既有 RBAC 角色和 `Contact` 绑定。
-- WeLink：当前下发流程已保留状态和消息 ID 字段，`welink_enabled` 控制是否启用真实外部下发。真实接口确认后在服务层替换发送实现。
+- WeLink：当前下发流程已保留状态和消息 ID 字段，`welink_enabled` 控制是否启用真实外部下发；开关位于「数据管理 → 部门接口人」页面。真实接口确认后在服务层替换发送实现。
 - 数据库：本地默认 SQLite；生产环境通过 `POSTGRES_DB`、`POSTGRES_USER`、`POSTGRES_PASSWORD`、`POSTGRES_HOST`、`POSTGRES_PORT` 切换 PostgreSQL。
 - Celery：本地默认 `CELERY_TASK_ALWAYS_EAGER=True`；生产环境应配置 Redis broker/backend，并同时启动 `default` worker 与 threads `ai` worker。

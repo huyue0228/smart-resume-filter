@@ -18,6 +18,7 @@ export function useProcessRunner() {
       const scope = normalizedSteps[0]?.scope || options.scope
       const { data } = await runPipeline({
         step,
+        mode: options.mode,
         ...(scope ? { scope } : {}),
       })
       return { success: true, run: data }
