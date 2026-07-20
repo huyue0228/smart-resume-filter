@@ -22,12 +22,8 @@ def candidate_ids_for_scope(scope=None):
 def _sync_progress(processing_run, processing_stage, count):
     if not processing_run:
         return
-    processing_run.processed_count = count
-    processing_run.success_count = count
     processing_run.last_heartbeat_at = timezone.now()
-    processing_run.save(
-        update_fields=["processed_count", "success_count", "last_heartbeat_at"]
-    )
+    processing_run.save(update_fields=["last_heartbeat_at"])
     if processing_stage:
         processing_stage.processed_count = count
         processing_stage.success_count = count
@@ -39,12 +35,7 @@ def run(scope=None, processing_run=None, processing_stage=None):
     candidate_ids = list(candidate_ids_for_scope(scope))
     if processing_run:
         processing_run.total_count = len(candidate_ids)
-        processing_run.processed_count = 0
-        processing_run.success_count = 0
-        processing_run.failed_count = 0
-        processing_run.save(
-            update_fields=["total_count", "processed_count", "success_count", "failed_count"]
-        )
+        processing_run.save(update_fields=["total_count"])
     if processing_stage:
         processing_stage.total_count = len(candidate_ids)
         processing_stage.save(update_fields=["total_count"])

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Modal, Upload, Radio, Button, Space, Alert, message } from 'antd'
 import { InboxOutlined, ImportOutlined } from '@ant-design/icons'
 import { importData } from '../api/services'
+import AllocationModeToggle from './AllocationModeToggle'
 
 const { Dragger } = Upload
 
@@ -10,16 +11,26 @@ const { Dragger } = Upload
 //   fields: [{ key, label, accept }]  —— 后端 multipart 字段
 //   buttonText / title
 //   onDone(data) —— 导入成功回调（用于刷新列表）
-export default function ImportButton({ fields, buttonText = '导入', title, onDone }) {
+export default function ImportButton({
+  fields,
+  buttonText = '导入',
+  title,
+  onDone,
+  selectProcessingMode = false,
+  aiReady = false,
+  onBeforeOpen,
+}) {
   const [open, setOpen] = useState(false)
   const [files, setFiles] = useState({})
   const [mode, setMode] = useState('incremental')
+  const [processingMode, setProcessingMode] = useState('rule')
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState('')
 
   const reset = () => {
     setFiles({})
     setMode('incremental')
+    setProcessingMode('rule')
     setResult('')
   }
 
@@ -34,12 +45,17 @@ export default function ImportButton({ fields, buttonText = '导入', title, onD
     const formData = new FormData()
     picked.forEach((f) => formData.append(f.key, files[f.key]))
     formData.append('mode', mode)
+    if (selectProcessingMode) formData.append('processing_mode', processingMode)
 
     setLoading(true)
     setResult('')
     try {
       const { data } = await importData(formData)
-      message.success(data?.detail || '导入完成')
+      if (data?.warnings?.length) {
+        message.warning(data?.detail || '导入完成，部分数据已跳过')
+      } else {
+        message.success(data?.detail || '导入完成')
+      }
       setOpen(false) // 关闭导入弹窗，便于后续自动处理进度条展示
       reset()
       await onDone?.(data)
@@ -52,7 +68,15 @@ export default function ImportButton({ fields, buttonText = '导入', title, onD
 
   return (
     <>
-      <Button type="primary" icon={<ImportOutlined />} onClick={() => setOpen(true)}>
+      <Button
+        type="primary"
+        icon={<ImportOutlined />}
+        onClick={async () => {
+          await onBeforeOpen?.()
+          setProcessingMode('rule')
+          setOpen(true)
+        }}
+      >
         {buttonText}
       </Button>
       <Modal
@@ -104,6 +128,26 @@ export default function ImportButton({ fields, buttonText = '导入', title, onD
               <Radio value="replace">清空重导</Radio>
             </Radio.Group>
           </div>
+
+          {selectProcessingMode && (
+            <div>
+              分配模式：
+              <AllocationModeToggle
+                className="srf-allocation-mode-toggle--inline"
+                value={processingMode}
+                aiReady={aiReady}
+                onChange={setProcessingMode}
+              />
+              {!aiReady && (
+                <Alert
+                  type="info"
+                  showIcon
+                  message="AI 模型连接尚未测试成功，本次只能使用 Rule。"
+                  style={{ marginTop: 12 }}
+                />
+              )}
+            </div>
+          )}
 
           {result && <Alert type="success" showIcon message={result} />}
         </Space>

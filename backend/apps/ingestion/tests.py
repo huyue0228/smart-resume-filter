@@ -129,6 +129,87 @@ class ResumeImportDesignContractTests(TestCase):
         read_excel.assert_called_once()
         self.assertEqual(read_excel.call_args.kwargs["engine"], "xlrd")
 
+    def test_job_import_persists_responsibilities_and_reports_skipped_rows(self):
+        jobs = _excel_file(
+            [
+                {
+                    "主体": "GW",
+                    "职位名称": "后端工程师",
+                    "对外发布名称": "后端开发",
+                    "工作职责": "负责服务设计、接口开发和性能优化。",
+                },
+                {
+                    "主体": "GW",
+                    "职位名称": "测试工程师",
+                    "对外发布名称": "测试开发",
+                    "工作职责": "",
+                },
+            ]
+        )
+
+        counts = import_files({"jobs": jobs}, mode="incremental")
+
+        self.assertEqual((counts["jobs"], counts["jobs_skipped"]), (1, 1))
+        self.assertEqual(
+            m.Job.objects.get().responsibilities,
+            "负责服务设计、接口开发和性能优化。",
+        )
+        self.assertEqual(
+            counts["_warnings"],
+            [
+                {
+                    "code": "job_responsibility_missing",
+                    "count": 1,
+                    "rows": [3],
+                    "message": "工作职责为空的岗位已跳过",
+                }
+            ],
+        )
+
+    def test_replace_job_import_with_no_valid_rows_preserves_existing_jobs(self):
+        existing = m.Job.objects.create(
+            position_name="已有岗位",
+            public_name="已有岗位",
+            responsibilities="已有职责",
+        )
+        jobs = _excel_file(
+            [{"职位名称": "新岗位", "对外发布名称": "新岗位"}]
+        )
+
+        counts = import_files({"jobs": jobs}, mode="replace")
+
+        self.assertEqual((counts["jobs"], counts["jobs_skipped"]), (0, 1))
+        self.assertEqual(list(m.Job.objects.values_list("id", flat=True)), [existing.id])
+
+    def test_replace_job_import_keeps_only_valid_rows(self):
+        m.Job.objects.create(
+            position_name="已有岗位",
+            public_name="已有岗位",
+            responsibilities="已有职责",
+        )
+        jobs = _excel_file(
+            [
+                {
+                    "职位名称": "新岗位",
+                    "对外发布名称": "新岗位",
+                    "工作职责": "负责新业务建设。",
+                },
+                {
+                    "职位名称": "缺失职责岗位",
+                    "对外发布名称": "缺失职责岗位",
+                    "工作职责": "",
+                },
+            ]
+        )
+
+        counts = import_files({"jobs": jobs}, mode="replace")
+
+        self.assertEqual((counts["jobs"], counts["jobs_skipped"]), (1, 1))
+        self.assertEqual(
+            list(m.Job.objects.values_list("position_name", flat=True)),
+            ["新岗位"],
+        )
+
     def test_resume_import_skips_missing_phone_and_maps_gender_codes(self):
         resume_list = _excel_file(
             [

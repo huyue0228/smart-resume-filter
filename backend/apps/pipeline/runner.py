@@ -15,25 +15,28 @@ from apps.core.models import (
 from apps.pipeline import ai_config
 
 from .cancellation import RunCancelled, raise_if_cancel_requested
-from .services import allocate, classify_job, classify_school, dedup, demand
+from .services import allocate, dedup
 
 STEP_FUNCS = {
     "step1": lambda mode, scope, run: dedup.run(scope),
-    "step2": lambda mode, scope, run: allocate.run(scope, mode, processing_run=run),
-    "step3": lambda mode, scope, run: classify_school.run(scope),
-    "step4": lambda mode, scope, run: demand.run(scope),
+    "step2": lambda mode, scope, run: allocate.run_school_gate(
+        scope, mode, processing_run=run
+    ),
+    "step3": lambda mode, scope, run: allocate.run_rule_precheck(
+        scope, mode, processing_run=run
+    ),
+    "step4": lambda mode, scope, run: "AI 深度筛选由候选人任务执行",
 }
 
 RESUME_PROCESS_STEP = "resume_process"
 STAGE_LABELS = {
     "step1": "查重与志愿排序",
-    "step2": "简历分类、分配与下发",
-    "step3": "院校分类",
-    "step4": "需求数据准备核对",
+    "step2": "院校分类与学历/院校准入",
+    "step3": "Rule 前置检查",
+    "step4": "AI 深度筛选与分配",
 }
 
-# 一键全流程：前置院校分类、需求录入先完成，再执行候选人主流程。
-STEP_ORDER = ["step3", "step4", "step1", "step2"]
+STEP_ORDER = ["step1", "step2", "step3", "step4"]
 
 
 def _candidate_ids_for_run(step, scope):
@@ -41,7 +44,7 @@ def _candidate_ids_for_run(step, scope):
     candidate_ids = scope.get("candidate_ids") or []
     if candidate_ids:
         return sorted({int(candidate_id) for candidate_id in candidate_ids})
-    if step in {"step2", RESUME_PROCESS_STEP}:
+    if step in {"step2", "step3", "step4", RESUME_PROCESS_STEP, "all"}:
         return list(allocate.candidate_ids_for_scope(scope))
     if step == "step1":
         return list(dedup.candidate_ids_for_scope(scope))
@@ -59,11 +62,19 @@ def _scope_summary(scope, candidate_ids):
     return summary
 
 
-def _stage_steps(step):
+def _stage_steps(step, mode):
     if step == RESUME_PROCESS_STEP:
-        return ["step1", "step2"]
+        steps = ["step1", "step2", "step3"]
+        return [*steps, "step4"] if mode == "ai" else steps
     if step == "all":
-        return STEP_ORDER
+        return STEP_ORDER if mode == "ai" else STEP_ORDER[:-1]
+    if step == "step2":
+        steps = ["step2", "step3"]
+        return [*steps, "step4"] if mode == "ai" else steps
+    if step == "step3" and mode == "ai":
+        return ["step3", "step4"]
+    if step == "step4" and mode != "ai":
+        raise ValueError("Step4 仅允许在 AI 模式运行")
     return [step]
 
 
@@ -120,16 +131,10 @@ def create_run(step, mode="rule", scope=None, created_by=None):
                 step=stage_step,
                 label=STAGE_LABELS[stage_step],
             )
-            for index, stage_step in enumerate(_stage_steps(step), start=1)
+            for index, stage_step in enumerate(_stage_steps(step, mode), start=1)
         ]
     )
     return run
-
-
-def create_configured_run(step, scope=None, created_by=None):
-    """按系统参数中的全局分配模式创建唯一运行。"""
-    mode = ai_config.allocation_mode()
-    return create_run(step, mode=mode, scope=scope, created_by=created_by)
 
 
 def _run_scope(run):
@@ -156,14 +161,24 @@ def _run_one_stage(run, stage, mode, scope):
     if stage == "step1":
         message = dedup.run(scope, processing_run=run, processing_stage=stage_record)
     elif stage == "step2":
-        message = allocate.run(
+        message = allocate.run_school_gate(
+            scope, mode, processing_run=run, processing_stage=stage_record
+        )
+    elif stage == "step3":
+        message = allocate.run_rule_precheck(
             scope, mode, processing_run=run, processing_stage=stage_record
         )
     else:
         message = STEP_FUNCS[stage](mode, scope, run)
     run.refresh_from_db()
     stage_record.refresh_from_db()
-    stage_record.status = "partial_failed" if stage_record.failed_count else "success"
+    stage_record.status = (
+        "partial_failed"
+        if stage_record.failed_count
+        else "needs_attention"
+        if stage_record.needs_attention_count
+        else "success"
+    )
     stage_record.message = message
     stage_record.finished_at = timezone.now()
     stage_record.save(update_fields=["status", "message", "finished_at"])
@@ -172,6 +187,7 @@ def _run_one_stage(run, stage, mode, scope):
 
 AI_SCOPE_TERMINAL_STATUSES = [
     "success",
+    "needs_attention",
     "failed",
     "skipped_manual_change",
     "cancelled",
@@ -179,31 +195,21 @@ AI_SCOPE_TERMINAL_STATUSES = [
 
 
 def prepare_ai_stage(run, scope):
-    """初始化 AI 阶段并补齐院校标签；候选人模型调用由独立任务执行。"""
+    """初始化 Step4；Step2/Step3 已完成院校准入并冻结 Rule 引用。"""
     raise_if_cancel_requested(run)
-    stage = run.stages.get(step="step2")
+    stage = run.stages.get(step="step4")
     now = timezone.now()
     candidate_ids = list(
-        run.scope_items.order_by("candidate_id").values_list("candidate_id", flat=True)
+        run.scope_items.filter(status="pending")
+        .order_by("candidate_id")
+        .values_list("candidate_id", flat=True)
     )
-    candidates = list(
-        Candidate.objects.filter(id__in=candidate_ids).order_by("id")
-    )
-    classify_school.classify_candidates(candidates, overwrite=False)
     concurrency_limit = ai_config.get_ai_runtime_config().concurrency
-    run.current_stage = "step2"
-    run.total_count = len(candidate_ids)
-    run.processed_count = 0
-    run.success_count = 0
-    run.failed_count = 0
-    run.review_count = 0
-    run.dispatch_count = 0
-    run.archive_count = 0
-    run.skipped_count = 0
-    run.cancelled_count = 0
+    run.current_stage = "step4"
+    run.total_count = run.scope_items.count()
     run.chunk_size = 1
-    run.chunk_total = len(candidate_ids)
-    run.chunk_done = 0
+    run.chunk_total = run.total_count
+    run.chunk_done = run.processed_count
     run.chunk_failed = 0
     run.chunk_errors = []
     run.ai_concurrency_limit = concurrency_limit
@@ -217,6 +223,8 @@ def prepare_ai_stage(run, scope):
     stage.total_count = len(candidate_ids)
     stage.processed_count = 0
     stage.success_count = 0
+    stage.completed_count = 0
+    stage.needs_attention_count = 0
     stage.failed_count = 0
     stage.review_count = 0
     stage.dispatch_count = 0
@@ -244,12 +252,16 @@ def record_ai_scope_outcome(run_id, result, *, infrastructure_error=""):
     stage_updates = {"processed_count": F("processed_count") + 1}
     outcome_field = {
         "success": "success_count",
+        "needs_attention": "needs_attention_count",
         "failed": "failed_count",
         "skipped_manual_change": "skipped_count",
         "cancelled": "cancelled_count",
     }[status]
     run_updates[outcome_field] = F(outcome_field) + 1
     stage_updates[outcome_field] = F(outcome_field) + 1
+    if status == "success":
+        run_updates["completed_count"] = F("completed_count") + 1
+        stage_updates["completed_count"] = F("completed_count") + 1
     recommendation = result.get("recommendation")
     recommendation_field = {
         "review": "review_count",
@@ -266,7 +278,7 @@ def record_ai_scope_outcome(run_id, result, *, infrastructure_error=""):
         status__in=["running", "waiting_conflict", "cancelling"],
     ).update(**run_updates)
     if updated:
-        ProcessingRunStage.objects.filter(run_id=run_id, step="step2").update(
+        ProcessingRunStage.objects.filter(run_id=run_id, step="step4").update(
             **stage_updates
         )
     if infrastructure_error and updated:
@@ -286,6 +298,16 @@ def cancel_unstarted_ai_items(run_id):
     )
     count = qs.update(status="cancelled", finished_at=now)
     if count:
+        qs.model.objects.filter(
+            run_id=run_id,
+            status="cancelled",
+            result_type="",
+        ).update(
+            result_type=ProcessingRunScopeItem.RESULT_CANCELLED,
+            reason_code="cancelled",
+            result_message="任务取消时尚未开始处理",
+        )
+    if count:
         from django.db.models import F
 
         ProcessingRun.objects.filter(pk=run_id).update(
@@ -294,7 +316,7 @@ def cancel_unstarted_ai_items(run_id):
             chunk_done=F("chunk_done") + count,
             last_heartbeat_at=now,
         )
-        ProcessingRunStage.objects.filter(run_id=run_id, step="step2").update(
+        ProcessingRunStage.objects.filter(run_id=run_id, step="step4").update(
             processed_count=F("processed_count") + count,
             cancelled_count=F("cancelled_count") + count,
         )
@@ -310,6 +332,12 @@ def finalize_ai_run_if_complete(run_id):
         if terminal < total:
             return False
         success = run.scope_items.filter(status="success").count()
+        completed = run.scope_items.filter(
+            result_type=ProcessingRunScopeItem.RESULT_COMPLETED
+        ).count()
+        attention = run.scope_items.filter(
+            result_type=ProcessingRunScopeItem.RESULT_NEEDS_ATTENTION
+        ).count()
         failed = run.scope_items.filter(status="failed").count()
         skipped = run.scope_items.filter(status="skipped_manual_change").count()
         cancelled = run.scope_items.filter(status="cancelled").count()
@@ -318,7 +346,9 @@ def finalize_ai_run_if_complete(run_id):
         archive = run.agent_decisions.filter(recommendation="archive").count()
         run.total_count = total
         run.processed_count = terminal
-        run.success_count = success
+        run.success_count = completed
+        run.completed_count = completed
+        run.needs_attention_count = attention
         run.failed_count = failed
         run.skipped_count = skipped
         run.cancelled_count = cancelled
@@ -332,9 +362,15 @@ def finalize_ai_run_if_complete(run_id):
             run.cancelled_at = run.cancelled_at or now
             run.message = "任务已取消；已完成的候选人处理结果已保留"
         else:
-            run.status = "partial_failed" if failed else "success"
+            run.status = (
+                "partial_failed"
+                if failed
+                else "needs_attention"
+                if attention
+                else "success"
+            )
             run.message = (
-                f"AI 并发处理完成：成功 {success}，失败 {failed}，"
+                f"AI 并发处理完成：处理完成 {completed}，需处理 {attention}，失败 {failed}，"
                 f"跳过 {skipped}，取消 {cancelled}"
             )
         run.current_stage = ""
@@ -342,11 +378,32 @@ def finalize_ai_run_if_complete(run_id):
         run.last_heartbeat_at = now
         run.save()
         stage = ProcessingRunStage.objects.select_for_update().get(
-            run=run, step="step2"
+            run=run, step="step4"
         )
-        stage.total_count = total
-        stage.processed_count = terminal
-        stage.success_count = success
+        step4_total = run.scope_items.exclude(
+            reason_code__in=[
+                "education_not_eligible",
+                "school_not_eligible",
+                "job_not_found",
+                "secondary_department_missing",
+                "secondary_contact_missing",
+                "major_not_matched",
+                "rule_assigned",
+                "terminal_workflow",
+                "no_resume_available",
+            ]
+        ).count()
+        stage.total_count = step4_total
+        stage.processed_count = step4_total
+        stage.success_count = run.scope_items.filter(
+            result_type=ProcessingRunScopeItem.RESULT_COMPLETED,
+        ).exclude(reason_code__in=[
+            "education_not_eligible", "school_not_eligible", "job_not_found",
+            "secondary_department_missing", "secondary_contact_missing",
+            "major_not_matched", "rule_assigned", "terminal_workflow", "no_resume_available",
+        ]).count()
+        stage.completed_count = stage.success_count
+        stage.needs_attention_count = attention
         stage.failed_count = failed
         stage.skipped_count = skipped
         stage.cancelled_count = cancelled
@@ -358,6 +415,8 @@ def finalize_ai_run_if_complete(run_id):
             if run.status == "cancelled"
             else "partial_failed"
             if failed
+            else "needs_attention"
+            if attention
             else "success"
         )
         stage.message = run.message
@@ -368,7 +427,7 @@ def finalize_ai_run_if_complete(run_id):
 
 def _execute_ai_eager(run):
     """SQLite/eager 开发模式沿用同步语义，但复用候选人级幂等处理。"""
-    for item_id in run.scope_items.order_by("candidate_id").values_list("id", flat=True):
+    for item_id in run.scope_items.filter(status="pending").order_by("candidate_id").values_list("id", flat=True):
         result = allocate.process_ai_scope_item(run.id, item_id)
         record_ai_scope_outcome(run.id, result)
     finalize_ai_run_if_complete(run.id)
@@ -404,8 +463,8 @@ def execute_run(run_id):
     async_ai_scheduled = False
     try:
         messages = []
-        for stage in _stage_steps(step):
-            if stage == "step2" and mode == "ai":
+        for stage in _stage_steps(step, mode):
+            if stage == "step4" and mode == "ai":
                 prepare_ai_stage(run, scope)
                 if settings.CELERY_TASK_ALWAYS_EAGER:
                     _execute_ai_eager(run)
@@ -419,12 +478,18 @@ def execute_run(run_id):
         if async_ai_scheduled:
             run.refresh_from_db()
             return run
-        if mode == "ai" and "step2" in _stage_steps(step):
+        if mode == "ai" and "step4" in _stage_steps(step, mode):
             run.refresh_from_db()
             return run
         message = " | ".join(messages)
         run.refresh_from_db()
-        run.status = "partial_failed" if run.failed_count else "success"
+        run.status = (
+            "partial_failed"
+            if run.failed_count
+            else "needs_attention"
+            if run.needs_attention_count
+            else "success"
+        )
         run.message = message
     except RunCancelled:
         run.refresh_from_db()

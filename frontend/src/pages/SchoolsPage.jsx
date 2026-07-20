@@ -33,6 +33,7 @@ export default function SchoolsPage() {
     <PageContainer title="院校清单" content="维护院校与院校标签，可导入更新。">
       <SmartDataTable
         tableId="schools"
+        stickyPagination
         actionRef={actionRef}
         rowKey="id"
         columns={baseColumns}

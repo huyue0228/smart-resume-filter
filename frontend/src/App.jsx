@@ -1,7 +1,7 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { RoleProvider } from './contexts/RoleContext'
 import { useRole } from './contexts/roleState'
-import { canAccessRoute, DEFAULT_AUTHENTICATED_PATH } from './routePermissions'
+import { canAccessRoute, getDefaultAuthenticatedPath } from './routePermissions'
 import BasicLayout from './layouts/BasicLayout'
 import LoginPage from './pages/LoginPage'
 import ResumesPage from './pages/ResumesPage'
@@ -11,6 +11,8 @@ import DepartmentsPage from './pages/DepartmentsPage'
 import ConfigPage from './pages/ConfigPage'
 import AIConnectionPage from './pages/AIConnectionPage'
 import UsersPage from './pages/UsersPage'
+import AnalyticsPage from './pages/AnalyticsPage'
+import ProcessingTasksPage from './pages/ProcessingTasksPage'
 
 function AppRoutes() {
   const { loading, isAuthenticated, hasPermission } = useRole()
@@ -26,7 +28,7 @@ function AppRoutes() {
     )
   }
 
-  const defaultPath = DEFAULT_AUTHENTICATED_PATH
+  const defaultPath = getDefaultAuthenticatedPath(hasPermission)
 
   const guarded = (path, element) => {
     return canAccessRoute(path, hasPermission) ? (
@@ -50,6 +52,14 @@ function AppRoutes() {
         <Route
           path="/departments"
           element={guarded('/departments', <DepartmentsPage />)}
+        />
+        <Route
+          path="/analytics"
+          element={guarded('/analytics', <AnalyticsPage />)}
+        />
+        <Route
+          path="/processing-tasks"
+          element={guarded('/processing-tasks', <ProcessingTasksPage />)}
         />
         <Route
           path="/config"

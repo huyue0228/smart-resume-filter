@@ -1,4 +1,4 @@
-"""Step2 候选人级简历分类、分配与下发工作流。"""
+"""Rule 前置检查、AI 深度筛选及强制分配领域服务。"""
 import time
 import uuid
 from datetime import timedelta
@@ -23,6 +23,120 @@ UNFEEDBACKED_STATUSES = [
     m.AssignmentAttempt.STATUS_DISPATCHED_L2,
     m.AssignmentAttempt.STATUS_ASSIGNED_L3,
 ]
+
+RESULT_COMPLETED = m.ProcessingRunScopeItem.RESULT_COMPLETED
+RESULT_NEEDS_ATTENTION = m.ProcessingRunScopeItem.RESULT_NEEDS_ATTENTION
+RESULT_FAILED = m.ProcessingRunScopeItem.RESULT_FAILED
+RESULT_CANCELLED = m.ProcessingRunScopeItem.RESULT_CANCELLED
+
+AI_ATTENTION_REASON_CODES = {
+    "pdf_missing": "resume_text_unavailable",
+    "pdf_parse_failed": "resume_text_unavailable",
+    "profile_incomplete": "resume_text_unavailable",
+    "ai_not_configured": "ai_connection_error",
+    "ai_connection_error": "ai_connection_error",
+    "llm_connection_error": "ai_connection_error",
+    "llm_error": "ai_connection_error",
+    "ai_limiter_unavailable": "ai_connection_error",
+    "ai_rate_limited": "ai_rate_limited",
+    "invalid_ai_output": "ai_invalid_output",
+    "ai_invalid_output": "ai_invalid_output",
+    "reference_not_found": "ai_reference_invalidated",
+    "guardrail_blocked": "ai_reference_invalidated",
+    "ai_reference_invalidated": "ai_reference_invalidated",
+    "ai_special_route_unavailable": "ai_special_route_unavailable",
+    "job_responsibility_missing": "job_responsibility_missing",
+    "task_execution_error": "ai_connection_error",
+}
+
+
+def _scope_result(item, *, status, result_type, reason_code="", message=""):
+    item.status = status
+    item.result_type = result_type
+    item.reason_code = reason_code
+    item.result_message = message
+    item.error_code = reason_code if result_type != RESULT_COMPLETED else ""
+    item.error_message = message if result_type != RESULT_COMPLETED else ""
+    item.skip_reason = ""
+    item.finished_at = timezone.now() if result_type else None
+    item.save(
+        update_fields=[
+            "status",
+            "result_type",
+            "reason_code",
+            "result_message",
+            "error_code",
+            "error_message",
+            "skip_reason",
+            "finished_at",
+        ]
+    )
+
+
+def _ai_failure_result(error_code):
+    if error_code == "llm_timeout":
+        return "failed", RESULT_FAILED, "llm_timeout"
+    return (
+        "needs_attention",
+        RESULT_NEEDS_ATTENTION,
+        AI_ATTENTION_REASON_CODES.get(error_code, "ai_connection_error"),
+    )
+
+
+def sync_processing_run_results(processing_run, processing_stage=None):
+    """按 ScopeItem 统一结果口径重算父任务，兼容 Rule 同步和 AI 并发阶段。"""
+    if not processing_run:
+        return
+    items = processing_run.scope_items.all()
+    completed = items.filter(result_type=RESULT_COMPLETED).count()
+    attention = items.filter(result_type=RESULT_NEEDS_ATTENTION).count()
+    failed = items.filter(result_type=RESULT_FAILED).count()
+    cancelled = items.filter(result_type=RESULT_CANCELLED).count()
+    skipped = items.filter(status="skipped_manual_change").count()
+    processed = completed + attention + failed + cancelled + skipped
+    processing_run.total_count = items.count()
+    processing_run.processed_count = processed
+    processing_run.success_count = completed
+    processing_run.completed_count = completed
+    processing_run.needs_attention_count = attention
+    processing_run.failed_count = failed
+    processing_run.cancelled_count = cancelled
+    processing_run.skipped_count = skipped
+    processing_run.last_heartbeat_at = timezone.now()
+    processing_run.save(
+        update_fields=[
+            "total_count",
+            "processed_count",
+            "success_count",
+            "completed_count",
+            "needs_attention_count",
+            "failed_count",
+            "cancelled_count",
+            "skipped_count",
+            "last_heartbeat_at",
+        ]
+    )
+    if processing_stage:
+        processing_stage.total_count = processing_run.total_count
+        processing_stage.processed_count = processing_run.total_count
+        processing_stage.success_count = completed
+        processing_stage.completed_count = completed
+        processing_stage.needs_attention_count = attention
+        processing_stage.failed_count = failed
+        processing_stage.cancelled_count = cancelled
+        processing_stage.skipped_count = skipped
+        processing_stage.save(
+            update_fields=[
+                "total_count",
+                "processed_count",
+                "success_count",
+                "completed_count",
+                "needs_attention_count",
+                "failed_count",
+                "cancelled_count",
+                "skipped_count",
+            ]
+        )
 
 
 def _archive(workflow, reason, detail):
@@ -286,6 +400,10 @@ def _create_attempt(
     confidence_score=None,
     review_required=False,
     status=None,
+    route_code="",
+    special_route_confidence=None,
+    special_route_evidence=None,
+    special_route_config_snapshot=None,
 ):
     now = timezone.now()
     sub_department = sub_contact.department if sub_contact else None
@@ -311,6 +429,10 @@ def _create_attempt(
         match_mode=mode,
         match_reason=match_reason,
         manual_reason=manual_reason,
+        route_code=route_code,
+        special_route_confidence=special_route_confidence,
+        special_route_evidence=special_route_evidence or [],
+        special_route_config_snapshot=special_route_config_snapshot or {},
         dispatched_at=now if sub_contact else None,
         assigned_to_sub_at=now if sub_contact else None,
         created_by=created_by if getattr(created_by, "is_authenticated", False) else None,
@@ -319,13 +441,18 @@ def _create_attempt(
     attempt.save()
 
     if sub_contact:
+        direct_note = (
+            "系统 AI 专项强制分配"
+            if route_code == "ai_special_route"
+            else "HR 手动直达三级接口人"
+        )
         _create_handoff(
             attempt=attempt,
             action=m.AssignmentHandoff.ACTION_HR_DISPATCH,
             to_contact=contact,
             to_department=attempt.department,
             created_by=created_by,
-            note="HR 手动直达三级接口人",
+            note=direct_note,
         )
         _create_handoff(
             attempt=attempt,
@@ -334,7 +461,7 @@ def _create_attempt(
             to_contact=sub_contact,
             to_department=sub_department,
             created_by=created_by,
-            note="HR 手动直达三级接口人",
+            note=direct_note,
         )
 
     _touch_workflow(workflow, resume, mode)
@@ -353,6 +480,28 @@ def _candidate_resumes(candidate, after_rank=None):
     if after_rank is not None:
         qs = qs.filter(volunteer_rank__gt=after_rank)
     return qs
+
+
+def _effective_resume_for_attempt(
+    workflow,
+    *,
+    retry_resume_id=None,
+    advance_after_feedback=False,
+):
+    """选择本轮唯一有效志愿；只有未通过反馈链路可以推进到下一志愿。"""
+    resumes = _candidate_resumes(workflow.candidate)
+    if retry_resume_id:
+        return resumes.filter(pk=retry_resume_id).first()
+    if advance_after_feedback:
+        return _candidate_resumes(
+            workflow.candidate,
+            after_rank=workflow.current_rank,
+        ).first()
+    if workflow.current_resume_id:
+        current = resumes.filter(pk=workflow.current_resume_id).first()
+        if current:
+            return current
+    return resumes.first()
 
 
 def _classify_resume(resume, strategy, jobs, mode):
@@ -459,6 +608,13 @@ def _create_agent_decision(workflow, resume, result):
         evidence=output.evidence,
         risks=risks,
         risk_flags=risks,
+        ai_specialist_match=bool(getattr(output, "ai_specialist_match", False)),
+        ai_specialist_confidence=float(
+            getattr(output, "ai_specialist_confidence", 0) or 0
+        ),
+        ai_specialist_evidence=list(
+            getattr(output, "ai_specialist_evidence", []) or []
+        ),
         model_name=model_config.model_name,
         prompt_version=model_config.prompt_version,
         decision_version=model_config.decision_version,
@@ -472,7 +628,7 @@ def _ai_audit_versions():
     except ValueError:
         return {
             "model_name": "",
-            "prompt_version": "resume-screening-v1",
+            "prompt_version": "resume-screening-v2",
             "decision_version": "decision-v1",
         }
     return {
@@ -601,7 +757,14 @@ def _process_ai_recommendation(
 ):
     _touch_workflow(workflow, resume, "ai")
     try:
-        result = ai_service.screen_resume(resume, job, force=force)
+        department = _secondary_department(job.department)
+        result = ai_service.screen_resume(
+            resume,
+            job,
+            department=department,
+            contact=_first_secondary_contact(department),
+            force=force,
+        )
     except ai_service.AIServiceError as exc:
         _create_agent_failure_decision(
             workflow,
@@ -636,6 +799,67 @@ def _apply_ai_result(workflow, resume, *, matched_rule, result):
     resume.save(
         update_fields=["job", "job_category", "category_mode", "category_reason"]
     )
+    special_config = ai_config.get_ai_special_route_config()
+    special_hit = (
+        special_config.enabled
+        and decision.ai_specialist_match
+        and decision.ai_specialist_confidence is not None
+        and decision.ai_specialist_confidence > special_config.threshold
+    )
+    if special_hit:
+        try:
+            special_config = ai_config.get_ai_special_route_config(validate=True)
+            secondary_contact = m.Contact.objects.select_related("department").get(
+                pk=special_config.secondary_contact_id
+            )
+            tertiary_contact = m.Contact.objects.select_related(
+                "department__parent"
+            ).get(pk=special_config.tertiary_contact_id)
+        except (m.Contact.DoesNotExist, TypeError, ValueError) as exc:
+            detail = f"AI 专项分流配置不可用：{exc}"
+            decision.error_code = "ai_special_route_unavailable"
+            decision.error_message = detail
+            decision.special_route_config_snapshot = special_config.snapshot()
+            decision.save(
+                update_fields=[
+                    "error_code",
+                    "error_message",
+                    "special_route_config_snapshot",
+                ]
+            )
+            _block_current_volunteer(
+                workflow,
+                "ai_special_route_unavailable",
+                detail,
+            )
+            return None
+
+        snapshot = special_config.snapshot()
+        attempt = _force_assign_locked(
+            workflow=workflow,
+            resume=resume,
+            contact=tertiary_contact,
+            secondary_contact=secondary_contact,
+            source=m.AssignmentAttempt.SOURCE_AI,
+            mode="ai",
+            match_reason=(
+                "AI 专项强制分配：专项置信度 "
+                f"{decision.ai_specialist_confidence:.2%}，目标三级接口人“{tertiary_contact.name}”"
+            ),
+            agent_decision=decision,
+            confidence_score=decision.confidence_score,
+            route_code="ai_special_route",
+            special_route_confidence=decision.ai_specialist_confidence,
+            special_route_evidence=decision.ai_specialist_evidence,
+            special_route_config_snapshot=snapshot,
+            invalidate_processing=False,
+        )
+        decision.special_route_applied = True
+        decision.special_route_config_snapshot = snapshot
+        decision.save(
+            update_fields=["special_route_applied", "special_route_config_snapshot"]
+        )
+        return attempt
     if decision.recommendation == m.AgentDispatchDecision.RECOMMEND_ARCHIVE:
         _archive(
             workflow,
@@ -672,6 +896,7 @@ def _apply_ai_result(workflow, resume, *, matched_rule, result):
 
 AI_SCOPE_TERMINAL_STATUSES = {
     "success",
+    "needs_attention",
     "failed",
     "skipped_manual_change",
     "cancelled",
@@ -714,7 +939,11 @@ def release_ai_scope_claim(scope_item_id):
 
 
 def _scope_revision_changed(scope_item, workflow, workflow_created):
-    expected = scope_item.workflow_revision_at_submit
+    expected = (
+        scope_item.workflow_revision_at_prepare
+        if scope_item.workflow_revision_at_prepare is not None
+        else scope_item.workflow_revision_at_submit
+    )
     if expected is None:
         # revision=0 且仅带自动处理租约时，表示另一个自动任务刚创建流程；
         # 先等待它结束，再依据最终 revision 决定是否跳过。
@@ -735,9 +964,13 @@ def process_ai_scope_item(run_id, scope_item_id):
         if item.status in AI_SCOPE_TERMINAL_STATUSES:
             return {"status": item.status, "already_terminal": True}
         if run.cancel_requested_at:
-            item.status = "cancelled"
-            item.finished_at = now
-            item.save(update_fields=["status", "finished_at"])
+            _scope_result(
+                item,
+                status="cancelled",
+                result_type=RESULT_CANCELLED,
+                reason_code="cancelled",
+                message="任务已取消",
+            )
             return {"status": "cancelled"}
 
         candidate = m.Candidate.objects.select_for_update().get(pk=item.candidate_id)
@@ -798,16 +1031,23 @@ def process_ai_scope_item(run_id, scope_item_id):
         )
         claimed_revision = workflow.revision
         candidate_id = candidate.id
-        retry_resume_id = (run.scope or {}).get("retry_resume_id")
+        prepared_resume_id = item.prepared_resume_id
+        prepared_job_id = item.prepared_job_id
+        prepared_department_id = item.prepared_department_id
+        prepared_contact_id = item.prepared_contact_id
         force_ai = _should_force_ai(run.scope)
 
-    candidate = m.Candidate.objects.prefetch_related("resumes").get(pk=candidate_id)
-    rules = school_admission.active_rules()
-    admission = school_admission.evaluate(candidate, rules)
-    resume = None
-    job = None
-    prerequisite_code = ""
-    prerequisite_detail = ""
+    resume = m.Resume.objects.filter(pk=prepared_resume_id).first()
+    job = m.Job.objects.select_related("department", "department__parent").filter(
+        pk=prepared_job_id,
+        is_active=True,
+    ).first()
+    department = m.Department.objects.filter(pk=prepared_department_id, level=2).first()
+    contact = m.Contact.objects.select_related("department").filter(
+        pk=prepared_contact_id,
+        contact_level=m.Contact.LEVEL_SECONDARY,
+        is_active=True,
+    ).first()
     result = None
     ai_error = None
     last_cancel_check = [0.0, False]
@@ -821,27 +1061,33 @@ def process_ai_scope_item(run_id, scope_item_id):
             ).exists()
         return last_cancel_check[1]
 
-    if admission.passed:
-        resume = (
-            _candidate_resumes(candidate).filter(pk=retry_resume_id).first()
-            if retry_resume_id
-            else _candidate_resumes(candidate).first()
+    references_valid = bool(
+        resume
+        and job
+        and department
+        and contact
+        and contact.department_id == department.id
+        and _secondary_department(job.department)
+        and _secondary_department(job.department).id == department.id
+    )
+    if not references_valid:
+        ai_error = ai_service.AIServiceError(
+            "ai_reference_invalidated",
+            "Rule 前置检查固定的岗位、二级部门或二级接口人在 AI 执行前已失效",
         )
-        if resume:
-            job, prerequisite_code, prerequisite_detail = _ai_current_volunteer_prerequisite(
-                resume
+    else:
+        try:
+            result = ai_service.screen_resume(
+                resume,
+                job,
+                department=department,
+                contact=contact,
+                force=force_ai,
+                processing_run_id=run_id,
+                cancelled=cancelled,
             )
-        if resume and job and not prerequisite_detail:
-            try:
-                result = ai_service.screen_resume(
-                    resume,
-                    job,
-                    force=force_ai,
-                    processing_run_id=run_id,
-                    cancelled=cancelled,
-                )
-            except ai_service.AIServiceError as exc:
-                ai_error = exc
+        except ai_service.AIServiceError as exc:
+            ai_error = exc
 
     with transaction.atomic():
         run = m.ProcessingRun.objects.select_for_update().get(pk=run_id)
@@ -866,14 +1112,16 @@ def process_ai_scope_item(run_id, scope_item_id):
             return {"status": "skipped_manual_change"}
         if run.cancel_requested_at:
             _release_processing_claim(workflow.id, item.dispatch_token)
-            item.status = "cancelled"
-            item.finished_at = timezone.now()
-            item.save(update_fields=["status", "finished_at"])
+            _scope_result(
+                item,
+                status="cancelled",
+                result_type=RESULT_CANCELLED,
+                reason_code="cancelled",
+                message="任务已取消",
+            )
             return {"status": "cancelled"}
 
         workflow._processing_run = run
-        if scoped_reprocess:
-            _reopen_workflow(workflow, "ai")
         cancelled_attempts = _cancel_unfeedbacked_attempts(
             workflow,
             m.AssignmentAttempt.CANCEL_RERUN,
@@ -882,14 +1130,10 @@ def process_ai_scope_item(run_id, scope_item_id):
             else None,
             source=None if scoped_reprocess else m.AssignmentAttempt.SOURCE_AI,
         )
-        workflow.current_rank = None
-        workflow.current_resume = None
         workflow.dispatch_strategy = "ai"
         _clear_block(workflow)
         workflow.save(
             update_fields=[
-                "current_rank",
-                "current_resume",
                 "dispatch_strategy",
                 "block_reason",
                 "block_detail",
@@ -898,59 +1142,48 @@ def process_ai_scope_item(run_id, scope_item_id):
         )
 
         created = False
-        failed = False
         recommendation = ""
-        if not admission.passed:
-            _archive(
+        if ai_error:
+            if resume:
+                _touch_workflow(workflow, resume, "ai")
+                decision = _create_agent_failure_decision(
+                    workflow,
+                    resume,
+                    error_code=ai_error.code,
+                    error_message=ai_error.message,
+                    profile=ai_error.profile,
+                )
+                error_message = decision.error_message
+            else:
+                error_message = ai_error.message
+            status_value, result_type, reason_code = _ai_failure_result(ai_error.code)
+            _block_current_volunteer(
                 workflow,
-                m.CandidateWorkflow.ARCHIVE_SCHOOL_RULE_NOT_MATCHED,
-                admission.failure_detail,
-            )
-        elif not resume:
-            _archive(
-                workflow,
-                m.CandidateWorkflow.ARCHIVE_NO_NEXT_RESUME,
-                "没有下一条可尝试志愿",
-            )
-        elif prerequisite_detail:
-            _touch_workflow(workflow, resume, "ai")
-            decision = _create_agent_failure_decision(
-                workflow,
-                resume,
-                error_code=prerequisite_code,
-                error_message=prerequisite_detail,
-            )
-            _archive(
-                workflow,
-                m.CandidateWorkflow.ARCHIVE_AGENT_NO_RECOMMENDATION,
-                prerequisite_detail,
-            )
-            failed = True
-            item.error_code = decision.error_code
-            item.error_message = decision.error_message
-        elif ai_error:
-            _touch_workflow(workflow, resume, "ai")
-            decision = _create_agent_failure_decision(
-                workflow,
-                resume,
-                error_code=ai_error.code,
-                error_message=ai_error.message,
-                profile=ai_error.profile,
-            )
-            _archive(
-                workflow,
-                m.CandidateWorkflow.ARCHIVE_AGENT_NO_RECOMMENDATION,
+                reason_code,
                 f"AI 未形成有效建议：{ai_error.message}",
             )
-            failed = True
-            item.error_code = decision.error_code
-            item.error_message = decision.error_message
+            _release_processing_claim(workflow.id, item.dispatch_token)
+            _scope_result(
+                item,
+                status=status_value,
+                result_type=result_type,
+                reason_code=reason_code,
+                message=error_message,
+            )
+            return {
+                "status": item.status,
+                "result_type": item.result_type,
+                "reason_code": item.reason_code,
+                "recommendation": "",
+                "created": False,
+                "cancelled_attempts": cancelled_attempts,
+            }
         else:
             _touch_workflow(workflow, resume, "ai")
             attempt = _apply_ai_result(
                 workflow,
                 resume,
-                matched_rule=admission.matched_rule,
+                matched_rule=item.matched_rule,
                 result=result,
             )
             created = attempt is not None
@@ -958,20 +1191,35 @@ def process_ai_scope_item(run_id, scope_item_id):
             recommendation = decision.recommendation or ""
 
         _release_processing_claim(workflow.id, item.dispatch_token)
-        item.status = "failed" if failed else "success"
-        item.skip_reason = ""
-        item.finished_at = timezone.now()
-        item.save(
-            update_fields=[
-                "status",
-                "skip_reason",
-                "finished_at",
-                "error_code",
-                "error_message",
-            ]
-        )
+        if decision.error_code == "ai_special_route_unavailable":
+            _scope_result(
+                item,
+                status="needs_attention",
+                result_type=RESULT_NEEDS_ATTENTION,
+                reason_code="ai_special_route_unavailable",
+                message=decision.error_message,
+            )
+        else:
+            reason_code = (
+                "ai_special_route"
+                if decision.special_route_applied
+                else {
+                    m.AgentDispatchDecision.RECOMMEND_DISPATCH: "ai_dispatched",
+                    m.AgentDispatchDecision.RECOMMEND_REVIEW: "ai_review",
+                    m.AgentDispatchDecision.RECOMMEND_ARCHIVE: "ai_archived",
+                }.get(decision.recommendation, "ai_completed")
+            )
+            _scope_result(
+                item,
+                status="success",
+                result_type=RESULT_COMPLETED,
+                reason_code=reason_code,
+                message=decision.reason or decision.summary,
+            )
         return {
             "status": item.status,
+            "result_type": item.result_type,
+            "reason_code": item.reason_code,
             "recommendation": recommendation,
             "created": created,
             "cancelled_attempts": cancelled_attempts,
@@ -986,19 +1234,23 @@ def _create_next_auto_attempt(
     *,
     force_ai=False,
     retry_resume_id=None,
+    admission=None,
+    advance_after_feedback=False,
 ):
     """为候选人创建下一条自动分配尝试。
 
     这是 Rule/AI 共用的自动分配入口。共同硬规则先于策略执行：
     1. 院校准入不通过则直接归档，不进入岗位/专业匹配。
-    2. 按当前 workflow.current_rank 后续志愿顺序逐条尝试。
+    2. 每次只处理当前有效志愿；收到未通过反馈后，workflow.current_rank 才推进。
     3. 当前志愿必须能匹配岗位、二级部门和启用的二级接口人，才生成尝试。
 
     AI 只评估当前有效志愿；任何 AI 失败都不会跳志愿或回退 Rule。
     """
     workflow._processing_run = processing_run
     candidate = workflow.candidate
-    admission = school_admission.evaluate(candidate, rules)
+    # 正式流水线已在 Step2 固化院校标签与准入结果，Step3 直接使用该快照，
+    # 避免后续规则或 AI 重复判断、改写院校结论。旧的直接调用入口仍可自行评估。
+    admission = admission or school_admission.evaluate(candidate, rules)
     if not admission.passed:
         _archive(
             workflow,
@@ -1008,10 +1260,10 @@ def _create_next_auto_attempt(
         return None
 
     if mode == "ai":
-        resume = (
-            _candidate_resumes(candidate).filter(pk=retry_resume_id).first()
-            if retry_resume_id
-            else _candidate_resumes(candidate, after_rank=workflow.current_rank).first()
+        resume = _effective_resume_for_attempt(
+            workflow,
+            retry_resume_id=retry_resume_id,
+            advance_after_feedback=advance_after_feedback,
         )
         if not resume:
             _archive(
@@ -1051,72 +1303,387 @@ def _create_next_auto_attempt(
         .filter(is_active=True)
     )
     strategy = get_rule_strategy()
-    had_resume = False
-    # 所有志愿均无法创建尝试时，保留每条志愿的真实缺口；首条志愿决定归档码。
-    gaps = []
-    after_rank = workflow.current_rank if workflow.current_rank else None
-    for resume in _candidate_resumes(candidate, after_rank=after_rank):
-        had_resume = True
-        _touch_workflow(workflow, resume, mode)
-        job, _category, classify_reason = _classify_resume(resume, strategy, jobs, "rule")
-        if not job:
-            gaps.append(
-                (
-                    m.CandidateWorkflow.ARCHIVE_JOB_NOT_MATCHED,
-                    _rule_job_gap_detail(resume, strategy, jobs),
+    resume = _effective_resume_for_attempt(
+        workflow,
+        advance_after_feedback=advance_after_feedback,
+    )
+    if not resume:
+        _archive(
+            workflow,
+            m.CandidateWorkflow.ARCHIVE_NO_NEXT_RESUME,
+            "没有下一条可尝试志愿",
+        )
+        return None
+
+    _touch_workflow(workflow, resume, mode)
+    job, _category, classify_reason = _classify_resume(resume, strategy, jobs, "rule")
+    if not job:
+        _archive(
+            workflow,
+            m.CandidateWorkflow.ARCHIVE_JOB_NOT_MATCHED,
+            _rule_job_gap_detail(resume, strategy, jobs),
+        )
+        return None
+    department = _secondary_department(job.department)
+    if not department:
+        _archive(
+            workflow,
+            m.CandidateWorkflow.ARCHIVE_DEPARTMENT_NOT_FOUND,
+            f"{_volunteer_label(resume)}已匹配{_job_label(job)}，"
+            "但该岗位未配置有效二级部门",
+        )
+        return None
+    contact = _first_secondary_contact(department)
+    if not contact:
+        _block_current_volunteer(
+            workflow,
+            m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND,
+            f"{_volunteer_label(resume)}已匹配{_job_label(job)}并定位二级部门“{department.name}”，"
+            "但该部门没有启用的二级接口人",
+        )
+        return None
+
+    return _create_attempt(
+        workflow=workflow,
+        resume=resume,
+        contact=contact,
+        source=m.AssignmentAttempt.SOURCE_RULE,
+        mode="rule",
+        matched_rule=admission.matched_rule,
+        match_reason=_rule_match_reason(
+            admission, resume, job, contact, classify_reason
+        ),
+    )
+
+
+def _admission_reason_code(admission):
+    if admission.reason_code:
+        return admission.reason_code
+    detail = admission.failure_detail or ""
+    return (
+        "education_not_eligible"
+        if "最高学历缺失" in detail or "最高学历不在" in detail
+        else "school_not_eligible"
+    )
+
+
+def run_school_gate(scope=None, mode="rule", processing_run=None, processing_stage=None):
+    """Step2：在指定范围内完整重算院校标签，并执行学历/院校准入。"""
+    scope = scope or {}
+    rules = school_admission.active_rules()
+    candidate_ids = list(candidate_ids_for_scope(scope))
+    scoped_reprocess = _is_scoped_reprocess(scope)
+    passed = 0
+    rejected = 0
+
+    for candidate_id in candidate_ids:
+        raise_if_cancel_requested(processing_run)
+        with transaction.atomic():
+            item = (
+                m.ProcessingRunScopeItem.objects.select_for_update().get(
+                    run=processing_run, candidate_id=candidate_id
                 )
+                if processing_run
+                else None
             )
-            continue
-        department = _secondary_department(job.department)
-        if not department:
-            gaps.append(
-                (
-                    m.CandidateWorkflow.ARCHIVE_DEPARTMENT_NOT_FOUND,
-                    f"{_volunteer_label(resume)}已匹配{_job_label(job)}，"
-                    "但该岗位未配置有效二级部门",
+            if item and item.result_type:
+                continue
+            candidate = m.Candidate.objects.select_for_update().get(pk=candidate_id)
+            workflow, created = m.CandidateWorkflow.objects.select_for_update().get_or_create(
+                candidate=candidate
+            )
+            if item and _scope_revision_changed(item, workflow, created):
+                item.status = "skipped_manual_change"
+                item.skip_reason = "workflow_changed_after_submit"
+                item.finished_at = timezone.now()
+                item.save(update_fields=["status", "skip_reason", "finished_at"])
+                continue
+            if scoped_reprocess:
+                _reopen_workflow(workflow, mode)
+                _cancel_unfeedbacked_attempts(
+                    workflow,
+                    m.AssignmentAttempt.CANCEL_RERUN,
+                    sources=[m.AssignmentAttempt.SOURCE_RULE, m.AssignmentAttempt.SOURCE_AI],
                 )
+            elif workflow.status in {
+                m.CandidateWorkflow.STATUS_PASSED,
+                m.CandidateWorkflow.STATUS_ARCHIVED,
+            }:
+                if item:
+                    _scope_result(
+                        item,
+                        status="success",
+                        result_type=RESULT_COMPLETED,
+                        reason_code="terminal_workflow",
+                        message="候选人已处于终态，本次导入不重复处理",
+                    )
+                passed += 1
+                continue
+
+            classify_school.classify_candidates([candidate], overwrite=True)
+            admission = school_admission.evaluate(candidate, rules)
+            workflow.dispatch_strategy = mode
+            workflow.started_at = workflow.started_at or timezone.now()
+            workflow.save(update_fields=["dispatch_strategy", "started_at", "updated_at"])
+            if not admission.passed:
+                resumes = list(_candidate_resumes(candidate))
+                if resumes:
+                    workflow.current_resume = resumes[0]
+                    workflow.current_rank = resumes[0].volunteer_rank
+                    workflow.save(
+                        update_fields=["current_resume", "current_rank", "updated_at"]
+                    )
+                _archive(
+                    workflow,
+                    m.CandidateWorkflow.ARCHIVE_SCHOOL_RULE_NOT_MATCHED,
+                    admission.failure_detail,
+                )
+                if item:
+                    _scope_result(
+                        item,
+                        status="success",
+                        result_type=RESULT_COMPLETED,
+                        reason_code=_admission_reason_code(admission),
+                        message=admission.failure_detail,
+                    )
+                rejected += 1
+                continue
+
+            if item:
+                item.matched_rule = admission.matched_rule
+                item.workflow_revision_at_prepare = workflow.revision
+                item.status = "pending"
+                item.save(
+                    update_fields=[
+                        "matched_rule",
+                        "workflow_revision_at_prepare",
+                        "status",
+                    ]
+                )
+            passed += 1
+
+    sync_processing_run_results(processing_run, processing_stage)
+    if processing_stage:
+        processing_stage.total_count = len(candidate_ids)
+        processing_stage.processed_count = len(candidate_ids)
+        processing_stage.success_count = len(candidate_ids)
+        processing_stage.completed_count = rejected
+        processing_stage.save(
+            update_fields=[
+                "total_count",
+                "processed_count",
+                "success_count",
+                "completed_count",
+            ]
+        )
+    return f"院校分类与准入完成：通过 {passed}，规则不通过 {rejected}"
+
+
+def _ai_rule_precheck(resume):
+    job = _current_volunteer_job(resume)
+    if not job:
+        return None, None, None, "job_not_found", _job_not_configured_detail(resume)
+    department = _secondary_department(job.department)
+    if not department:
+        return (
+            job,
+            None,
+            None,
+            "secondary_department_missing",
+            f"{_volunteer_label(resume)}已匹配{_job_label(job)}，但该岗位未配置有效二级部门",
+        )
+    contact = _first_secondary_contact(department)
+    if not contact:
+        return (
+            job,
+            department,
+            None,
+            "secondary_contact_missing",
+            f"{_volunteer_label(resume)}已匹配{_job_label(job)}并定位二级部门“{department.name}”，"
+            "但该部门没有启用的二级接口人",
+        )
+    return job, department, contact, "", ""
+
+
+def _rule_result_code(workflow, attempt):
+    if attempt:
+        return "rule_assigned", attempt.match_reason
+    if workflow.block_reason == m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND:
+        return "secondary_contact_missing", workflow.block_detail
+    if workflow.archive_reason == m.CandidateWorkflow.ARCHIVE_SCHOOL_RULE_NOT_MATCHED:
+        code = (
+            "education_not_eligible"
+            if "最高学历缺失" in (workflow.archive_detail or "")
+            or "最高学历不在" in (workflow.archive_detail or "")
+            else "school_not_eligible"
+        )
+        return code, workflow.archive_detail
+    if workflow.archive_reason == m.CandidateWorkflow.ARCHIVE_DEPARTMENT_NOT_FOUND:
+        return "secondary_department_missing", workflow.archive_detail
+    if workflow.archive_reason == m.CandidateWorkflow.ARCHIVE_JOB_NOT_MATCHED:
+        code = (
+            "major_not_matched"
+            if "专业" in (workflow.archive_detail or "")
+            else "job_not_found"
+        )
+        return code, workflow.archive_detail
+    return "no_resume_available", workflow.archive_detail or "没有下一条可尝试志愿"
+
+
+def run_rule_precheck(scope=None, mode="rule", processing_run=None, processing_stage=None):
+    """Step3：Rule 模式完成确定性分配；AI 模式只冻结岗位/部门/接口人引用。"""
+    scope = scope or {}
+    candidate_ids = list(candidate_ids_for_scope(scope))
+    rules = school_admission.active_rules()
+    prepared = 0
+    completed = 0
+    retry_resume_id = scope.get("retry_resume_id")
+
+    for candidate_id in candidate_ids:
+        raise_if_cancel_requested(processing_run)
+        with transaction.atomic():
+            item = (
+                m.ProcessingRunScopeItem.objects.select_for_update().get(
+                    run=processing_run, candidate_id=candidate_id
+                )
+                if processing_run
+                else None
             )
-            continue
-        contact = _first_secondary_contact(department)
-        if not contact:
-            # 岗位与二级部门已经明确命中时，缺二级接口人属于数据维护阻塞，
-            # 不能跳过当前志愿尝试下一志愿，否则会破坏候选人的志愿优先级。
-            _block_current_volunteer(
+            if item and (item.result_type or item.status == "skipped_manual_change"):
+                continue
+            candidate = m.Candidate.objects.select_for_update().prefetch_related(
+                "resumes"
+            ).get(pk=candidate_id)
+            workflow = m.CandidateWorkflow.objects.select_for_update().get(
+                candidate=candidate
+            )
+            expected_revision = (
+                item.workflow_revision_at_prepare
+                if item and item.workflow_revision_at_prepare is not None
+                else item.workflow_revision_at_submit if item else workflow.revision
+            )
+            if workflow.revision != expected_revision:
+                if item:
+                    item.status = "skipped_manual_change"
+                    item.skip_reason = "workflow_changed_before_rule_precheck"
+                    item.finished_at = timezone.now()
+                    item.save(update_fields=["status", "skip_reason", "finished_at"])
+                continue
+
+            workflow._processing_run = processing_run
+            if mode == "rule":
+                admission = school_admission.SchoolAdmissionResult(
+                    passed=True,
+                    matched_rule=item.matched_rule if item else None,
+                    has_active_rules=bool(item and item.matched_rule_id),
+                )
+                attempt = _create_next_auto_attempt(
+                    workflow,
+                    rules,
+                    mode="rule",
+                    processing_run=processing_run,
+                    admission=admission,
+                )
+                code, message = _rule_result_code(workflow, attempt)
+                if item:
+                    _scope_result(
+                        item,
+                        status="success",
+                        result_type=RESULT_COMPLETED,
+                        reason_code=code,
+                        message=message,
+                    )
+                completed += 1
+                continue
+
+            resume = _effective_resume_for_attempt(
                 workflow,
-                m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND,
-                f"{_volunteer_label(resume)}已匹配{_job_label(job)}并定位二级部门“{department.name}”，"
-                "但该部门没有启用的二级接口人",
+                retry_resume_id=retry_resume_id,
             )
-            return None
+            if not resume:
+                _archive(
+                    workflow,
+                    m.CandidateWorkflow.ARCHIVE_NO_NEXT_RESUME,
+                    "没有下一条可尝试志愿",
+                )
+                if item:
+                    _scope_result(
+                        item,
+                        status="success",
+                        result_type=RESULT_COMPLETED,
+                        reason_code="no_resume_available",
+                        message="没有下一条可尝试志愿",
+                    )
+                completed += 1
+                continue
 
-        return _create_attempt(
-            workflow=workflow,
-            resume=resume,
-            contact=contact,
-            source=m.AssignmentAttempt.SOURCE_RULE,
-            mode="rule",
-            matched_rule=admission.matched_rule,
-            match_reason=_rule_match_reason(
-                admission, resume, job, contact, classify_reason
-            ),
-        )
+            job, department, contact, reason_code, detail = _ai_rule_precheck(resume)
+            _touch_workflow(workflow, resume, "ai")
+            if reason_code:
+                if reason_code == "secondary_contact_missing":
+                    _block_current_volunteer(workflow, reason_code, detail)
+                else:
+                    archive_reason = (
+                        m.CandidateWorkflow.ARCHIVE_DEPARTMENT_NOT_FOUND
+                        if reason_code == "secondary_department_missing"
+                        else m.CandidateWorkflow.ARCHIVE_JOB_NOT_MATCHED
+                    )
+                    _archive(workflow, archive_reason, detail)
+                if item:
+                    _scope_result(
+                        item,
+                        status="success",
+                        result_type=RESULT_COMPLETED,
+                        reason_code=reason_code,
+                        message=detail,
+                    )
+                completed += 1
+                continue
 
-    if not had_resume:
-        _archive(
-            workflow,
-            m.CandidateWorkflow.ARCHIVE_NO_NEXT_RESUME,
-            "没有下一条可尝试志愿",
+            resume.job = job
+            resume.job_category = job.category
+            resume.category_mode = "ai"
+            resume.category_reason = "Rule 前置检查已固定当前志愿岗位、二级部门和二级接口人"
+            resume.save(
+                update_fields=["job", "job_category", "category_mode", "category_reason"]
+            )
+            if item:
+                item.prepared_resume = resume
+                item.prepared_job = job
+                item.prepared_department = department
+                item.prepared_contact = contact
+                item.workflow_revision_at_prepare = workflow.revision
+                item.status = "pending"
+                item.save(
+                    update_fields=[
+                        "prepared_resume",
+                        "prepared_job",
+                        "prepared_department",
+                        "prepared_contact",
+                        "workflow_revision_at_prepare",
+                        "status",
+                    ]
+                )
+            prepared += 1
+
+    sync_processing_run_results(processing_run, processing_stage)
+    if processing_stage:
+        processing_stage.total_count = len(candidate_ids)
+        processing_stage.processed_count = len(candidate_ids)
+        processing_stage.success_count = len(candidate_ids)
+        processing_stage.completed_count = completed
+        processing_stage.save(
+            update_fields=[
+                "total_count",
+                "processed_count",
+                "success_count",
+                "completed_count",
+            ]
         )
-    elif gaps:
-        reason, _detail = gaps[0]
-        _archive(workflow, reason, "；".join(detail for _reason, detail in gaps))
-    else:
-        _archive(
-            workflow,
-            m.CandidateWorkflow.ARCHIVE_NO_NEXT_RESUME,
-            "没有下一条可尝试志愿",
-        )
-    return None
+    return (
+        f"Rule 前置检查完成：AI 待深度筛选 {prepared}，"
+        f"已形成明确业务结果 {completed}"
+    )
 
 
 def _sync_stage_progress(processing_stage, processing_run):
@@ -1346,6 +1913,53 @@ def _manual_target(contact, secondary_contact=None):
     raise ValueError("目标接口人层级无效")
 
 
+def _force_assign_locked(
+    *,
+    workflow,
+    resume,
+    contact,
+    secondary_contact=None,
+    source,
+    mode,
+    match_reason,
+    manual_reason="",
+    created_by=None,
+    agent_decision=None,
+    confidence_score=None,
+    route_code="",
+    special_route_confidence=None,
+    special_route_evidence=None,
+    special_route_config_snapshot=None,
+    invalidate_processing=True,
+):
+    """人工接口与 AI 专项分流共用的强制分配核心；调用方必须锁定 workflow。"""
+    if invalidate_processing:
+        _invalidate_active_processing(workflow)
+    if workflow.status == m.CandidateWorkflow.STATUS_PASSED:
+        raise ValueError("已通过候选人不可再强制分配")
+    if not contact.is_active:
+        raise ValueError("目标接口人未启用")
+    secondary_contact, sub_contact = _manual_target(contact, secondary_contact)
+    _cancel_unfeedbacked_attempts(workflow, m.AssignmentAttempt.CANCEL_MANUAL_REPLACED)
+    return _create_attempt(
+        workflow=workflow,
+        resume=resume,
+        contact=secondary_contact,
+        sub_contact=sub_contact,
+        source=source,
+        mode=mode,
+        match_reason=match_reason,
+        manual_reason=manual_reason,
+        created_by=created_by,
+        agent_decision=agent_decision,
+        confidence_score=confidence_score,
+        route_code=route_code,
+        special_route_confidence=special_route_confidence,
+        special_route_evidence=special_route_evidence,
+        special_route_config_snapshot=special_route_config_snapshot,
+    )
+
+
 def _invalidate_active_processing(workflow):
     """人工流程优先：清除自动处理令牌，使在途 AI 结果无法提交。"""
     m.CandidateWorkflow.objects.filter(pk=workflow.pk).update(
@@ -1386,19 +2000,11 @@ def manual_assign(
     workflow, _ = m.CandidateWorkflow.objects.select_for_update().get_or_create(
         candidate=candidate
     )
-    _invalidate_active_processing(workflow)
-    if workflow.status == m.CandidateWorkflow.STATUS_PASSED:
-        raise ValueError("已通过候选人不可再强制分配")
-    if not contact.is_active:
-        raise ValueError("目标接口人未启用")
-
-    secondary_contact, sub_contact = _manual_target(contact, secondary_contact)
-    _cancel_unfeedbacked_attempts(workflow, m.AssignmentAttempt.CANCEL_MANUAL_REPLACED)
-    return _create_attempt(
+    return _force_assign_locked(
         workflow=workflow,
         resume=resume,
-        contact=secondary_contact,
-        sub_contact=sub_contact,
+        contact=contact,
+        secondary_contact=secondary_contact,
         source=m.AssignmentAttempt.SOURCE_MANUAL,
         mode="manual",
         match_reason="HR 手动强制分配",
@@ -1572,7 +2178,10 @@ def submit_feedback(attempt, result, note="", *, user=None):
     )
     rules = school_admission.active_rules()
     created = _create_next_auto_attempt(
-        workflow, rules, mode=workflow.dispatch_strategy or attempt.match_mode or "rule"
+        workflow,
+        rules,
+        mode=workflow.dispatch_strategy or attempt.match_mode or "rule",
+        advance_after_feedback=True,
     )
     if not created and workflow.archive_reason == m.CandidateWorkflow.ARCHIVE_NO_NEXT_RESUME:
         workflow.archive_reason = m.CandidateWorkflow.ARCHIVE_ALL_REJECTED

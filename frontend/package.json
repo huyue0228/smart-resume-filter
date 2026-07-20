@@ -15,9 +15,11 @@
     "@ant-design/pro-components": "^2.8.10",
     "antd": "^5.29.3",
     "axios": "^1.18.1",
+    "chart.js": "^4.5.1",
     "pdfjs-dist": "^6.1.200",
     "pinyin-pro": "^3.28.1",
     "react": "^18.3.1",
+    "react-chartjs-2": "^5.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^7.18.0"
   },

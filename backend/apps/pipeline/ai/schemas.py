@@ -2,16 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal
 
-from pydantic import BaseModel, Field
-
-
-class EducationItem(BaseModel):
-    school: str
-    degree: str
-    major: str
-    period: str
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ExperienceItem(BaseModel):
@@ -23,16 +16,18 @@ class ExperienceItem(BaseModel):
 
 
 class ScoreBreakdown(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     major_match: float = Field(ge=0, le=1)
     skills_match: float = Field(ge=0, le=1)
     experience_evidence: float = Field(ge=0, le=1)
     job_requirement: float = Field(ge=0, le=1)
-    department_certainty: float = Field(ge=0, le=1)
     resume_quality: float = Field(ge=0, le=1)
 
 
 class ResumeProfileOutput(BaseModel):
-    education: list[EducationItem]
+    model_config = ConfigDict(extra="forbid")
+
     major_direction: str
     projects: list[ExperienceItem]
     internships: list[ExperienceItem]
@@ -43,15 +38,17 @@ class ResumeProfileOutput(BaseModel):
 
 
 class DispatchRecommendationOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     recommendation: Literal["dispatch", "review", "archive"]
-    job_id: Optional[int]
-    department_id: Optional[int]
-    contact_id: Optional[int]
     score_breakdown: ScoreBreakdown
     summary: str
     reason: str
     evidence: list[str]
     risks: list[str]
+    ai_specialist_match: bool = False
+    ai_specialist_confidence: float = Field(default=0, ge=0, le=1)
+    ai_specialist_evidence: list[str] = Field(default_factory=list)
 
 
 class ResumeScreeningOutput(BaseModel):

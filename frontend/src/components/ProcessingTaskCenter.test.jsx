@@ -34,6 +34,7 @@ describe('ProcessingTaskCenter', () => {
           total_count: 2,
           processed_count: 2,
           success_count: 2,
+          completed_count: 2,
           review_count: 1,
           dispatch_count: 1,
         }],
@@ -47,7 +48,6 @@ describe('ProcessingTaskCenter', () => {
       </MemoryRouter>,
     )
 
-    await userEvent.click(screen.getByRole('button', { name: /处理任务/ }))
     await userEvent.click(await screen.findByRole('button', { name: '展开成功子项' }))
     const reviewButton = await screen.findByRole('button', {
       name: '筛选本任务待复核简历 1 名',
@@ -72,6 +72,7 @@ describe('ProcessingTaskCenter', () => {
           total_count: 2,
           processed_count: 2,
           success_count: 2,
+          completed_count: 2,
           review_count: 1,
           dispatch_count: 0,
           archive_count: 0,
@@ -80,13 +81,12 @@ describe('ProcessingTaskCenter', () => {
     })
 
     render(<MemoryRouter><ProcessingTaskCenter /></MemoryRouter>)
-    await userEvent.click(screen.getByRole('button', { name: /处理任务/ }))
     const expandButtons = await screen.findAllByRole('button', { name: '展开成功子项' })
     await userEvent.click(expandButtons[0])
     await userEvent.click(expandButtons[1])
 
     expect(screen.getAllByRole('button', { name: '收起成功子项' })).toHaveLength(2)
-    expect(screen.getAllByText(/成功子项合计可小于成功总数/)).toHaveLength(2)
+    expect(screen.getAllByText(/AI 业务子项合计可小于处理完成总数/)).toHaveLength(2)
     const disabledDispatch = screen.getAllByRole('button', {
       name: '筛选本任务待下发简历 0 名',
     })
@@ -107,6 +107,7 @@ describe('ProcessingTaskCenter', () => {
           total_count: 2,
           processed_count: 2,
           success_count: 1,
+          completed_count: 1,
           failed_count: 0,
           skipped_count: 1,
           cancelled_count: 0,
@@ -120,7 +121,6 @@ describe('ProcessingTaskCenter', () => {
         <CurrentLocation />
       </MemoryRouter>,
     )
-    await userEvent.click(screen.getByRole('button', { name: /处理任务/ }))
     const failedButton = await screen.findByRole('button', {
       name: '筛选本任务失败简历 0 名',
     })
@@ -132,5 +132,48 @@ describe('ProcessingTaskCenter', () => {
     await waitFor(() => expect(screen.getByTestId('location').textContent).toBe(
       '/resumes?processing_run_id=20&processing_result=skipped',
     ))
+  })
+
+  it('switches between card and list views while keeping result navigation', async () => {
+    fetchPipelineRuns.mockResolvedValue({
+      data: {
+        results: [{
+          id: 21,
+          step: 'step2',
+          mode: 'rule',
+          status: 'success',
+          created_at: '2026-07-14T10:00:00Z',
+          elapsed_seconds: 5,
+          total_count: 1,
+          processed_count: 1,
+          completed_count: 1,
+        }],
+      },
+    })
+
+    render(
+      <MemoryRouter>
+        <ProcessingTaskCenter />
+        <CurrentLocation />
+      </MemoryRouter>,
+    )
+
+    expect(await screen.findByText('任务耗时')).toBeTruthy()
+    expect(screen.queryByRole('columnheader', { name: '任务' })).toBeNull()
+
+    await userEvent.click(screen.getByText('列表'))
+    expect(await screen.findByRole('columnheader', { name: '任务' })).toBeTruthy()
+    expect(screen.getByRole('columnheader', { name: '处理结果' })).toBeTruthy()
+
+    await userEvent.click(screen.getByRole('button', {
+      name: '筛选本任务处理完成简历 1 名',
+    }))
+    await waitFor(() => expect(screen.getByTestId('location').textContent).toBe(
+      '/resumes?processing_run_id=21&processing_result=completed',
+    ))
+
+    await userEvent.click(screen.getByText('卡片'))
+    expect(await screen.findByText('处理进度')).toBeTruthy()
+    expect(screen.queryByRole('columnheader', { name: '任务' })).toBeNull()
   })
 })

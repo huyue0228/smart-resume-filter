@@ -282,6 +282,8 @@ class CandidateSerializer(serializers.ModelSerializer):
     archive_reason = serializers.SerializerMethodField()
     archive_detail = serializers.SerializerMethodField()
     allocation_source = serializers.SerializerMethodField()
+    processing_result = serializers.SerializerMethodField()
+    reason_code = serializers.SerializerMethodField()
     resumes = serializers.SerializerMethodField()
     attempts = serializers.SerializerMethodField()
     current_attempt = serializers.SerializerMethodField()
@@ -322,6 +324,8 @@ class CandidateSerializer(serializers.ModelSerializer):
             "archive_reason",
             "archive_detail",
             "allocation_source",
+            "processing_result",
+            "reason_code",
             "resumes",
             "attempts",
             "current_attempt",
@@ -476,6 +480,26 @@ class CandidateSerializer(serializers.ModelSerializer):
             return attempt.source if attempt else ""
         return candidate_summary.allocation_source(obj)
 
+    def _processing_item(self, obj):
+        def resolve():
+            request = self.context.get("request")
+            query_params = getattr(request, "query_params", {}) if request else {}
+            run_id = query_params.get("processing_run_id")
+            items = list(obj.processing_scope_items.all())
+            if run_id:
+                items = [item for item in items if str(item.run_id) == str(run_id)]
+            return max(items, key=lambda item: (item.created_at, item.id)) if items else None
+
+        return self._cached_candidate_value("_processing_item_cache", obj, resolve)
+
+    def get_processing_result(self, obj):
+        item = self._processing_item(obj)
+        return item.result_type if item else ""
+
+    def get_reason_code(self, obj):
+        item = self._processing_item(obj)
+        return item.reason_code if item else ""
+
     def get_resumes(self, obj):
         if not self._is_full_view():
             attempt = self._visible_attempt(obj)
@@ -522,6 +546,11 @@ class CandidateSerializer(serializers.ModelSerializer):
 
 class JobSerializer(serializers.ModelSerializer):
     department_name = serializers.CharField(source="department.name", read_only=True)
+    responsibilities = serializers.CharField(
+        required=True,
+        allow_blank=False,
+        trim_whitespace=True,
+    )
     majors = serializers.SerializerMethodField()
     major_names = serializers.ListField(
         child=serializers.CharField(allow_blank=False),
@@ -543,6 +572,7 @@ class JobSerializer(serializers.ModelSerializer):
             "job_family",
             "location",
             "education",
+            "responsibilities",
             "headcount",
             "is_active",
             "majors",
@@ -556,6 +586,20 @@ class JobSerializer(serializers.ModelSerializer):
         if department and department.level != 2:
             raise serializers.ValidationError("岗位必须绑定二级部门")
         return department
+
+    def validate(self, attrs):
+        responsibilities = attrs.get(
+            "responsibilities",
+            getattr(self.instance, "responsibilities", ""),
+        )
+        responsibilities = str(responsibilities or "").strip()
+        if not responsibilities:
+            raise serializers.ValidationError(
+                {"responsibilities": "工作职责不能为空"}
+            )
+        if "responsibilities" in attrs:
+            attrs["responsibilities"] = responsibilities
+        return attrs
 
     def _clean_major_names(self, values):
         seen = set()
@@ -1012,6 +1056,10 @@ class AssignmentAttemptSerializer(serializers.ModelSerializer):
             "evidence": decision.evidence,
             "risks": decision.risks,
             "risk_flags": decision.risk_flags,
+            "ai_specialist_match": decision.ai_specialist_match,
+            "ai_specialist_confidence": decision.ai_specialist_confidence,
+            "ai_specialist_evidence": decision.ai_specialist_evidence,
+            "special_route_applied": decision.special_route_applied,
             "error_code": decision.error_code,
             "error_message": decision.error_message,
         }
@@ -1054,6 +1102,10 @@ class AssignmentAttemptSerializer(serializers.ModelSerializer):
             "cancelled_at",
             "cancel_reason",
             "manual_reason",
+            "route_code",
+            "special_route_confidence",
+            "special_route_evidence",
+            "special_route_config_snapshot",
             "department_name_snapshot",
             "contact_name_snapshot",
             "contact_employee_no_snapshot",
@@ -1087,6 +1139,10 @@ class AssignmentAttemptSerializer(serializers.ModelSerializer):
             "feedback_at",
             "cancelled_at",
             "cancel_reason",
+            "route_code",
+            "special_route_confidence",
+            "special_route_evidence",
+            "special_route_config_snapshot",
             "created_by",
             "created_by_username_snapshot",
         ]
@@ -1105,6 +1161,7 @@ class ProcessingRunSerializer(serializers.ModelSerializer):
             "created_by", "created_by_username_snapshot",
             "celery_task_id", "celery_group_id", "params",
             "total_count", "processed_count", "success_count", "failed_count",
+            "completed_count", "needs_attention_count",
             "review_count", "dispatch_count", "archive_count", "skipped_count", "cancelled_count",
             "chunk_size", "chunk_total", "chunk_done", "chunk_failed", "chunk_errors",
             "ai_concurrency_limit", "ai_effective_concurrency",
@@ -1129,6 +1186,8 @@ class ProcessingRunSerializer(serializers.ModelSerializer):
                 "total_count": stage.total_count,
                 "processed_count": stage.processed_count,
                 "success_count": stage.success_count,
+                "completed_count": stage.completed_count,
+                "needs_attention_count": stage.needs_attention_count,
                 "failed_count": stage.failed_count,
                 "review_count": stage.review_count,
                 "dispatch_count": stage.dispatch_count,
@@ -1200,6 +1259,11 @@ class AgentDispatchDecisionSerializer(serializers.ModelSerializer):
             "evidence",
             "risks",
             "risk_flags",
+            "ai_specialist_match",
+            "ai_specialist_confidence",
+            "ai_specialist_evidence",
+            "special_route_applied",
+            "special_route_config_snapshot",
             "error_code",
             "error_message",
             "model_name",

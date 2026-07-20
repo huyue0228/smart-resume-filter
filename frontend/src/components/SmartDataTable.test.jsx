@@ -23,6 +23,7 @@ describe('SmartDataTable', () => {
     )
 
     await waitFor(() => expect(request).toHaveBeenCalledWith({ page: 1, page_size: 10 }))
+    expect(container.querySelector('.srf-table-pagination-sticky')).toBeNull()
     await userEvent.click(container.querySelector('.ant-table-filter-trigger'))
     await userEvent.type(screen.getByPlaceholderText('筛选姓名'), '张三')
     await userEvent.click(screen.getByRole('button', { name: /确认/ }))
@@ -32,6 +33,98 @@ describe('SmartDataTable', () => {
       page_size: 10,
       name: '张三',
     }))
+  })
+
+  it('fixes an opted-in pagination bar to the visible table width', async () => {
+    const request = vi.fn().mockResolvedValue({ data: { results: rows, count: 20 } })
+    const rectSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      bottom: 360,
+      height: 260,
+      left: 24,
+      right: 824,
+      top: 100,
+      width: 800,
+      x: 24,
+      y: 100,
+      toJSON: () => ({}),
+    })
+    const view = render(
+      <SmartDataTable
+        tableId="sticky-pagination"
+        stickyPagination
+        rowKey="id"
+        columns={[{ title: '姓名', dataIndex: 'name' }]}
+        request={request}
+      />,
+    )
+
+    await waitFor(() => {
+      const root = view.container.querySelector('.srf-smart-data-table')
+      expect(view.container.querySelector('.srf-table-pagination-sticky')).toBeTruthy()
+      expect(root.classList.contains('srf-smart-data-table--pagination-fixed')).toBe(true)
+      expect(root.style.getPropertyValue('--srf-sticky-pagination-left')).toBe('24px')
+      expect(root.style.getPropertyValue('--srf-sticky-pagination-width')).toBe('800px')
+    })
+
+    rectSpy.mockReturnValue({
+      bottom: -20,
+      height: 260,
+      left: 24,
+      right: 824,
+      top: -280,
+      width: 800,
+      x: 24,
+      y: -280,
+      toJSON: () => ({}),
+    })
+    fireEvent.scroll(window)
+    await waitFor(() => expect(
+      view.container.querySelector('.srf-smart-data-table--pagination-fixed'),
+    ).toBeNull())
+
+    view.unmount()
+    rectSpy.mockRestore()
+  })
+
+  it('does not create a sticky bar when pagination is disabled', () => {
+    const { container } = render(
+      <SmartDataTable
+        tableId="no-pagination"
+        stickyPagination
+        pagination={false}
+        rowKey="id"
+        columns={[{ title: '姓名', dataIndex: 'name' }]}
+        dataSource={rows}
+      />,
+    )
+
+    expect(container.querySelector('.srf-table-pagination-sticky')).toBeNull()
+    expect(
+      container.querySelector('.srf-smart-data-table--pagination-fixed'),
+    ).toBeNull()
+  })
+
+  it('merges sticky styling with custom pagination options', async () => {
+    const request = vi.fn().mockResolvedValue({ data: { results: rows, count: 30 } })
+    const { container } = render(
+      <SmartDataTable
+        tableId="custom-pagination"
+        stickyPagination
+        pagination={{
+          className: 'custom-pagination',
+          defaultPageSize: 20,
+          showSizeChanger: false,
+        }}
+        rowKey="id"
+        columns={[{ title: '姓名', dataIndex: 'name' }]}
+        request={request}
+      />,
+    )
+
+    await waitFor(() => expect(request).toHaveBeenCalledWith({ page: 1, page_size: 20 }))
+    const pagination = container.querySelector('.srf-table-pagination-sticky')
+    expect(pagination).toBeTruthy()
+    expect(pagination.classList.contains('custom-pagination')).toBe(true)
   })
 
   it('reloads the first page when stable external parameters change', async () => {

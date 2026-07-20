@@ -37,9 +37,9 @@ bash skills/smart-resume-offline-deploy/scripts/deploy.sh
 
 若 Skill 随离线包存放在包根目录下一层，则将上面的 `skills/smart-resume-offline-deploy` 改为实际 Skill 目录名。
 
-3. 脚本首次运行会创建 `.env` 模板。必须先修改 `DJANGO_SECRET_KEY`、`DJANGO_ALLOWED_HOSTS`、`POSTGRES_PASSWORD`，然后才允许继续。
+3. 脚本首次运行会创建 `.env` 模板。必须先修改 `DJANGO_SECRET_KEY`、`DJANGO_ALLOWED_HOSTS`、`POSTGRES_PASSWORD`、独立的 `RESTIC_PASSWORD`，并将 `BACKUP_TARGET_PATH` 指向异机挂载或外置磁盘，然后才允许继续。
 4. `DEPLOY_MODE=auto`（默认）在存在 `smart-resume-filter-images-amd64.tar` 时选择离线模式，否则从当前源码构建。可显式指定 `DEPLOY_MODE=offline` 或 `DEPLOY_MODE=source`。
-5. 离线模式要求交付包内的 `docker-compose.yml` 只使用 `image:`，不得保留 `build:`；源码模式使用当前项目的 Compose 构建后端、前端、PostgreSQL 和 Redis 镜像。
+5. 离线模式要求交付包内的 `docker-compose.yml` 只使用 `image:`，不得保留 `build:`；源码模式使用当前项目的 Compose 构建后端、前端、PostgreSQL、Redis 和备份工具镜像。
 6. 首次部署才会执行 `init` 写入基础权限、账号和预置数据。检测到已有部署时，脚本只更新镜像并启动服务，迁移由 backend 自动完成，不会重置管理员在系统设置中维护的配置。
 7. 部署不决定 AI 功能是否启用、模型连接或 API Key。服务启动后，由拥有权限的管理员在「系统设置 → AI 模型连接」配置并测试；不要在部署对话、脚本参数或日志中提供 API Key。
 
@@ -51,7 +51,7 @@ bash skills/smart-resume-offline-deploy/scripts/deploy.sh
 bash skills/smart-resume-offline-deploy/scripts/verify.sh
 ```
 
-成功条件：`db`、`redis`、`backend`、`worker`、`ai-worker`、`frontend` 均处于运行状态；`worker` 只消费 `default`，`ai-worker` 以 threads 池消费 `ai` 队列。backend 的 `manage.py check` 通过，frontend 的 `nginx -t` 通过。
+成功条件：`db`、`redis`、`backend`、`worker`、`ai-worker`、`frontend`、`backup-scheduler` 均处于运行状态；`worker` 只消费 `default`，`ai-worker` 以 threads 池消费 `ai` 队列，备份调度默认每小时执行。backend 的 `manage.py check` 通过，frontend 的 `nginx -t` 通过。
 
 ## 卸载
 

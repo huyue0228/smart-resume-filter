@@ -15,6 +15,7 @@ class SchoolAdmissionResult:
     matched_rule: Optional[m.SchoolTagRule]
     has_active_rules: bool
     failure_detail: str = ""
+    reason_code: str = ""
 
 
 def active_rules():
@@ -79,13 +80,17 @@ def evaluate(candidate, rules=None):
             tag_matched_restricted_rules.append(rule)
     if tag_matched_restricted_rules and not candidate.highest_education:
         failure_detail = "候选人最高学历缺失，不符合已命中的院校准入规则"
+        reason_code = "education_not_eligible"
     elif tag_matched_restricted_rules:
         failure_detail = "候选人最高学历不在已命中院校准入规则的允许范围"
+        reason_code = "education_not_eligible"
     else:
         failure_detail = "候选人第一学历标签和最高学历标签未命中任何启用规则"
+        reason_code = "school_not_eligible"
     return SchoolAdmissionResult(
         passed=False,
         matched_rule=None,
         has_active_rules=True,
         failure_detail=failure_detail,
+        reason_code=reason_code,
     )

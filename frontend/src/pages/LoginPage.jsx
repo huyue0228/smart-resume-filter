@@ -17,7 +17,7 @@ export default function LoginPage() {
     setError('')
     try {
       await login(values)
-      navigate('/resumes', {
+      navigate('/', {
         replace: true,
       })
       return true

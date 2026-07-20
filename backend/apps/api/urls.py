@@ -1,7 +1,7 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
-from . import views
+from . import analytics, views
 
 router = DefaultRouter()
 router.register("resumes", views.ResumeViewSet, basename="resume")
@@ -33,10 +33,19 @@ urlpatterns = [
     path("allocation-mode/", views.AllocationModeView.as_view()),
     path("permissions/", views.PermissionTreeView.as_view()),
     path("ai-connection/", views.AIConnectionConfigView.as_view()),
+    path("ai-connection/settings/", views.AIConnectionSettingsView.as_view()),
+    path(
+        "ai-connection/settings/<str:key>/",
+        views.AIConnectionSettingDetailView.as_view(),
+    ),
     path("ai-connection/models/", views.AIConnectionModelsView.as_view()),
     path("ai-connection/test/", views.AIConnectionTestView.as_view()),
     path("import/", views.ImportView.as_view()),
     path("import/undo/", views.ImportUndoView.as_view()),
     path("pipeline/run/", views.PipelineRunView.as_view()),
+    path(
+        "analytics/recruitment-overview/",
+        analytics.RecruitmentOverviewView.as_view(),
+    ),
     path("", include(router.urls)),
 ]

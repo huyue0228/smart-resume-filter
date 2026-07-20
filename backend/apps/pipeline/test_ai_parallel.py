@@ -104,6 +104,7 @@ class AIParallelPipelineTests(TestCase):
             public_name="后端工程师",
             position_name="后端工程师",
             category="技术类",
+            responsibilities="负责后端服务开发和稳定性建设。",
         )
 
     def _candidate(self, index):
@@ -121,7 +122,7 @@ class AIParallelPipelineTests(TestCase):
         )
         return candidate, resume
 
-    def _ai_result(self, resume):
+    def _ai_result(self, resume, *, specialist_confidence=0):
         profile = m.ResumeProfile.objects.create(
             resume=resume,
             parse_status="parsed",
@@ -134,6 +135,13 @@ class AIParallelPipelineTests(TestCase):
                 reason="岗位匹配",
                 evidence=["项目经历"],
                 risks=[],
+                ai_specialist_match=specialist_confidence > 0,
+                ai_specialist_confidence=specialist_confidence,
+                ai_specialist_evidence=(
+                    ["参与企业知识库 RAG 检索增强项目"]
+                    if specialist_confidence > 0
+                    else []
+                ),
             ),
             profile=SimpleNamespace(risk_flags=[]),
         )
@@ -186,7 +194,7 @@ class AIParallelPipelineTests(TestCase):
             runner.execute_run(run.id)
 
         run.refresh_from_db()
-        stage = run.stages.get(step="step2")
+        stage = run.stages.get(step="step4")
         self.assertEqual(run.status, "success")
         self.assertEqual(run.ai_concurrency_limit, 8)
         self.assertEqual(run.ai_effective_concurrency, 1)
@@ -194,6 +202,214 @@ class AIParallelPipelineTests(TestCase):
         self.assertEqual((run.processed_count, run.success_count), (1, 1))
         self.assertEqual((stage.processed_count, stage.success_count), (1, 1))
         self.assertEqual(m.AssignmentAttempt.objects.get().source, "ai")
+
+    def test_only_timeout_is_failed_and_rate_limit_needs_attention(self):
+        timeout_candidate, _ = self._candidate(89)
+        limited_candidate, _ = self._candidate(90)
+        run = runner.create_run(
+            "step2",
+            mode="ai",
+            scope={"candidate_ids": [timeout_candidate.id, limited_candidate.id]},
+        )
+
+        def fail_by_candidate(resume, *_args, **_kwargs):
+            if resume.candidate_id == timeout_candidate.id:
+                raise allocate.ai_service.AIServiceError("llm_timeout", "模型超时")
+            raise allocate.ai_service.AIServiceError("ai_rate_limited", "模型限流")
+
+        with patch.object(
+            allocate.ai_service,
+            "screen_resume",
+            side_effect=fail_by_candidate,
+        ):
+            runner.execute_run(run.id)
+
+        run.refresh_from_db()
+        timeout_item = run.scope_items.get(candidate=timeout_candidate)
+        limited_item = run.scope_items.get(candidate=limited_candidate)
+        self.assertEqual(
+            (timeout_item.result_type, timeout_item.reason_code),
+            (m.ProcessingRunScopeItem.RESULT_FAILED, "llm_timeout"),
+        )
+        self.assertEqual(
+            (limited_item.result_type, limited_item.reason_code),
+            (m.ProcessingRunScopeItem.RESULT_NEEDS_ATTENTION, "ai_rate_limited"),
+        )
+        self.assertEqual((run.failed_count, run.needs_attention_count), (1, 1))
+        self.assertEqual(run.status, "partial_failed")
+
+    def test_rule_precheck_business_gap_is_completed_without_calling_ai(self):
+        candidate, _resume = self._candidate(91)
+        self.job.is_active = False
+        self.job.save(update_fields=["is_active"])
+        run = runner.create_run(
+            "step2", mode="ai", scope={"candidate_ids": [candidate.id]}
+        )
+
+        with patch.object(allocate.ai_service, "screen_resume") as screen:
+            runner.execute_run(run.id)
+
+        item = run.scope_items.get()
+        self.assertEqual(
+            (item.result_type, item.reason_code),
+            (m.ProcessingRunScopeItem.RESULT_COMPLETED, "job_not_found"),
+        )
+        screen.assert_not_called()
+
+    def test_missing_job_responsibility_is_needs_attention_without_model_work(self):
+        candidate, _resume = self._candidate(96)
+        self.job.responsibilities = ""
+        self.job.save(update_fields=["responsibilities"])
+        run = runner.create_run(
+            "step2", mode="ai", scope={"candidate_ids": [candidate.id]}
+        )
+
+        with patch.object(allocate.ai_service, "_extract_pdf") as extract_pdf, patch.object(
+            allocate.ai_service, "_call_model"
+        ) as call_model:
+            runner.execute_run(run.id)
+
+        run.refresh_from_db()
+        item = run.scope_items.get()
+        self.assertEqual(
+            (item.result_type, item.reason_code),
+            (
+                m.ProcessingRunScopeItem.RESULT_NEEDS_ATTENTION,
+                "job_responsibility_missing",
+            ),
+        )
+        self.assertEqual(run.needs_attention_count, 1)
+        self.assertEqual(run.status, "needs_attention")
+        extract_pdf.assert_not_called()
+        call_model.assert_not_called()
+
+    def test_school_gate_uses_education_reason_only_for_education_restriction(self):
+        non_target = m.SchoolTag.objects.create(
+            code="NON_TARGET", name="非目标院校"
+        )
+        rule = m.SchoolTagRule.objects.create(name="仅硕士", is_active=True)
+        for degree_type in [
+            m.SchoolTagRuleTag.DEGREE_FIRST,
+            m.SchoolTagRuleTag.DEGREE_HIGHEST,
+        ]:
+            m.SchoolTagRuleTag.objects.create(
+                rule=rule,
+                school_tag=non_target,
+                degree_type=degree_type,
+            )
+        m.SchoolTagRuleEducation.objects.create(
+            rule=rule,
+            education=m.Candidate.EDUCATION_MASTER,
+        )
+        candidate, _resume = self._candidate(94)
+        run = runner.create_run(
+            "step2", mode="ai", scope={"candidate_ids": [candidate.id]}
+        )
+
+        runner.execute_run(run.id)
+
+        item = run.scope_items.get()
+        self.assertEqual(
+            (item.result_type, item.reason_code),
+            (m.ProcessingRunScopeItem.RESULT_COMPLETED, "education_not_eligible"),
+        )
+
+    def test_school_gate_uses_school_reason_for_tag_mismatch(self):
+        target = m.SchoolTag.objects.create(code="TARGET_ONLY", name="目标院校")
+        rule = m.SchoolTagRule.objects.create(name="目标院校规则", is_active=True)
+        for degree_type in [
+            m.SchoolTagRuleTag.DEGREE_FIRST,
+            m.SchoolTagRuleTag.DEGREE_HIGHEST,
+        ]:
+            m.SchoolTagRuleTag.objects.create(
+                rule=rule,
+                school_tag=target,
+                degree_type=degree_type,
+            )
+        candidate, _resume = self._candidate(95)
+        run = runner.create_run(
+            "step2", mode="ai", scope={"candidate_ids": [candidate.id]}
+        )
+
+        runner.execute_run(run.id)
+
+        item = run.scope_items.get()
+        self.assertEqual(
+            (item.result_type, item.reason_code),
+            (m.ProcessingRunScopeItem.RESULT_COMPLETED, "school_not_eligible"),
+        )
+
+    def test_special_route_threshold_is_strict_and_creates_force_assign_chain(self):
+        tertiary_department = m.Department.objects.create(
+            name="AI 专项组", level=3, parent=self.department
+        )
+        tertiary_contact = m.Contact.objects.create(
+            name="AI 专项三级接口人",
+            employee_no="PAR-L3",
+            department=tertiary_department,
+            contact_level=m.Contact.LEVEL_TERTIARY,
+            is_active=True,
+        )
+        for key, value in {
+            "ai_special_route_enabled": True,
+            "ai_special_route_threshold": 0.9,
+            "ai_special_route_secondary_contact_id": self.contact.id,
+            "ai_special_route_tertiary_contact_id": tertiary_contact.id,
+        }.items():
+            m.Config.objects.update_or_create(key=key, defaults={"value": value})
+
+        boundary_candidate, boundary_resume = self._candidate(92)
+        routed_candidate, routed_resume = self._candidate(93)
+        run = runner.create_run(
+            "step2",
+            mode="ai",
+            scope={"candidate_ids": [boundary_candidate.id, routed_candidate.id]},
+        )
+
+        def result_by_candidate(resume, *_args, **_kwargs):
+            return self._ai_result(
+                resume,
+                specialist_confidence=(0.9 if resume == boundary_resume else 0.91),
+            )
+
+        with patch.object(
+            allocate.ai_service,
+            "screen_resume",
+            side_effect=result_by_candidate,
+        ):
+            runner.execute_run(run.id)
+
+        boundary_attempt = m.AssignmentAttempt.objects.get(
+            workflow__candidate=boundary_candidate
+        )
+        routed_attempt = m.AssignmentAttempt.objects.get(
+            workflow__candidate=routed_candidate
+        )
+        self.assertEqual(boundary_attempt.route_code, "")
+        self.assertEqual(
+            boundary_attempt.status, m.AssignmentAttempt.STATUS_PENDING_DISPATCH
+        )
+        self.assertEqual(routed_attempt.route_code, "ai_special_route")
+        self.assertEqual(routed_attempt.source, m.AssignmentAttempt.SOURCE_AI)
+        self.assertEqual(
+            routed_attempt.status, m.AssignmentAttempt.STATUS_ASSIGNED_L3
+        )
+        self.assertEqual(routed_attempt.contact, self.contact)
+        self.assertEqual(routed_attempt.sub_contact, tertiary_contact)
+        self.assertEqual(routed_attempt.handoffs.count(), 2)
+        self.assertEqual(
+            routed_attempt.special_route_config_snapshot["version"],
+            ai_config.get_ai_special_route_config().snapshot()["version"],
+        )
+        routed_decision = m.AgentDispatchDecision.objects.get(
+            workflow__candidate=routed_candidate
+        )
+        self.assertTrue(routed_decision.special_route_applied)
+        self.assertEqual(routed_decision.processing_run, run)
+        self.assertEqual(
+            run.scope_items.get(candidate=routed_candidate).reason_code,
+            "ai_special_route",
+        )
 
     @override_settings(CELERY_TASK_ALWAYS_EAGER=False)
     def test_dispatcher_only_queues_four_times_the_configured_ceiling(self):

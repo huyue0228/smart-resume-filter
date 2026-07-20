@@ -123,6 +123,8 @@ def filter_queryset_by_system_status(qs, statuses):
 
 PROCESSING_RESULT_VALUES = {
     "success",
+    "completed",
+    "needs_attention",
     "failed",
     "review",
     "dispatch",
@@ -135,10 +137,9 @@ PROCESSING_RESULT_VALUES = {
 def filter_queryset_by_processing_result(qs, params):
     """按处理中心某次 AI 运行的候选人级结果筛选。
 
-    ``success`` / ``failed`` / ``skipped`` / ``cancelled`` 与 ScopeItem 的终态
-    一一对应；待复核、待下发和建议归档则与该运行产生的 AI 决策对应。后者是
-    成功处理的业务细分，因此允许和 ``success`` 结果重叠，和处理中心计数保持
-    同一语义。
+    ``completed`` / ``needs_attention`` / ``failed`` / ``cancelled`` 与
+    ScopeItem 的统一结果类型一一对应；``success`` 仅作为旧链接的 completed
+    别名。待复核、待下发和建议归档是已完成业务结果的 AI 细分。
     """
     raw_run_id = _value(params, "processing_run_id")
     if not raw_run_id:
@@ -154,12 +155,21 @@ def filter_queryset_by_processing_result(qs, params):
     if result not in PROCESSING_RESULT_VALUES:
         return qs.none()
 
-    scope_statuses = {
-        "success": "success",
-        "failed": "failed",
-        "skipped": "skipped_manual_change",
-        "cancelled": "cancelled",
+    result_types = {
+        "success": m.ProcessingRunScopeItem.RESULT_COMPLETED,
+        "completed": m.ProcessingRunScopeItem.RESULT_COMPLETED,
+        "needs_attention": m.ProcessingRunScopeItem.RESULT_NEEDS_ATTENTION,
+        "failed": m.ProcessingRunScopeItem.RESULT_FAILED,
+        "cancelled": m.ProcessingRunScopeItem.RESULT_CANCELLED,
     }
+    scope_statuses = {
+        "skipped": "skipped_manual_change",
+    }
+    if result in result_types:
+        return qs.filter(
+            processing_scope_items__run_id=run_id,
+            processing_scope_items__result_type=result_types[result],
+        ).distinct()
     if result in scope_statuses:
         return qs.filter(
             processing_scope_items__run_id=run_id,
@@ -329,6 +339,19 @@ def apply_candidate_filters(qs, params):
             qs,
             lambda candidate: candidate_summary.reason(candidate)[0] == expected_reason,
         )
+    processing_result = _value(params, "result_type")
+    reason_code = _value(params, "reason_code")
+    run_id = _value(params, "processing_run_id")
+    if processing_result:
+        filters = {"processing_scope_items__result_type": processing_result}
+        if run_id:
+            filters["processing_scope_items__run_id"] = run_id
+        qs = qs.filter(**filters)
+    if reason_code:
+        filters = {"processing_scope_items__reason_code": reason_code}
+        if run_id:
+            filters["processing_scope_items__run_id"] = run_id
+        qs = qs.filter(**filters)
     if _value(params, "imported_after"):
         qs = qs.filter(imported_at__date__gte=_value(params, "imported_after"))
     if _value(params, "imported_before"):
@@ -406,6 +429,7 @@ def _filter_by_candidate_summary(qs, predicate):
             "workflow__attempts__contact",
             "workflow__attempts__sub_department",
             "workflow__attempts__sub_contact",
+            "processing_scope_items",
         )
         .distinct()
     )

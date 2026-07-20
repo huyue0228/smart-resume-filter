@@ -138,6 +138,7 @@ class Job(models.Model):
     job_family = models.CharField(max_length=64, blank=True, help_text="岗位族")
     location = models.CharField(max_length=64, blank=True, help_text="工作地点")
     education = models.CharField(max_length=32, blank=True, help_text="学历要求")
+    responsibilities = models.TextField(blank=True, default="", help_text="工作职责")
     headcount = models.PositiveIntegerField(default=0, help_text="需求数量(HC)")
     is_active = models.BooleanField(default=True)
 
@@ -270,7 +271,7 @@ class Candidate(models.Model):
         blank=True,
         help_text="最高学历",
     )
-    # Step3 院校分类结果
+    # Step2 院校分类与准入结果
     first_degree_platform = models.CharField(max_length=64, blank=True)
     highest_degree_platform = models.CharField(max_length=64, blank=True)
     first_degree_tag = models.ForeignKey(
@@ -328,7 +329,7 @@ class Resume(models.Model):
     # Step1 查重与志愿排序
     volunteer_rank = models.PositiveSmallIntegerField(null=True, blank=True, help_text="志愿次序 1-4")
     assigned_entity = models.CharField(max_length=16, blank=True, help_text="分配主体 GW/YLS")
-    # Step2 岗位分类
+    # Step3 Rule 前置检查固定的岗位分类结果
     job = models.ForeignKey(
         Job, null=True, blank=True, on_delete=models.SET_NULL, related_name="resumes"
     )
@@ -649,6 +650,15 @@ class AssignmentAttempt(models.Model):
     cancelled_at = models.DateTimeField(null=True, blank=True)
     cancel_reason = models.CharField(max_length=64, blank=True)
     manual_reason = models.TextField(blank=True)
+    route_code = models.CharField(
+        max_length=64,
+        blank=True,
+        db_index=True,
+        help_text="特殊分流代码；普通分配为空",
+    )
+    special_route_confidence = models.FloatField(null=True, blank=True)
+    special_route_evidence = models.JSONField(default=list, blank=True)
+    special_route_config_snapshot = models.JSONField(default=dict, blank=True)
     department_name_snapshot = models.CharField(max_length=128, blank=True)
     contact_name_snapshot = models.CharField(max_length=64, blank=True)
     contact_employee_no_snapshot = models.CharField(max_length=32, blank=True)
@@ -676,6 +686,9 @@ class AssignmentAttempt(models.Model):
             models.Index(fields=["sub_contact", "status"]),
             models.Index(fields=["workflow", "status"]),
             models.Index(fields=["source", "status"]),
+            models.Index(fields=["created_at", "source"]),
+            models.Index(fields=["dispatched_at"]),
+            models.Index(fields=["feedback_at"]),
         ]
 
     def __str__(self):
@@ -812,6 +825,11 @@ class AgentDispatchDecision(models.Model):
     evidence = models.JSONField(default=list, blank=True)
     risks = models.JSONField(default=list, blank=True)
     risk_flags = models.JSONField(default=list, blank=True)
+    ai_specialist_match = models.BooleanField(default=False)
+    ai_specialist_confidence = models.FloatField(null=True, blank=True)
+    ai_specialist_evidence = models.JSONField(default=list, blank=True)
+    special_route_applied = models.BooleanField(default=False)
+    special_route_config_snapshot = models.JSONField(default=dict, blank=True)
     error_code = models.CharField(max_length=64, blank=True)
     error_message = models.TextField(blank=True)
     model_name = models.CharField(max_length=64, blank=True)
@@ -823,6 +841,7 @@ class AgentDispatchDecision(models.Model):
         indexes = [
             models.Index(fields=["workflow", "created_at"]),
             models.Index(fields=["recommendation", "confidence_score"]),
+            models.Index(fields=["created_at", "error_code"]),
         ]
 
 
@@ -842,6 +861,8 @@ class ProcessingRun(models.Model):
     total_count = models.PositiveIntegerField(default=0)
     processed_count = models.PositiveIntegerField(default=0)
     success_count = models.PositiveIntegerField(default=0)
+    completed_count = models.PositiveIntegerField(default=0)
+    needs_attention_count = models.PositiveIntegerField(default=0)
     failed_count = models.PositiveIntegerField(default=0)
     review_count = models.PositiveIntegerField(default=0)
     dispatch_count = models.PositiveIntegerField(default=0)
@@ -901,7 +922,7 @@ class ProcessingRun(models.Model):
 
 
 class ProcessingRunStage(models.Model):
-    """一个处理任务中的可观测阶段，支持上传后 Step1 → Step2 的连续展示。"""
+    """一个处理任务中的可观测阶段，支持 Rule-first 多阶段连续展示。"""
 
     run = models.ForeignKey(
         ProcessingRun, on_delete=models.CASCADE, related_name="stages"
@@ -913,6 +934,8 @@ class ProcessingRunStage(models.Model):
     total_count = models.PositiveIntegerField(default=0)
     processed_count = models.PositiveIntegerField(default=0)
     success_count = models.PositiveIntegerField(default=0)
+    completed_count = models.PositiveIntegerField(default=0)
+    needs_attention_count = models.PositiveIntegerField(default=0)
     failed_count = models.PositiveIntegerField(default=0)
     review_count = models.PositiveIntegerField(default=0)
     dispatch_count = models.PositiveIntegerField(default=0)
@@ -933,6 +956,17 @@ class ProcessingRunStage(models.Model):
 class ProcessingRunScopeItem(models.Model):
     """提交任务时冻结的候选人范围，避免运行中重新解释页面筛选条件。"""
 
+    RESULT_COMPLETED = "completed"
+    RESULT_NEEDS_ATTENTION = "needs_attention"
+    RESULT_FAILED = "failed"
+    RESULT_CANCELLED = "cancelled"
+    RESULT_CHOICES = [
+        (RESULT_COMPLETED, "处理完成"),
+        (RESULT_NEEDS_ATTENTION, "需处理"),
+        (RESULT_FAILED, "失败"),
+        (RESULT_CANCELLED, "已取消"),
+    ]
+
     run = models.ForeignKey(
         ProcessingRun, on_delete=models.CASCADE, related_name="scope_items"
     )
@@ -940,8 +974,47 @@ class ProcessingRunScopeItem(models.Model):
         Candidate, on_delete=models.CASCADE, related_name="processing_scope_items"
     )
     workflow_revision_at_submit = models.PositiveIntegerField(null=True, blank=True)
+    workflow_revision_at_prepare = models.PositiveIntegerField(null=True, blank=True)
     status = models.CharField(max_length=32, default="pending")
     skip_reason = models.CharField(max_length=64, blank=True)
+    result_type = models.CharField(max_length=32, choices=RESULT_CHOICES, blank=True)
+    reason_code = models.CharField(max_length=64, blank=True, db_index=True)
+    result_message = models.TextField(blank=True)
+    prepared_resume = models.ForeignKey(
+        Resume,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="prepared_processing_items",
+    )
+    prepared_job = models.ForeignKey(
+        Job,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="prepared_processing_items",
+    )
+    prepared_department = models.ForeignKey(
+        Department,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="prepared_processing_items",
+    )
+    prepared_contact = models.ForeignKey(
+        Contact,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="prepared_processing_items",
+    )
+    matched_rule = models.ForeignKey(
+        SchoolTagRule,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="prepared_processing_items",
+    )
     dispatch_token = models.UUIDField(null=True, blank=True, editable=False)
     attempt_count = models.PositiveIntegerField(default=0)
     queued_at = models.DateTimeField(null=True, blank=True)
@@ -958,6 +1031,10 @@ class ProcessingRunScopeItem(models.Model):
             models.Index(
                 fields=["run", "status", "candidate"],
                 name="core_scope_run_st_cand_idx",
+            ),
+            models.Index(
+                fields=["run", "result_type", "reason_code"],
+                name="core_scope_run_res_reason",
             ),
         ]
 

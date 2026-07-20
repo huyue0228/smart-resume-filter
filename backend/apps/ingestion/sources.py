@@ -270,8 +270,35 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
         "schools": 0,
         "contacts": 0,
         "candidates_skipped": 0,
+        "jobs_skipped": 0,
     }
     affected_candidate_ids = set()
+    warnings = []
+    job_rows = []
+
+    # 岗位文件必须先完成行级校验，避免 replace 模式在全部岗位无效时先清空旧数据。
+    if files.get("jobs"):
+        jobs_df = _read_excel(files["jobs"])
+        missing_responsibility_rows = []
+        for excel_row, (_, row) in enumerate(jobs_df.iterrows(), start=2):
+            position = _val(row, "职位名称")
+            public_name = _val(row, "对外发布名称")
+            if not (position or public_name):
+                continue
+            if not _val(row, "工作职责"):
+                counts["jobs_skipped"] += 1
+                missing_responsibility_rows.append(excel_row)
+                continue
+            job_rows.append(row)
+        if missing_responsibility_rows:
+            warnings.append(
+                {
+                    "code": "job_responsibility_missing",
+                    "count": len(missing_responsibility_rows),
+                    "rows": missing_responsibility_rows,
+                    "message": "工作职责为空的岗位已跳过",
+                }
+            )
 
     if mode == "replace" and (files.get("resume_list") or files.get("resume_package")):
         m.AssignmentHandoff.objects.all().delete()
@@ -282,7 +309,7 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
         m.Resume.objects.all().delete()
         m.Candidate.objects.all().delete()
     if mode == "replace":
-        if files.get("jobs"):
+        if files.get("jobs") and job_rows:
             m.JobMajor.objects.all().delete()
             m.Job.objects.all().delete()
         if files.get("schools"):
@@ -354,12 +381,9 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
 
     # 岗位需求
     if files.get("jobs"):
-        df = _read_excel(files["jobs"])
-        for _, row in df.iterrows():
+        for row in job_rows:
             position = _val(row, "职位名称")
             public_name = _val(row, "对外发布名称")
-            if not (position or public_name):
-                continue
             entity = _val(row, "主体")
             dept = _get_department(_val(row, "一层部门"), _val(row, "二层部门"), entity)
             job = m.Job.objects.create(
@@ -372,6 +396,7 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
                 job_family=_val(row, "岗位族"),
                 location=_val(row, "工作地点"),
                 education=_val(row, "学历"),
+                responsibilities=_val(row, "工作职责"),
                 headcount=_to_int(_val(row, "需求数量")),
             )
             for major in _split_majors(_val(row, "需求专业")):
@@ -465,4 +490,5 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
 
     # 仅供 API 在创建后台 ProcessingRun 时冻结处理范围，不作为导入统计直接返回。
     counts["_candidate_ids"] = sorted(affected_candidate_ids)
+    counts["_warnings"] = warnings
     return counts

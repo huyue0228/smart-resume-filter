@@ -49,6 +49,7 @@ class AllocationDesignContractTests(TestCase):
             public_name="后端工程师",
             position_name="后端工程师",
             category="技术类",
+            responsibilities="负责后端服务开发和性能优化。",
             headcount=1,
         )
 
@@ -62,7 +63,6 @@ class AllocationDesignContractTests(TestCase):
             "skills_match": confidence,
             "experience_evidence": confidence,
             "job_requirement": confidence,
-            "department_certainty": confidence,
             "resume_quality": confidence,
         }
         decision = SimpleNamespace(
@@ -95,7 +95,7 @@ class AllocationDesignContractTests(TestCase):
         self.assertIsNone(attempt.matched_rule)
         self.assertEqual(self.candidate.workflow.status, m.CandidateWorkflow.STATUS_IN_PROGRESS)
 
-    def test_resume_process_freezes_scope_and_exposes_two_stages(self):
+    def test_resume_process_freezes_scope_and_exposes_rule_first_stages(self):
         user = User.objects.create_user(username="hr-run-owner", password="pass")
         run = runner.create_run(
             "resume_process",
@@ -109,7 +109,10 @@ class AllocationDesignContractTests(TestCase):
         self.assertEqual(
             list(run.scope_items.values_list("candidate_id", flat=True)), [self.candidate.id]
         )
-        self.assertEqual(list(run.stages.values_list("step", flat=True)), ["step1", "step2"])
+        self.assertEqual(
+            list(run.stages.values_list("step", flat=True)),
+            ["step1", "step2", "step3"],
+        )
 
         runner.execute_run(run.id)
 
@@ -117,14 +120,17 @@ class AllocationDesignContractTests(TestCase):
         self.assertEqual(run.status, "success")
         self.assertEqual(run.created_by, user)
         self.assertTrue(run.last_heartbeat_at)
-        self.assertEqual(list(run.stages.values_list("status", flat=True)), ["success", "success"])
+        self.assertEqual(
+            list(run.stages.values_list("status", flat=True)),
+            ["success", "success", "success"],
+        )
 
-    def test_configured_run_creates_one_run_with_current_rule_mode(self):
-        with patch("apps.pipeline.runner.ai_config.allocation_mode", return_value="rule"):
-            run = runner.create_configured_run(
-                "step2",
-                scope={"candidate_ids": [self.candidate.id]},
-            )
+    def test_explicit_rule_run_creates_one_run(self):
+        run = runner.create_run(
+            "step2",
+            mode="rule",
+            scope={"candidate_ids": [self.candidate.id]},
+        )
 
         self.assertEqual(run.mode, "rule")
         self.assertEqual(
@@ -133,14 +139,14 @@ class AllocationDesignContractTests(TestCase):
         )
         self.assertNotIn("parallel_modes", run.scope)
 
-    def test_configured_run_freezes_ai_mode_at_submission_time(self):
-        with patch("apps.pipeline.runner.ai_config.allocation_mode", return_value="ai"):
-            run = runner.create_configured_run(
-                "step2",
-                scope={"candidate_ids": [self.candidate.id]},
-            )
+    def test_explicit_ai_run_freezes_mode_at_submission_time(self):
+        run = runner.create_run(
+            "step2",
+            mode="ai",
+            scope={"candidate_ids": [self.candidate.id]},
+        )
 
-        with patch("apps.pipeline.runner.ai_config.allocation_mode", return_value="rule"), patch(
+        with patch(
             "apps.pipeline.services.allocate.ai_service.screen_resume",
             return_value=self._ai_result(),
         ):
@@ -173,6 +179,46 @@ class AllocationDesignContractTests(TestCase):
         self.assertEqual(run.skipped_count, 1)
         self.assertEqual(run.stages.get(step="step2").skipped_count, 1)
         self.assertFalse(m.AssignmentAttempt.objects.exists())
+
+    def test_force_reprocess_retries_current_volunteer_instead_of_advancing(self):
+        second_resume = m.Resume.objects.create(
+            candidate=self.candidate,
+            apply_id="A1002",
+            position_name="产品经理",
+            volunteer_rank=2,
+        )
+        second_department = m.Department.objects.create(name="产品部", level=2)
+        m.Contact.objects.create(
+            name="产品接口人",
+            employee_no="L2002",
+            department=second_department,
+            contact_level=m.Contact.LEVEL_SECONDARY,
+        )
+        m.Job.objects.create(
+            department=second_department,
+            public_name="产品经理",
+            position_name="产品经理",
+            category="产品类",
+        )
+        m.CandidateWorkflow.objects.create(
+            candidate=self.candidate,
+            status=m.CandidateWorkflow.STATUS_ARCHIVED,
+            current_resume=self.resume,
+            current_rank=1,
+            archive_reason=m.CandidateWorkflow.ARCHIVE_JOB_NOT_MATCHED,
+        )
+        run = runner.create_run(
+            "step2",
+            mode="rule",
+            scope={"candidate_ids": [self.candidate.id], "force_reprocess": True},
+        )
+
+        runner.execute_run(run.id)
+
+        attempt = m.AssignmentAttempt.objects.get()
+        self.assertEqual(attempt.resume, self.resume)
+        second_resume.refresh_from_db()
+        self.assertIsNone(second_resume.job)
 
     def test_scoped_reprocess_classifies_school_tags_before_school_gate(self):
         target_tag = m.SchoolTag.objects.create(code="TARGET", name="目标院校")
@@ -288,7 +334,7 @@ class AllocationDesignContractTests(TestCase):
         self.assertEqual(self.candidate.first_degree_tag.code, "NON_TARGET")
         self.assertEqual(self.candidate.highest_degree_tag.code, "NON_TARGET")
 
-    def test_rule_allocation_skips_resume_when_required_major_not_matched(self):
+    def test_rule_allocation_does_not_skip_current_volunteer_on_major_mismatch(self):
         self.candidate.highest_major = "计算机科学与技术"
         self.candidate.save(update_fields=["highest_major"])
         m.JobMajor.objects.create(job=self.job, major="电气工程")
@@ -310,9 +356,17 @@ class AllocationDesignContractTests(TestCase):
 
         allocate.run(mode="rule")
 
-        attempt = m.AssignmentAttempt.objects.get()
-        self.assertEqual(attempt.resume, next_resume)
-        self.assertEqual(attempt.resume.job, next_job)
+        self.assertFalse(m.AssignmentAttempt.objects.exists())
+        self.candidate.workflow.refresh_from_db()
+        self.resume.refresh_from_db()
+        next_resume.refresh_from_db()
+        self.assertEqual(self.candidate.workflow.current_resume, self.resume)
+        self.assertEqual(
+            self.candidate.workflow.archive_reason,
+            m.CandidateWorkflow.ARCHIVE_JOB_NOT_MATCHED,
+        )
+        self.assertIn("专业", self.candidate.workflow.archive_detail)
+        self.assertIsNone(next_resume.job)
 
     def test_rule_allocation_blocks_current_volunteer_when_secondary_contact_missing(self):
         self.contact.is_active = False
@@ -755,11 +809,12 @@ class AllocationDesignContractTests(TestCase):
 
         with self.assertNumQueries(2):
             current_job = allocate._current_volunteer_job(self.resume)
-        with self.assertNumQueries(2):
+        with self.assertNumQueries(1):
             context = ai_service._current_job_context(current_job)
 
         self.assertEqual(current_job, self.job)
-        self.assertEqual(context["id"], self.job.id)
+        self.assertEqual(context["public_name"], self.job.public_name)
+        self.assertNotIn("id", context)
         self.assertEqual(context["required_majors"], [])
 
     def test_ai_failure_keeps_current_volunteer_and_never_skips_to_next(self):
@@ -931,7 +986,7 @@ class AllocationDesignContractTests(TestCase):
 
         decision = m.AgentDispatchDecision.objects.get()
         self.assertEqual(decision.model_name, "gpt-test")
-        self.assertEqual(decision.prompt_version, "resume-screening-v1")
+        self.assertEqual(decision.prompt_version, "resume-screening-v2")
         self.assertEqual(decision.decision_version, "decision-v1")
 
     def test_ai_runtime_config_uses_database_overrides(self):

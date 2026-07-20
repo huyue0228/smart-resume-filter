@@ -1,22 +1,13 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Outlet, useNavigate, useLocation } from 'react-router-dom'
 import { ProLayout } from '@ant-design/pro-components'
 import { Dropdown, Tag } from 'antd'
-import {
-  DatabaseOutlined,
-  ProfileOutlined,
-  ApartmentOutlined,
-  BankOutlined,
-  TeamOutlined,
-  SettingOutlined,
-  ControlOutlined,
-  UserOutlined,
-  SafetyCertificateOutlined,
-} from '@ant-design/icons'
+import { UserOutlined } from '@ant-design/icons'
 import { useRole, ROLES } from '../contexts/roleState'
 import { canAccessRoute } from '../routePermissions'
 import BrandLogo from '../components/BrandLogo'
-import ProcessingTaskCenter from '../components/ProcessingTaskCenter'
+import { allRoute } from './menuRoutes'
+import { appLayoutSettings, appLayoutToken, appSiderMenuProps } from '../theme'
 
 const ROOT_MENU_KEYS = ['/data', '/system']
 
@@ -29,33 +20,6 @@ function defaultOpenKeys(pathname) {
   return allRoute.routes
     .filter((route) => ROOT_MENU_KEYS.includes(route.path) && pathMatchesGroup(pathname, route))
     .map((route) => route.path)
-}
-
-const allRoute = {
-  path: '/',
-  routes: [
-    {
-      path: '/data',
-      name: '数据管理',
-      icon: <DatabaseOutlined />,
-      routes: [
-        { path: '/resumes', name: '简历库', icon: <ProfileOutlined /> },
-        { path: '/jobs', name: '岗位需求', icon: <ApartmentOutlined /> },
-        { path: '/schools', name: '院校清单', icon: <BankOutlined /> },
-        { path: '/departments', name: '部门接口人', icon: <TeamOutlined /> },
-      ],
-    },
-    {
-      path: '/system',
-      name: '系统设置',
-      icon: <SettingOutlined />,
-      routes: [
-        { path: '/config', name: '配置项', icon: <ControlOutlined /> },
-        { path: '/ai-connection', name: 'AI 模型连接', icon: <ControlOutlined /> },
-        { path: '/users', name: '用户权限', icon: <SafetyCertificateOutlined /> },
-      ],
-    },
-  ],
 }
 
 function filterRoutesByPermission(routes, hasPermission) {
@@ -83,6 +47,14 @@ export default function BasicLayout() {
   const [pathname, setPathname] = useState(location.pathname)
   const [openKeys, setOpenKeys] = useState(() => defaultOpenKeys(location.pathname))
 
+  useEffect(() => {
+    setPathname(location.pathname)
+    const activeParentKeys = defaultOpenKeys(location.pathname)
+    if (activeParentKeys.length) {
+      setOpenKeys((keys) => [...new Set([...keys, ...activeParentKeys])])
+    }
+  }, [location.pathname])
+
   const handleLogout = async () => {
     await logout()
     navigate('/login', { replace: true })
@@ -95,20 +67,22 @@ export default function BasicLayout() {
 
   return (
     <ProLayout
+      {...appLayoutSettings}
+      className="srf-app-layout"
       title="海纳智选"
       logo={<BrandLogo size={28} />}
-      layout="mix"
-      fixedHeader
-      fixSiderbar
+      token={appLayoutToken}
       route={route}
       location={{ pathname }}
       onPageChange={(loc) => setPathname(loc?.pathname || location.pathname)}
       menuProps={{
+        ...appSiderMenuProps,
         openKeys,
         onOpenChange: setOpenKeys,
       }}
       menuItemRender={(item, dom) => (
         <div
+          className="srf-menu-item-link"
           onClick={() => {
             setPathname(item.path)
             navigate(item.path)
@@ -117,7 +91,6 @@ export default function BasicLayout() {
           {dom}
         </div>
       )}
-      actionsRender={() => (hasPermission('pipeline.view') ? [<ProcessingTaskCenter key="processing-tasks" />] : [])}
       avatarProps={{
         icon: <UserOutlined />,
         title: (

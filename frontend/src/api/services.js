@@ -34,8 +34,8 @@ export function updateRole(id, body) {
 export function fetchPermissionTree() {
   return client.get('/permissions/')
 }
-export function fetchConfigs() {
-  return client.get('/configs/')
+export function fetchConfig(key) {
+  return client.get(`/configs/${key}/`)
 }
 export function updateConfig(key, value) {
   return client.patch(`/configs/${key}/`, { value })
@@ -51,6 +51,12 @@ export function testAIConnection() {
 }
 export function fetchAIModels(body) {
   return client.post('/ai-connection/models/', body)
+}
+export function fetchAIConnectionSettings() {
+  return client.get('/ai-connection/settings/')
+}
+export function updateAIConnectionSetting(key, value) {
+  return client.patch(`/ai-connection/settings/${key}/`, { value })
 }
 export function fetchAllocationMode() {
   return client.get('/allocation-mode/')
@@ -192,7 +198,7 @@ export function deleteContact(id) {
 }
 
 // ---- Pipeline ----
-// POST /api/pipeline/run/  body { step, scope }; mode is resolved by the backend
+// POST /api/pipeline/run/  body { step, mode, scope }; mode is selected per run
 // returns { id, step, mode, status, message }
 export function runPipeline(body) {
   return client.post('/pipeline/run/', body)
@@ -206,6 +212,11 @@ export function fetchPipelineRun(id) {
 }
 export function cancelPipelineRun(id) {
   return client.post(`/pipeline/runs/${id}/cancel/`)
+}
+
+// ---- Recruitment analytics ----
+export function fetchRecruitmentOverview(params) {
+  return client.get('/analytics/recruitment-overview/', { params })
 }
 
 // ---- Workflow attempts ----
