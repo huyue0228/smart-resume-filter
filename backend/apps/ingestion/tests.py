@@ -34,6 +34,43 @@ def _excel_file_without_name(rows):
 
 
 class ResumeImportDesignContractTests(TestCase):
+    def test_school_import_tracks_blank_province_for_background_enrichment(self):
+        schools = _excel_file(
+            [
+                {"学校": "北京大学", "院校标签": "重点院校", "所在省份": ""},
+                {"学校": "南京大学", "院校标签": "重点院校", "所在省份": "江苏"},
+            ]
+        )
+
+        counts = import_files({"schools": schools}, mode="incremental")
+
+        blank = m.School.objects.get(name="北京大学")
+        self.assertEqual(blank.province, "")
+        self.assertEqual(counts["_school_ids_missing_province"], [blank.id])
+
+    def test_blank_import_province_preserves_existing_value(self):
+        existing = m.School.objects.create(name="北京大学", province="北京")
+        schools = _excel_file(
+            [{"学校": "北京大学", "院校标签": "重点院校", "所在省份": ""}]
+        )
+
+        counts = import_files({"schools": schools}, mode="incremental")
+
+        existing.refresh_from_db()
+        self.assertEqual(existing.province, "北京")
+        self.assertEqual(counts["_school_ids_missing_province"], [])
+
+    def test_explicit_import_province_overrides_existing_value(self):
+        existing = m.School.objects.create(name="测试大学", province="北京")
+        schools = _excel_file(
+            [{"学校": "测试大学", "院校标签": "普通院校", "所在省份": "河北"}]
+        )
+
+        import_files({"schools": schools}, mode="incremental")
+
+        existing.refresh_from_db()
+        self.assertEqual(existing.province, "河北")
+
     def test_highest_education_aliases_are_normalized(self):
         self.assertEqual(normalize_highest_education("高职（专科）"), "associate")
         self.assertEqual(normalize_highest_education("大学本科 / 学士"), "bachelor")
@@ -182,7 +219,7 @@ class ResumeImportDesignContractTests(TestCase):
         self.assertEqual(list(m.Job.objects.values_list("id", flat=True)), [existing.id])
 
     def test_replace_job_import_keeps_only_valid_rows(self):
-        m.Job.objects.create(
+        existing = m.Job.objects.create(
             position_name="已有岗位",
             public_name="已有岗位",
             responsibilities="已有职责",
@@ -206,9 +243,231 @@ class ResumeImportDesignContractTests(TestCase):
 
         self.assertEqual((counts["jobs"], counts["jobs_skipped"]), (1, 1))
         self.assertEqual(
-            list(m.Job.objects.values_list("position_name", flat=True)),
+            list(
+                m.Job.objects.filter(is_active=True).values_list(
+                    "position_name", flat=True
+                )
+            ),
             ["新岗位"],
         )
+        existing.refresh_from_db()
+        self.assertFalse(existing.is_active)
+
+    def test_replace_job_import_updates_creates_and_deactivates_without_deleting_hc_snapshot(self):
+        parent = m.Department.objects.create(name="技术中心", level=1)
+        department = m.Department.objects.create(
+            name="平台部", level=2, parent=parent, entity="GW"
+        )
+        existing = m.Job.objects.create(
+            entity="GW",
+            department=department,
+            category="技术类",
+            public_name="后端开发",
+            position_name="后端工程师",
+            job_family="旧岗位族",
+            location="北京",
+            education="本科",
+            responsibilities="旧职责",
+            headcount=1,
+            is_active=False,
+        )
+        m.JobMajor.objects.create(job=existing, major="旧专业")
+        stale = m.Job.objects.create(
+            entity="GW",
+            department=department,
+            category="技术类",
+            public_name="测试开发",
+            position_name="测试工程师",
+            responsibilities="测试职责",
+            headcount=3,
+        )
+        run = m.ProcessingRun.objects.create(step="step2", mode="rule")
+        capacity = m.ProcessingRunJobCapacity.objects.create(
+            run=run,
+            job=stale,
+            headcount_snapshot=3,
+            capacity=3,
+            used_count=1,
+        )
+        jobs = _excel_file(
+            [
+                {
+                    "主体": "GW",
+                    "一层部门": "技术中心",
+                    "二层部门": "平台部",
+                    "对外发布名称": "后端开发",
+                    "职位名称": "后端工程师",
+                    "岗位类别": "技术类",
+                    "岗位族": "研发族",
+                    "工作地点": "上海",
+                    "学历": "硕士",
+                    "是否对外发布": "是",
+                    "工作职责": "负责核心服务建设。",
+                    "需求数量": 7,
+                    "需求专业": "计算机、软件工程",
+                },
+                {
+                    "主体": "GW",
+                    "一层部门": "技术中心",
+                    "二层部门": "平台部",
+                    "对外发布名称": "算法开发",
+                    "职位名称": "算法工程师",
+                    "岗位类别": "技术类",
+                    "是否对外发布": "是",
+                    "工作职责": "负责算法平台建设。",
+                    "需求数量": 2,
+                    "需求专业": "人工智能",
+                },
+            ]
+        )
+
+        counts = import_files({"jobs": jobs}, mode="replace")
+
+        self.assertEqual(counts["jobs"], 2)
+        existing.refresh_from_db()
+        self.assertTrue(existing.is_active)
+        self.assertEqual(existing.job_family, "研发族")
+        self.assertEqual(existing.location, "上海")
+        self.assertEqual(existing.education, "硕士")
+        self.assertEqual(existing.responsibilities, "负责核心服务建设。")
+        self.assertEqual(existing.headcount, 7)
+        self.assertEqual(
+            list(existing.majors.order_by("id").values_list("major", flat=True)),
+            ["计算机", "软件工程"],
+        )
+        self.assertTrue(
+            m.Job.objects.filter(position_name="算法工程师", headcount=2, is_active=True).exists()
+        )
+        stale.refresh_from_db()
+        capacity.refresh_from_db()
+        self.assertFalse(stale.is_active)
+        self.assertEqual(capacity.job_id, stale.id)
+        self.assertEqual(
+            (capacity.headcount_snapshot, capacity.capacity, capacity.used_count),
+            (3, 3, 1),
+        )
+
+    def test_job_import_rejects_duplicate_business_key_in_file(self):
+        existing = m.Job.objects.create(
+            entity="GW",
+            category="技术类",
+            public_name="已有岗位",
+            position_name="已有岗位",
+            responsibilities="已有职责",
+            headcount=1,
+        )
+        jobs = _excel_file(
+            [
+                {
+                    "主体": "GW",
+                    "二层部门": "平台部",
+                    "对外发布名称": "后端开发",
+                    "职位名称": "后端工程师",
+                    "岗位类别": "技术类",
+                    "工作职责": "职责一",
+                },
+                {
+                    "主体": " gw ",
+                    "二层部门": "平台 部",
+                    "对外发布名称": "后端开发",
+                    "职位名称": "后端工程师",
+                    "岗位类别": "技术类",
+                    "工作职责": "职责二",
+                },
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "岗位文件存在重复业务键"):
+            import_files({"jobs": jobs}, mode="replace")
+
+        existing.refresh_from_db()
+        self.assertTrue(existing.is_active)
+        self.assertEqual(existing.headcount, 1)
+        self.assertEqual(m.Job.objects.count(), 1)
+
+    def test_job_import_rejects_duplicate_business_key_in_database(self):
+        first = m.Job.objects.create(
+            entity="GW",
+            category="技术类",
+            public_name="后端开发",
+            position_name="后端工程师",
+            responsibilities="职责一",
+            headcount=1,
+        )
+        second = m.Job.objects.create(
+            entity="gw",
+            category="技术类",
+            public_name="后端开发",
+            position_name="后端工程师",
+            responsibilities="职责二",
+            headcount=2,
+            is_active=False,
+        )
+        jobs = _excel_file(
+            [
+                {
+                    "主体": "GW",
+                    "对外发布名称": "新岗位",
+                    "职位名称": "新岗位",
+                    "岗位类别": "技术类",
+                    "工作职责": "新职责",
+                }
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "数据库岗位存在重复业务键"):
+            import_files({"jobs": jobs}, mode="replace")
+
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertTrue(first.is_active)
+        self.assertFalse(second.is_active)
+        self.assertFalse(m.Job.objects.filter(public_name="新岗位").exists())
+
+    def test_replace_job_import_rolls_back_updates_when_major_sync_fails(self):
+        existing = m.Job.objects.create(
+            entity="GW",
+            category="技术类",
+            public_name="后端开发",
+            position_name="后端工程师",
+            responsibilities="旧职责",
+            headcount=1,
+        )
+        m.JobMajor.objects.create(job=existing, major="旧专业")
+        stale = m.Job.objects.create(
+            entity="GW",
+            category="产品类",
+            public_name="产品经理",
+            position_name="产品经理",
+            responsibilities="产品职责",
+            headcount=2,
+        )
+        jobs = _excel_file(
+            [
+                {
+                    "主体": "GW",
+                    "对外发布名称": "后端开发",
+                    "职位名称": "后端工程师",
+                    "岗位类别": "技术类",
+                    "工作职责": "新职责",
+                    "需求数量": 9,
+                    "需求专业": "计算机",
+                }
+            ]
+        )
+
+        with patch.object(
+            m.JobMajor.objects, "bulk_create", side_effect=RuntimeError("sync failed")
+        ), self.assertRaisesRegex(RuntimeError, "sync failed"):
+            import_files({"jobs": jobs}, mode="replace")
+
+        existing.refresh_from_db()
+        stale.refresh_from_db()
+        self.assertEqual((existing.responsibilities, existing.headcount), ("旧职责", 1))
+        self.assertEqual(
+            list(existing.majors.values_list("major", flat=True)), ["旧专业"]
+        )
+        self.assertTrue(stale.is_active)
 
     def test_resume_import_skips_missing_phone_and_maps_gender_codes(self):
         resume_list = _excel_file(

@@ -8,7 +8,10 @@ from django.utils import timezone
 from apps.core.models import (
     Candidate,
     CandidateWorkflow,
+    Config,
+    Job,
     ProcessingRun,
+    ProcessingRunJobCapacity,
     ProcessingRunScopeItem,
     ProcessingRunStage,
 )
@@ -22,7 +25,7 @@ STEP_FUNCS = {
     "step2": lambda mode, scope, run: allocate.run_school_gate(
         scope, mode, processing_run=run
     ),
-    "step3": lambda mode, scope, run: allocate.run_rule_precheck(
+    "step3": lambda mode, scope, run: allocate.run_allocation_precheck(
         scope, mode, processing_run=run
     ),
     "step4": lambda mode, scope, run: "AI 深度筛选由候选人任务执行",
@@ -32,7 +35,7 @@ RESUME_PROCESS_STEP = "resume_process"
 STAGE_LABELS = {
     "step1": "查重与志愿排序",
     "step2": "院校分类与学历/院校准入",
-    "step3": "Rule 前置检查",
+    "step3": "岗位与分配前置检查",
     "step4": "AI 深度筛选与分配",
 }
 
@@ -78,6 +81,15 @@ def _stage_steps(step, mode):
     return [step]
 
 
+def _job_hc_coefficient():
+    config = Config.objects.filter(key="job_hc_coefficient").first()
+    value = config.value if config else 1
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 100:
+        return 1
+    return value
+
+
+@transaction.atomic
 def create_run(step, mode="rule", scope=None, created_by=None):
     if step not in {"all", RESUME_PROCESS_STEP} and step not in STEP_FUNCS:
         raise ValueError(f"未知步骤: {step}")
@@ -95,6 +107,7 @@ def create_run(step, mode="rule", scope=None, created_by=None):
             "prompt_version": config.prompt_version,
             "decision_version": config.decision_version,
         }
+    coefficient = _job_hc_coefficient()
     run = ProcessingRun.objects.create(
         step=step,
         mode=mode,
@@ -105,7 +118,21 @@ def create_run(step, mode="rule", scope=None, created_by=None):
         created_by_username_snapshot=(
             created_by.username if getattr(created_by, "is_authenticated", False) else ""
         ),
+        job_hc_coefficient_snapshot=coefficient,
         **versions,
+    )
+    ProcessingRunJobCapacity.objects.bulk_create(
+        [
+            ProcessingRunJobCapacity(
+                run=run,
+                job=job,
+                headcount_snapshot=job.headcount,
+                coefficient_snapshot=coefficient,
+                capacity=job.headcount * coefficient,
+            )
+            for job in Job.objects.filter(is_active=True).order_by("id")
+        ],
+        batch_size=1000,
     )
     workflow_revisions = dict(
         CandidateWorkflow.objects.filter(candidate_id__in=candidate_ids).values_list(
@@ -165,7 +192,7 @@ def _run_one_stage(run, stage, mode, scope):
             scope, mode, processing_run=run, processing_stage=stage_record
         )
     elif stage == "step3":
-        message = allocate.run_rule_precheck(
+        message = allocate.run_allocation_precheck(
             scope, mode, processing_run=run, processing_stage=stage_record
         )
     else:
@@ -387,7 +414,9 @@ def finalize_ai_run_if_complete(run_id):
                 "job_not_found",
                 "secondary_department_missing",
                 "secondary_contact_missing",
-                "major_not_matched",
+                "job_mapping_ambiguous",
+                "internal_position_name_missing",
+                "job_hc_exhausted",
                 "rule_assigned",
                 "terminal_workflow",
                 "no_resume_available",
@@ -400,7 +429,8 @@ def finalize_ai_run_if_complete(run_id):
         ).exclude(reason_code__in=[
             "education_not_eligible", "school_not_eligible", "job_not_found",
             "secondary_department_missing", "secondary_contact_missing",
-            "major_not_matched", "rule_assigned", "terminal_workflow", "no_resume_available",
+            "rule_assigned", "terminal_workflow", "no_resume_available",
+            "job_mapping_ambiguous", "internal_position_name_missing", "job_hc_exhausted",
         ]).count()
         stage.completed_count = stage.success_count
         stage.needs_attention_count = attention

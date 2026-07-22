@@ -3,6 +3,7 @@ import { Tabs } from 'antd'
 import MajorDictionaryTab from './config/MajorDictionaryTab'
 import SchoolAdmissionRulesTab from './config/SchoolAdmissionRulesTab'
 import SchoolTagsTab from './config/SchoolTagsTab'
+import AllocationSettingsTab from './config/AllocationSettingsTab'
 
 export default function ConfigPage() {
   const items = [
@@ -16,6 +17,11 @@ export default function ConfigPage() {
       key: 'major-dictionary',
       label: '专业大类词表',
       children: <MajorDictionaryTab />,
+    },
+    {
+      key: 'allocation-settings',
+      label: '分配参数',
+      children: <AllocationSettingsTab />,
     },
   ]
   return (

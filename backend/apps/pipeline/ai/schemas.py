@@ -54,3 +54,16 @@ class DispatchRecommendationOutput(BaseModel):
 class ResumeScreeningOutput(BaseModel):
     profile: ResumeProfileOutput
     decision: DispatchRecommendationOutput
+
+
+class SchoolProvinceItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=128)
+    province: str = Field(default="", max_length=32)
+
+
+class SchoolProvinceOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schools: list[SchoolProvinceItem] = Field(max_length=50)

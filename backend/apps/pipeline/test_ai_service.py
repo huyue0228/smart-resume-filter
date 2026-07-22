@@ -273,19 +273,22 @@ class AIResumeScreeningServiceTests(TestCase):
 
         self.assertEqual(error.message, "解析失败")
 
-    def test_specialist_match_requires_evidence_located_in_resume_text(self):
+    def test_specialist_match_without_locatable_evidence_falls_back_to_normal_ai(self):
         output = screening_output()
+        recommendation = output.decision.recommendation
         output.decision.ai_specialist_match = True
         output.decision.ai_specialist_confidence = 0.96
         output.decision.ai_specialist_evidence = ["不存在的孤立关键词"]
 
-        with self.assertRaises(service.AIServiceError) as captured:
-            service._validate_specialist_evidence(
-                output,
-                "参与企业知识库 RAG 检索增强项目并负责召回评测",
-            )
+        service._validate_specialist_evidence(
+            output,
+            "参与企业知识库 RAG 检索增强项目并负责召回评测",
+        )
 
-        self.assertEqual(captured.exception.code, "ai_invalid_output")
+        self.assertFalse(output.decision.ai_specialist_match)
+        self.assertEqual(output.decision.ai_specialist_confidence, 0)
+        self.assertEqual(output.decision.ai_specialist_evidence, [])
+        self.assertEqual(output.decision.recommendation, recommendation)
 
     def test_specialist_match_keeps_only_locatable_resume_evidence(self):
         output = screening_output()
@@ -306,16 +309,17 @@ class AIResumeScreeningServiceTests(TestCase):
             ["知识库 RAG 检索增强项目"],
         )
 
-    def test_specialist_match_rejects_isolated_keyword_even_when_present(self):
+    def test_specialist_match_ignores_isolated_keyword_even_when_present(self):
         output = screening_output()
         output.decision.ai_specialist_match = True
         output.decision.ai_specialist_confidence = 0.96
         output.decision.ai_specialist_evidence = ["智能体开发"]
 
-        with self.assertRaises(service.AIServiceError) as captured:
-            service._validate_specialist_evidence(output, "技能：智能体开发")
+        service._validate_specialist_evidence(output, "技能：智能体开发")
 
-        self.assertEqual(captured.exception.code, "ai_invalid_output")
+        self.assertFalse(output.decision.ai_specialist_match)
+        self.assertEqual(output.decision.ai_specialist_confidence, 0)
+        self.assertEqual(output.decision.ai_specialist_evidence, [])
 
     def test_output_schema_rejects_assignment_reference_ids(self):
         payload = screening_output().model_dump()

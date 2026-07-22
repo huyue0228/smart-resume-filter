@@ -4,7 +4,17 @@ from collections import Counter
 from datetime import date, datetime, time, timedelta
 
 from django.core.cache import cache
-from django.db.models import Avg, Count, DurationField, ExpressionWrapper, F, Min, Q
+from django.db.models import (
+    Avg,
+    Count,
+    DurationField,
+    ExpressionWrapper,
+    F,
+    Min,
+    OuterRef,
+    Q,
+    Subquery,
+)
 from django.db.models.functions import TruncDate
 from django.utils import timezone
 from rest_framework import status
@@ -89,7 +99,7 @@ def _cache_key(filters):
     digest = hashlib.sha256(
         json.dumps(serializable, sort_keys=True, ensure_ascii=True).encode("utf-8")
     ).hexdigest()
-    return f"recruitment-analytics:v1:{digest}"
+    return f"recruitment-analytics:v2:{digest}"
 
 
 def _percentage(value, total):
@@ -131,6 +141,16 @@ def _choice_distribution(queryset, field, candidate_field, labels):
         }
         for row in rows
     ]
+
+
+def _alias_distribution(items, aliases):
+    """把仅供内部审计的分类折叠为稳定的公开统计口径。"""
+    merged = {}
+    for item in items:
+        key, label = aliases.get(item["key"], (item["key"], item["label"]))
+        current = merged.setdefault(key, {"key": key, "label": label, "count": 0})
+        current["count"] += item["count"]
+    return sorted(merged.values(), key=lambda item: (-item["count"], item["key"]))
 
 
 def _named_ranking(queryset, *, value_field, label_field, candidate_field):
@@ -355,27 +375,34 @@ def build_recruitment_overview(filters):
         )
     if filters["education"]:
         resumes = resumes.filter(candidate__highest_education=filters["education"])
-    selected_attempt_filters = {}
+    latest_attempt = (
+        m.AssignmentAttempt.objects.filter(resume_id=OuterRef("pk"))
+        .exclude(status=m.AssignmentAttempt.STATUS_CANCELLED)
+        .order_by("-attempt_no", "-id")
+    )
+    resumes = resumes.annotate(
+        latest_effective_attempt_id=Subquery(latest_attempt.values("id")[:1]),
+        latest_effective_department_id=Subquery(
+            latest_attempt.values("department_id")[:1]
+        ),
+        latest_effective_source=Subquery(latest_attempt.values("source")[:1]),
+    )
     if filters["department_id"]:
-        selected_attempt_filters["department_id"] = filters["department_id"]
+        resumes = resumes.filter(
+            latest_effective_department_id=filters["department_id"]
+        )
     if filters["source"]:
-        selected_attempt_filters["source"] = filters["source"]
-    if selected_attempt_filters:
-        matching_resume_ids = m.AssignmentAttempt.objects.filter(
-            resume_id__in=resumes.values("id"),
-            **selected_attempt_filters,
-        ).values("resume_id")
-        resumes = resumes.filter(id__in=matching_resume_ids)
+        resumes = resumes.filter(latest_effective_source=filters["source"])
     resumes = resumes.distinct()
 
     resume_ids = resumes.values("id")
     candidate_ids = list(
         resumes.order_by().values_list("candidate_id", flat=True).distinct()
     )
-    attempts = m.AssignmentAttempt.objects.filter(
-        resume_id__in=resume_ids,
-        **selected_attempt_filters,
-    )
+    latest_attempt_ids = resumes.exclude(
+        latest_effective_attempt_id__isnull=True
+    ).values("latest_effective_attempt_id")
+    attempts = m.AssignmentAttempt.objects.filter(id__in=latest_attempt_ids)
     decisions = m.AgentDispatchDecision.objects.filter(resume_id__in=resume_ids)
     workflows = m.CandidateWorkflow.objects.filter(candidate_id__in=candidate_ids)
 
@@ -445,30 +472,24 @@ def build_recruitment_overview(filters):
         dict(m.AssignmentAttempt.SOURCE_CHOICES),
     )
     recommendation_distribution = _choice_distribution(
-        decisions.filter(special_route_applied=False),
+        decisions,
         "recommendation",
         "workflow__candidate_id",
         dict(m.AgentDispatchDecision.RECOMMEND_CHOICES),
     )
-    special_route_count = (
-        decisions.filter(special_route_applied=True)
-        .values("workflow__candidate_id")
-        .distinct()
-        .count()
-    )
-    if special_route_count:
-        recommendation_distribution.append(
-            {
-                "key": "ai_special_route",
-                "label": "AI 专项强制分配",
-                "count": special_route_count,
-            }
-        )
-    ai_error_distribution = _choice_distribution(
-        decisions,
-        "error_code",
-        "workflow__candidate_id",
-        {},
+    ai_error_distribution = _alias_distribution(
+        _choice_distribution(
+            decisions,
+            "error_code",
+            "workflow__candidate_id",
+            {},
+        ),
+        {
+            "ai_special_route_unavailable": (
+                "ai_connection_error",
+                "AI 连接异常",
+            )
+        },
     )
     department_ranking = _department_ranking(attempts)
     school_tag_ranking = _school_tag_ranking(candidate_ids)
@@ -509,7 +530,7 @@ def build_recruitment_overview(filters):
             "cohort": "Resume.imported_at 落在所选日期范围内的投递记录",
             "candidate_scope": "候选人数及各阶段按 Candidate 去重",
             "job_scope": "岗位排行优先使用 CandidateWorkflow.current_resume",
-            "department_scope": "部门排行优先使用 AssignmentAttempt.department_name_snapshot",
+            "department_scope": "部门筛选和排行使用投递最新非取消分配尝试，并优先读取部门快照",
             "conversion_denominator": "所选 cohort 去重候选人数",
         },
         "summary": summary,

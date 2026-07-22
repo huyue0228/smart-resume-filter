@@ -23,7 +23,7 @@ describe('SmartDataTable', () => {
     )
 
     await waitFor(() => expect(request).toHaveBeenCalledWith({ page: 1, page_size: 10 }))
-    expect(container.querySelector('.srf-table-pagination-sticky')).toBeNull()
+    expect(container.querySelector('.srf-table-pagination-sticky')).toBeTruthy()
     await userEvent.click(container.querySelector('.ant-table-filter-trigger'))
     await userEvent.type(screen.getByPlaceholderText('筛选姓名'), '张三')
     await userEvent.click(screen.getByRole('button', { name: /确认/ }))
@@ -35,7 +35,7 @@ describe('SmartDataTable', () => {
     }))
   })
 
-  it('fixes an opted-in pagination bar to the visible table width', async () => {
+  it('fixes pagination to the visible table width and scrolls only the table body', async () => {
     const request = vi.fn().mockResolvedValue({ data: { results: rows, count: 20 } })
     const rectSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
       bottom: 360,
@@ -62,8 +62,10 @@ describe('SmartDataTable', () => {
       const root = view.container.querySelector('.srf-smart-data-table')
       expect(view.container.querySelector('.srf-table-pagination-sticky')).toBeTruthy()
       expect(root.classList.contains('srf-smart-data-table--pagination-fixed')).toBe(true)
+      expect(root.classList.contains('srf-smart-data-table--viewport-scroll')).toBe(true)
       expect(root.style.getPropertyValue('--srf-sticky-pagination-left')).toBe('24px')
       expect(root.style.getPropertyValue('--srf-sticky-pagination-width')).toBe('800px')
+      expect(root.style.getPropertyValue('--srf-table-body-height')).toBe('180px')
     })
 
     rectSpy.mockReturnValue({

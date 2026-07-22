@@ -1,8 +1,7 @@
-import io
+import logging
 import mimetypes
 import os
 import re
-import zipfile
 from datetime import date, datetime, time as datetime_time, timedelta
 from urllib.parse import quote
 
@@ -39,12 +38,25 @@ from apps.ingestion.sources import (
     import_files,
 )
 from apps.pipeline import ai_config, cancellation, runner
-from apps.pipeline.tasks import execute_runs_sequence_task
+from apps.pipeline.tasks import (
+    execute_runs_sequence_task,
+    submit_school_province_enrichment,
+)
 from apps.pipeline.services import allocate as allocate_service
 from apps.pipeline.ai import service as ai_service
 
 from . import serializers
-from .result_report import build_result_report
+from .resume_export import (
+    CandidateExportRecord,
+    ExportFieldError,
+    build_resume_export_zip,
+    export_fields_payload,
+    parse_export_fields,
+)
+from .result_report import build_result_report, current_effective_attempt
+
+
+logger = logging.getLogger(__name__)
 
 
 CONFIG_REGISTRY = {
@@ -54,6 +66,27 @@ CONFIG_REGISTRY = {
         "value_type": "boolean",
         "default": False,
     },
+    "job_hc_coefficient": {
+        "label": "岗位 HC 系数",
+        "description": "每个处理任务按岗位 HC × 系数冻结自动分配容量。",
+        "value_type": "integer",
+        "default": 1,
+        "min": 1,
+        "max": 100,
+    },
+}
+
+
+BULK_DISPATCH_FILTER_FIELDS = {
+    "system_status",
+    "system_statuses",
+    "current_entity_in",
+    "current_position_name_in",
+    "job_department_name_in",
+    "current_job_category_in",
+    "school_tag_in",
+    "allocation_source",
+    "reason_code",
 }
 
 
@@ -191,60 +224,16 @@ def delete_user_and_bound_contact(user):
         _delete_users([locked_user])
 
 
-def _resume_file_info(resume):
-    fname = os.path.basename(resume.resume_file or "")
-    path = os.path.join(settings.MEDIA_ROOT, RESUME_SUBDIR, fname) if fname else ""
-    if path and os.path.exists(path):
-        return fname, path
-    return "", ""
-
-
-def _attachment_response(path, filename):
-    content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-    with open(path, "rb") as file_obj:
-        response = HttpResponse(file_obj.read(), content_type=content_type)
-    response["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(filename)}"
-    response["X-Resume-Filename"] = quote(filename)
+def candidate_export_response(records, field_keys):
+    content, exported_count, missing_count, candidate_count = build_resume_export_zip(
+        records, field_keys
+    )
+    response = HttpResponse(content, content_type="application/zip")
+    response["Content-Disposition"] = 'attachment; filename="resumes_export.zip"'
+    response["X-Export-Count"] = str(exported_count)
+    response["X-Export-Missing"] = str(missing_count)
+    response["X-Export-Candidate-Count"] = str(candidate_count)
     return response
-
-
-def resume_export_response(resumes):
-    available, missing = [], []
-    for resume in resumes:
-        fname, path = _resume_file_info(resume)
-        if path:
-            available.append((resume, fname, path))
-        else:
-            missing.append(f"{resume.candidate.name}（{resume.apply_id}）")
-
-    if len(available) == 1 and not missing:
-        _, fname, path = available[0]
-        response = _attachment_response(path, fname)
-        response["X-Export-Count"] = "1"
-        response["X-Export-Missing"] = "0"
-        return response
-
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for _, fname, path in available:
-            zf.write(path, arcname=fname)
-        if missing:
-            zf.writestr(
-                "缺失简历文件清单.txt",
-                "以下候选人暂无简历文件（未上传简历包或未匹配）：\n"
-                + "\n".join(missing),
-            )
-
-    buf.seek(0)
-    resp = HttpResponse(buf.getvalue(), content_type="application/zip")
-    resp["Content-Disposition"] = 'attachment; filename="resumes_export.zip"'
-    resp["X-Export-Count"] = str(len(available))
-    resp["X-Export-Missing"] = str(len(missing))
-    return resp
-
-
-def resume_zip_response(resumes):
-    return resume_export_response(resumes)
 
 
 def resume_preview_response(resume):
@@ -352,7 +341,35 @@ class ImportView(APIView):
                 {"detail": f"导入失败: {exc}"}, status=status.HTTP_400_BAD_REQUEST
             )
         candidate_ids = counts.pop("_candidate_ids", [])
+        school_ids_missing_province = counts.pop(
+            "_school_ids_missing_province", []
+        )
         warnings = counts.pop("_warnings", [])
+        school_province_enrichment = {
+            "status": (
+                "ai_unavailable"
+                if school_ids_missing_province
+                else "not_requested"
+            ),
+            "school_count": len(school_ids_missing_province),
+        }
+        if school_ids_missing_province and ai_config.is_ai_available():
+            try:
+                submitted = submit_school_province_enrichment(
+                    school_ids_missing_province
+                )
+                school_province_enrichment = {
+                    "status": "queued",
+                    "school_count": len(school_ids_missing_province),
+                    **submitted,
+                }
+            except Exception as exc:  # noqa: BLE001 - 导入成功不因增强任务失败回滚
+                logger.warning(
+                    "School province enrichment dispatch failed school_count=%s error_type=%s",
+                    len(school_ids_missing_province),
+                    type(exc).__name__,
+                )
+                school_province_enrichment["status"] = "queue_failed"
         processing_runs = []
         if takes_resume and candidate_ids:
             run = runner.create_run(
@@ -369,12 +386,18 @@ class ImportView(APIView):
             if skipped_jobs
             else "导入完成"
         )
+        if school_province_enrichment["status"] == "queued":
+            detail += (
+                f"，已提交 {school_province_enrichment['school_count']} 所院校"
+                "省份后台补全"
+            )
         return Response(
             {
                 "detail": detail,
                 "counts": counts,
                 "warnings": warnings,
                 "undo_available": takes_resume,
+                "school_province_enrichment": school_province_enrichment,
                 "processing_runs": serializers.ProcessingRunSerializer(
                     processing_runs, many=True
                 ).data,
@@ -434,6 +457,7 @@ class ResumeViewSet(PermissionedReadOnlyModelViewSet):
     def result_report(self, request):
         imported_after = request.query_params.get("imported_after")
         imported_before = request.query_params.get("imported_before")
+        department_id = request.query_params.get("department_id")
         if not imported_after or not imported_before:
             return Response(
                 {"detail": "imported_after 和 imported_before 均为必填日期"},
@@ -457,6 +481,19 @@ class ResumeViewSet(PermissionedReadOnlyModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        if department_id not in (None, ""):
+            try:
+                department_id = int(department_id)
+                if department_id <= 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                return Response(
+                    {"detail": "department_id 必须是正整数"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        else:
+            department_id = None
+
         current_timezone = timezone.get_current_timezone()
         start_at = timezone.make_aware(
             datetime.combine(start_date, datetime_time.min), current_timezone
@@ -474,7 +511,7 @@ class ResumeViewSet(PermissionedReadOnlyModelViewSet):
             )
             .order_by("attempt_no", "id")
         )
-        resumes = list(
+        resume_queryset = (
             m.Resume.objects.filter(
                 imported_at__gte=start_at,
                 imported_at__lt=end_at,
@@ -491,6 +528,16 @@ class ResumeViewSet(PermissionedReadOnlyModelViewSet):
             )
             .order_by("imported_at", "id")
         )
+        resumes = list(resume_queryset)
+        if department_id:
+            resumes = [
+                resume
+                for resume in resumes
+                if (
+                    (attempt := current_effective_attempt(resume))
+                    and attempt.department_id == department_id
+                )
+            ]
         content = build_result_report(resumes)
         filename = f"简历结果报表_{start_date:%Y%m%d}_{end_date:%Y%m%d}.xlsx"
         response = HttpResponse(
@@ -556,6 +603,7 @@ class CandidateViewSet(PermissionedModelViewSet):
         "partial_update": "resume.import",
         "destroy": "resume.import",
         "export_resumes": ["resume.view", "attempt.export"],
+        "export_fields": ["resume.view", "attempt.export"],
         "filter_options": ["resume.view", "attempt.view_received", "attempt.view_assigned"],
         "bulk_dispatch": "attempt.dispatch",
     }
@@ -575,6 +623,7 @@ class CandidateViewSet(PermissionedModelViewSet):
             m.Candidate.objects.prefetch_related(
                 "resumes",
                 "resumes__job__department__parent",
+                "resumes__job__majors",
                 Prefetch("workflow__attempts", queryset=attempts),
                 Prefetch(
                     "processing_scope_items",
@@ -594,7 +643,12 @@ class CandidateViewSet(PermissionedModelViewSet):
 
     def get_queryset(self):
         qs = self._scope_queryset(self._base_queryset())
-        qs = system_status.apply_candidate_filters(qs, self.request.query_params)
+        try:
+            qs = system_status.apply_candidate_filters(qs, self.request.query_params)
+        except ValueError as exc:
+            from rest_framework.exceptions import ValidationError
+
+            raise ValidationError({"detail": str(exc)}) from exc
         return self._apply_attempt_filters(qs, self.request.query_params)
 
     def _scope_queryset(self, qs):
@@ -618,12 +672,22 @@ class CandidateViewSet(PermissionedModelViewSet):
         return qs.filter(scope).distinct()
 
     def _apply_attempt_filters(self, qs, params):
-        source_values = {
-            item for item in str(params.get("allocation_source") or "").split(",") if item
-        }
-        status_values = {
-            item for item in str(params.get("attempt_status") or "").split(",") if item
-        }
+        def values(key):
+            if hasattr(params, "getlist"):
+                raw_values = params.getlist(key)
+            else:
+                raw = params.get(key)
+                raw_values = raw if isinstance(raw, list) else [raw]
+            return {
+                item.strip()
+                for raw_value in raw_values
+                if raw_value is not None
+                for item in str(raw_value).split(",")
+                if item.strip()
+            }
+
+        source_values = values("allocation_source")
+        status_values = values("attempt_status")
         contact_name = str(params.get("contact_name") or "").strip().casefold()
         sub_contact_name = str(params.get("sub_contact_name") or "").strip().casefold()
         if not any([source_values, status_values, contact_name, sub_contact_name]):
@@ -675,28 +739,54 @@ class CandidateViewSet(PermissionedModelViewSet):
 
     @action(detail=False, methods=["get"], url_path="export")
     def export_resumes(self, request):
+        try:
+            field_keys = parse_export_fields(request.query_params)
+        except ExportFieldError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
         permissions = user_permission_codes(request.user)
         ids = request.query_params.get("ids")
         qs = self.get_queryset()
         if ids:
             id_list = [int(item) for item in ids.split(",") if item.strip().isdigit()]
             qs = qs.filter(id__in=id_list)
-        if "resume.view" not in permissions:
-            attempt_ids = []
-            for candidate in qs:
-                attempt = serializers.visible_candidate_attempt(candidate, request.user)
-                if attempt:
-                    attempt_ids.append(attempt.id)
-            attempts = m.AssignmentAttempt.objects.filter(id__in=attempt_ids).select_related(
-                "resume__candidate"
+        records = []
+        for candidate in qs:
+            if "resume.view" not in permissions:
+                attempt = serializers.visible_candidate_attempt(
+                    candidate, request.user, permissions=permissions
+                )
+                if not attempt:
+                    continue
+                records.append(
+                    CandidateExportRecord(
+                        candidate=candidate,
+                        current_resume=attempt.resume,
+                        attempt=attempt,
+                        file_resumes=[attempt.resume],
+                    )
+                )
+                continue
+
+            current_resume = candidate_summary.current_resume(candidate)
+            workflow = candidate_summary.workflow_or_none(candidate)
+            attempt = candidate_summary.latest_effective_attempt(
+                workflow,
+                resume_id=current_resume.id if current_resume else None,
             )
-            return resume_zip_response([attempt.resume for attempt in attempts])
-        resumes = (
-            m.Resume.objects.select_related("candidate")
-            .filter(candidate__in=qs)
-            .order_by("candidate_id", "volunteer_rank", "id")
-        )
-        return resume_zip_response(resumes)
+            records.append(
+                CandidateExportRecord(
+                    candidate=candidate,
+                    current_resume=current_resume,
+                    attempt=attempt,
+                    file_resumes=list(candidate.resumes.all()),
+                )
+            )
+        return candidate_export_response(records, field_keys)
+
+    @action(detail=False, methods=["get"], url_path="export-fields")
+    def export_fields(self, request):
+        return Response(export_fields_payload())
 
     def destroy(self, request, *args, **kwargs):
         """只允许清理尚未产生流程历史的候选人。"""
@@ -748,36 +838,64 @@ class CandidateViewSet(PermissionedModelViewSet):
 
     @action(detail=False, methods=["post"], url_path="bulk-dispatch")
     def bulk_dispatch(self, request):
+        has_candidate_ids = "candidate_ids" in request.data
+        has_candidate_filters = "candidate_filters" in request.data
         candidate_ids = request.data.get("candidate_ids")
         candidate_filters = request.data.get("candidate_filters")
-        if candidate_ids is not None and candidate_filters is not None:
+        if has_candidate_ids and has_candidate_filters:
             return Response(
                 {"detail": "candidate_ids 与 candidate_filters 只能提供一个"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if candidate_ids is None and candidate_filters is None:
+        if not has_candidate_ids and not has_candidate_filters:
             return Response(
                 {"detail": "必须提供 candidate_ids 或 candidate_filters"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         qs = self._scope_queryset(self._base_queryset())
-        if candidate_ids is not None:
-            if not isinstance(candidate_ids, list):
+        if has_candidate_ids:
+            valid_candidate_ids = (
+                isinstance(candidate_ids, list)
+                and bool(candidate_ids)
+                and all(
+                    isinstance(item, int)
+                    and not isinstance(item, bool)
+                    and item > 0
+                    for item in candidate_ids
+                )
+            )
+            if not valid_candidate_ids:
                 return Response(
-                    {"detail": "candidate_ids 必须是数组"},
+                    {"detail": "candidate_ids 必须是非空正整数数组"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            qs = qs.filter(id__in=[item for item in candidate_ids if isinstance(item, int)])
+            candidate_ids = list(dict.fromkeys(candidate_ids))
+            qs = qs.filter(id__in=candidate_ids)
         else:
-            if not isinstance(candidate_filters, dict):
+            if not isinstance(candidate_filters, dict) or not candidate_filters:
                 return Response(
-                    {"detail": "candidate_filters 必须是对象"},
+                    {"detail": "candidate_filters 必须是非空对象"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            qs = system_status.apply_candidate_filters(qs, candidate_filters)
+            unknown_fields = sorted(set(candidate_filters) - BULK_DISPATCH_FILTER_FIELDS)
+            if unknown_fields:
+                return Response(
+                    {"detail": f"批量下发不支持筛选字段：{','.join(unknown_fields)}"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if not any(value not in (None, "", [], {}) for value in candidate_filters.values()):
+                return Response(
+                    {"detail": "candidate_filters 至少包含一个非空筛选值"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                qs = system_status.apply_candidate_filters(qs, candidate_filters)
+            except ValueError as exc:
+                return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
             qs = self._apply_attempt_filters(qs, candidate_filters)
 
         total = qs.count()
+        eligible = 0
         dispatched = 0
         errors = []
         for candidate in qs:
@@ -788,18 +906,22 @@ class CandidateViewSet(PermissionedModelViewSet):
             )
             if not attempt or attempt.status != m.AssignmentAttempt.STATUS_PENDING_DISPATCH:
                 continue
+            eligible += 1
             try:
                 allocate_service.dispatch_attempt(attempt, user=request.user)
                 dispatched += 1
             except ValueError as exc:
                 errors.append({"candidate_id": candidate.id, "detail": str(exc)})
-        skipped = total - dispatched
+        failed = len(errors)
+        skipped = total - eligible
         return Response(
             {
-                "detail": f"已下发 {dispatched} 条，跳过 {skipped} 条",
+                "detail": f"已下发 {dispatched} 条，跳过 {skipped} 条，失败 {failed} 条",
                 "total": total,
+                "eligible": eligible,
                 "dispatched": dispatched,
                 "skipped": skipped,
+                "failed": failed,
                 "errors": errors,
             }
         )
@@ -957,7 +1079,13 @@ class SchoolViewSet(PermissionedModelViewSet):
                 "platform": [
                     _filter_option(value)
                     for value in sorted({str(value).strip() for value in values})
-                ]
+                ],
+                "school_tag": [
+                    _filter_option(tag.name, option_value=tag.id)
+                    for tag in m.SchoolTag.objects.filter(is_active=True).order_by(
+                        "code", "id"
+                    )
+                ],
             }
         )
 
@@ -1076,9 +1204,9 @@ class ContactViewSet(PermissionedModelViewSet):
         qs = m.Contact.objects.select_related("department").order_by("id")
         p = self.request.query_params
         is_active = bool_query_value(p.get("is_active"))
-        if is_active is None:
+        if is_active is None and self.action == "list":
             qs = qs.filter(is_active=True)
-        else:
+        elif is_active is not None:
             qs = qs.filter(is_active=is_active)
         if p.get("name"):
             qs = _filter_indexed_name(qs, "", p["name"])
@@ -1201,13 +1329,21 @@ class AssignmentAttemptViewSet(PermissionedReadOnlyModelViewSet):
     def get_queryset(self):
         qs = m.AssignmentAttempt.objects.select_related(
             "workflow__candidate",
+            "workflow__candidate__first_degree_tag",
+            "workflow__candidate__highest_degree_tag",
             "resume__candidate",
+            "resume__job__department__parent",
             "department",
             "contact",
             "sub_department",
             "sub_contact",
             "matched_rule",
             "agent_decision",
+        ).prefetch_related(
+            "resume__job__majors",
+            "workflow__candidate__resumes__job__department__parent",
+            "workflow__candidate__resumes__job__majors",
+            "workflow__candidate__processing_scope_items",
         ).order_by("-created_at")
         permissions = user_permission_codes(self.request.user)
         contact_id = getattr(self.request.user, "contact_id", None)
@@ -1466,21 +1602,39 @@ class AssignmentAttemptViewSet(PermissionedReadOnlyModelViewSet):
 
     @action(detail=False, methods=["get"], url_path="export")
     def export_resumes(self, request):
-        """打包导出候选人简历文件为 zip。
+        """按候选人一行导出 Excel，并附上所选尝试对应的简历文件。
 
         ?ids=1,2,3 导出指定分配尝试；不传则导出当前筛选（含 status）下全部。
-        无简历文件的候选人记入 zip 内的「缺失简历文件清单.txt」。
         """
+        try:
+            field_keys = parse_export_fields(request.query_params)
+        except ExportFieldError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         qs = self.get_queryset()
         ids = request.query_params.get("ids")
         if ids:
             id_list = [int(x) for x in ids.split(",") if x.strip().isdigit()]
             qs = qs.filter(id__in=id_list)
 
-        resumes = [
-            attempt.resume for attempt in qs.select_related("resume__candidate")
-        ]
-        return resume_zip_response(resumes)
+        attempts_by_candidate = {}
+        for attempt in qs:
+            attempts_by_candidate.setdefault(attempt.workflow.candidate_id, []).append(
+                attempt
+            )
+        records = []
+        for attempts in attempts_by_candidate.values():
+            selected_attempt = max(
+                attempts, key=lambda item: (item.attempt_no, item.id)
+            )
+            records.append(
+                CandidateExportRecord(
+                    candidate=selected_attempt.workflow.candidate,
+                    current_resume=selected_attempt.resume,
+                    attempt=selected_attempt,
+                    file_resumes=[item.resume for item in attempts],
+                )
+            )
+        return candidate_export_response(records, field_keys)
 
     @action(detail=True, methods=["get"], url_path="resume-preview")
     def resume_preview(self, request, pk=None):
@@ -1626,6 +1780,24 @@ class PipelineRunView(APIView):
                     {"detail": "force_reprocess 不得与状态或筛选范围同时提交"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+        system_statuses = scope.get("system_statuses")
+        if system_statuses is not None:
+            if not isinstance(system_statuses, list) or not system_statuses:
+                return Response(
+                    {"detail": "system_statuses 必须是非空数组"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                system_status.normalize_statuses(system_statuses)
+            except ValueError as exc:
+                return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        if "candidate_filters" in scope and not isinstance(
+            scope.get("candidate_filters"), dict
+        ):
+            return Response(
+                {"detail": "candidate_filters 必须是对象"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         try:
             mode = ai_config.validate_allocation_mode(request.data.get("mode"))
         except ValueError as exc:
@@ -1723,6 +1895,13 @@ class ConfigViewSet(viewsets.ViewSet):
     def _save(self, request, pk):
         if pk not in CONFIG_REGISTRY:
             return Response({"detail": "未知配置项"}, status=status.HTTP_404_NOT_FOUND)
+        if pk == "job_hc_coefficient" and not has_permission_code(
+            request.user, "settings.manage_config"
+        ):
+            return Response(
+                {"detail": "无分配参数维护权限"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         serializer = serializers.ConfigSerializer(
             data={**self._item_data(pk), "value": request.data.get("value")}
         )

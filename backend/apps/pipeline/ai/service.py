@@ -596,7 +596,7 @@ def _call_model(
 
 
 def _validate_specialist_evidence(output, text):
-    """专项分流必须引用简历正文中的实质证据，不能只靠模型标签或孤立关键词。"""
+    """只保留可定位的专项证据；证据不可靠时退回普通 AI 结果。"""
     decision = output.decision
     if not decision.ai_specialist_match:
         decision.ai_specialist_confidence = 0
@@ -610,10 +610,10 @@ def _validate_specialist_evidence(output, text):
         if len(normalized_evidence) >= 8 and normalized_evidence in normalized_text:
             matched.append(evidence)
     if not matched:
-        raise AIServiceError(
-            "ai_invalid_output",
-            "AI 专项匹配缺少可在简历正文中定位的证据",
-        )
+        decision.ai_specialist_match = False
+        decision.ai_specialist_confidence = 0
+        decision.ai_specialist_evidence = []
+        return
     decision.ai_specialist_evidence = matched
 
 

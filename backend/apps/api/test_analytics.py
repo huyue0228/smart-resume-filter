@@ -145,7 +145,7 @@ class RecruitmentAnalyticsApiTests(TestCase):
         self.assertEqual(payload["ai_error_distribution"][0]["key"], "llm_timeout")
         self.assertEqual(
             payload["ai_recommendation_distribution"],
-            [{"key": "ai_special_route", "label": "AI 专项强制分配", "count": 1}],
+            [{"key": "review", "label": "人工复核", "count": 1}],
         )
         self.assertEqual(
             payload["methodology"]["cohort"],
@@ -162,6 +162,59 @@ class RecruitmentAnalyticsApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["summary"]["candidate_count"], 1)
         self.assertEqual(response.json()["source_distribution"][0]["key"], "rule")
+
+    def test_department_filter_and_ranking_use_latest_non_cancelled_attempt(self):
+        candidate = m.Candidate.objects.get(identity_hash="analytics-candidate-1")
+        resume = m.Resume.objects.get(apply_id="AN-001")
+        workflow = m.CandidateWorkflow.objects.get(candidate=candidate)
+        latest_department = m.Department.objects.create(
+            name="最新统计归属部门", level=2
+        )
+        m.AssignmentAttempt.objects.create(
+            workflow=workflow,
+            resume=resume,
+            attempt_no=2,
+            source=m.AssignmentAttempt.SOURCE_MANUAL,
+            status=m.AssignmentAttempt.STATUS_DISPATCHED_L2,
+            department=latest_department,
+            department_name_snapshot="最新统计归属部门快照",
+        )
+        m.AssignmentAttempt.objects.create(
+            workflow=workflow,
+            resume=resume,
+            attempt_no=3,
+            source=m.AssignmentAttempt.SOURCE_RULE,
+            status=m.AssignmentAttempt.STATUS_CANCELLED,
+            department=self.department,
+            department_name_snapshot="取消尝试部门快照",
+        )
+        self.client.force_authenticate(self.hr)
+
+        old_response = self.client.get(
+            "/api/analytics/recruitment-overview/",
+            {"department_id": self.department.id},
+        )
+        latest_response = self.client.get(
+            "/api/analytics/recruitment-overview/",
+            {"department_id": latest_department.id},
+        )
+
+        self.assertEqual(old_response.status_code, 200)
+        self.assertEqual(old_response.json()["summary"]["candidate_count"], 0)
+        self.assertEqual(latest_response.status_code, 200)
+        payload = latest_response.json()
+        self.assertEqual(payload["summary"]["candidate_count"], 1)
+        self.assertEqual(
+            payload["department_ranking"],
+            [
+                {
+                    "key": latest_department.id,
+                    "label": "最新统计归属部门快照",
+                    "count": 1,
+                }
+            ],
+        )
+        self.assertEqual(payload["source_distribution"][0]["key"], "manual")
 
     def test_job_filter_and_ranking_use_current_effective_resume(self):
         candidate = m.Candidate.objects.get(identity_hash="analytics-candidate-1")

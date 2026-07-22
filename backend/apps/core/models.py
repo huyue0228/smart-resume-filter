@@ -329,7 +329,7 @@ class Resume(models.Model):
     # Step1 查重与志愿排序
     volunteer_rank = models.PositiveSmallIntegerField(null=True, blank=True, help_text="志愿次序 1-4")
     assigned_entity = models.CharField(max_length=16, blank=True, help_text="分配主体 GW/YLS")
-    # Step3 Rule 前置检查固定的岗位分类结果
+    # Step3 岗位与分配前置检查固定的岗位分类结果
     job = models.ForeignKey(
         Job, null=True, blank=True, on_delete=models.SET_NULL, related_name="resumes"
     )
@@ -460,6 +460,8 @@ class CandidateWorkflow(models.Model):
     ARCHIVE_SCHOOL_RULE_NOT_MATCHED = "school_rule_not_matched"
     ARCHIVE_NO_NEXT_RESUME = "no_next_resume"
     ARCHIVE_JOB_NOT_MATCHED = "job_not_matched"
+    ARCHIVE_JOB_MAPPING_AMBIGUOUS = "job_mapping_ambiguous"
+    ARCHIVE_INTERNAL_POSITION_NAME_MISSING = "internal_position_name_missing"
     ARCHIVE_DEPARTMENT_NOT_FOUND = "department_not_found"
     ARCHIVE_AGENT_NO_RECOMMENDATION = "agent_no_recommendation"
     ARCHIVE_HR_CANCELLED = "hr_cancelled"
@@ -468,6 +470,8 @@ class CandidateWorkflow(models.Model):
         (ARCHIVE_SCHOOL_RULE_NOT_MATCHED, "院校标签未命中规则"),
         (ARCHIVE_NO_NEXT_RESUME, "没有下一条可尝试志愿"),
         (ARCHIVE_JOB_NOT_MATCHED, "未匹配岗位"),
+        (ARCHIVE_JOB_MAPPING_AMBIGUOUS, "对外职位映射到多个内部职位"),
+        (ARCHIVE_INTERNAL_POSITION_NAME_MISSING, "内部职位名称缺失"),
         (ARCHIVE_DEPARTMENT_NOT_FOUND, "无有效二层部门"),
         (ARCHIVE_AGENT_NO_RECOMMENDATION, "AI 无有效建议"),
         (ARCHIVE_HR_CANCELLED, "HR 取消当前分配"),
@@ -475,8 +479,10 @@ class CandidateWorkflow(models.Model):
     ]
 
     BLOCK_CONTACT_NOT_FOUND = "contact_not_found"
+    BLOCK_JOB_HC_EXHAUSTED = "job_hc_exhausted"
     BLOCK_REASON_CHOICES = [
         (BLOCK_CONTACT_NOT_FOUND, "当前志愿无可用二级接口人"),
+        (BLOCK_JOB_HC_EXHAUSTED, "当前任务岗位 HC 容量已用尽"),
     ]
 
     candidate = models.OneToOneField(
@@ -675,6 +681,15 @@ class AssignmentAttempt(models.Model):
         on_delete=models.SET_NULL,
         related_name="assignment_attempts_created",
     )
+    capacity_reservation = models.ForeignKey(
+        "ProcessingRunJobCapacity",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="attempts",
+        help_text="自动分配占用的任务级岗位容量；手工强制分配为空",
+    )
+    capacity_released_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -881,6 +896,7 @@ class ProcessingRun(models.Model):
     model_name = models.CharField(max_length=64, blank=True)
     prompt_version = models.CharField(max_length=32, blank=True)
     decision_version = models.CharField(max_length=32, blank=True)
+    job_hc_coefficient_snapshot = models.PositiveSmallIntegerField(default=1)
     created_at = models.DateTimeField(auto_now_add=True)
     started_at = models.DateTimeField(null=True, blank=True)
     last_heartbeat_at = models.DateTimeField(null=True, blank=True)
@@ -919,6 +935,33 @@ class ProcessingRun(models.Model):
             models.Index(fields=["status", "created_at"]),
             models.Index(fields=["created_by", "status"]),
         ]
+
+
+class ProcessingRunJobCapacity(models.Model):
+    """处理任务创建时冻结的岗位 HC 容量及本任务占用量。"""
+
+    run = models.ForeignKey(
+        ProcessingRun, on_delete=models.CASCADE, related_name="job_capacities"
+    )
+    job = models.ForeignKey(
+        Job, on_delete=models.PROTECT, related_name="processing_capacities"
+    )
+    headcount_snapshot = models.PositiveIntegerField(default=0)
+    coefficient_snapshot = models.PositiveSmallIntegerField(default=1)
+    capacity = models.PositiveIntegerField(default=0)
+    used_count = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["run", "job"], name="core_run_job_capacity_unique"
+            ),
+            models.CheckConstraint(
+                check=models.Q(used_count__lte=models.F("capacity")),
+                name="core_run_job_capacity_used_lte_capacity",
+            ),
+        ]
+        indexes = [models.Index(fields=["run", "job"])]
 
 
 class ProcessingRunStage(models.Model):

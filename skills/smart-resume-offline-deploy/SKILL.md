@@ -1,9 +1,9 @@
 ---
 name: smart-resume-offline-deploy
-description: 在 Linux 服务器上部署、验证、卸载校招智能简历筛选系统。支持当前源码仓库 amd64/arm64 构建部署和 amd64 纯镜像离线包部署，并通过固定编号菜单和二次确认控制 Docker 变更及数据清理。
+description: 在 Linux 服务器上部署、验证、卸载简历宝。支持当前源码仓库 amd64/arm64 构建部署和 amd64 纯镜像离线包部署，并通过固定编号菜单和二次确认控制 Docker 变更及数据清理。
 ---
 
-# 智能简历筛选系统离线部署
+# 简历宝离线部署
 
 先阅读本文件，再执行 `scripts/` 下的脚本；不得手工省略确认步骤，也不得在日志、对话或截图中输出 `.env` 内的密钥。脚本可从源码仓库的 `skills/` 目录调用，也可随纯镜像离线包一同调用；未能自动判断根目录时，使用 `DEPLOY_ROOT=/path/to/package` 指定部署根目录。
 
@@ -12,7 +12,7 @@ description: 在 Linux 服务器上部署、验证、卸载校招智能简历筛
 与用户交互时，只展示当前阶段规定的编号选项，等待用户回复单个编号。收到其它内容时，原样重复该菜单；不要猜测意图、不要改用自由文本确认、不要把不同阶段的选项合并。
 
 - 部署前检查：`1. 已完成检查，继续`、`2. 先修改 .env`、`3. 取消`。
-- 未找到环境文件：`1. 创建 .env 模板并退出`、`2. 取消`。
+- 未找到环境文件：`1. 创建 .env、自动生成密钥并退出`、`2. 取消`。
 - 已有部署：`1. 升级并保留数据`、`2. 仅查看状态`、`3. 取消`。
 - 开始部署：`1. 构建/导入镜像、初始化并启动`、`2. 取消`。
 - 卸载范围：`1. 常规卸载并保留数据`、`2. 删除容器和数据卷`、`3. 删除容器、数据卷和镜像`、`4. 取消`。
@@ -37,11 +37,13 @@ bash skills/smart-resume-offline-deploy/scripts/deploy.sh
 
 若 Skill 随离线包存放在包根目录下一层，则将上面的 `skills/smart-resume-offline-deploy` 改为实际 Skill 目录名。
 
-3. 脚本首次运行会创建 `.env` 模板。必须先修改 `DJANGO_SECRET_KEY`、`DJANGO_ALLOWED_HOSTS`、`POSTGRES_PASSWORD`、独立的 `RESTIC_PASSWORD`，并将 `BACKUP_TARGET_PATH` 指向异机挂载或外置磁盘，然后才允许继续。
+3. 镜像、端口、worker/OCR、数据库名/用户、备份周期和保留策略已经写入模板。脚本首次运行会创建权限为 `600` 的 `.env`，并自动生成互不复用的 `DJANGO_SECRET_KEY`、`POSTGRES_PASSWORD` 和 `RESTIC_PASSWORD`，密钥不回显。部署人员只需把实际 IP/域名写入 `DJANGO_ALLOWED_HOSTS`，并确认异机/外置存储已经挂载到预设的 `/mnt/smart-resume-filter-backups`；挂载点不同时只修改 `BACKUP_TARGET_PATH`。
 4. `DEPLOY_MODE=auto`（默认）在存在 `smart-resume-filter-images-amd64.tar` 时选择离线模式，否则从当前源码构建。可显式指定 `DEPLOY_MODE=offline` 或 `DEPLOY_MODE=source`。
 5. 离线模式要求交付包内的 `docker-compose.yml` 只使用 `image:`，不得保留 `build:`；源码模式使用当前项目的 Compose 构建后端、前端、PostgreSQL、Redis 和备份工具镜像。
 6. 首次部署才会执行 `init` 写入基础权限、账号和预置数据。检测到已有部署时，脚本只更新镜像并启动服务，迁移由 backend 自动完成，不会重置管理员在系统设置中维护的配置。
 7. 部署不决定 AI 功能是否启用、模型连接或 API Key。服务启动后，由拥有权限的管理员在「系统设置 → AI 模型连接」配置并测试；不要在部署对话、脚本参数或日志中提供 API Key。
+
+检测到已有同项目容器或数据卷时，脚本不会替换缺失/占位的三项密钥。升级或灾后重建必须恢复原 `.env`；擅自生成新值可能导致 PostgreSQL 无法连接，并使既有 AI 连接密文无法解密。
 
 部署脚本会先显示部署前检查菜单；若检测到同项目已有容器，会说明升级会保留数据卷与配置并让操作者选择升级、仅查看状态或取消。
 

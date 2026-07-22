@@ -120,7 +120,7 @@ services:
       BACKUP_KEEP_MONTHLY: ${BACKUP_KEEP_MONTHLY:-12}
     volumes:
       - media_data:/data/media:ro
-      - ${BACKUP_TARGET_PATH:-./backups}:/repository
+      - ${BACKUP_TARGET_PATH:?Set BACKUP_TARGET_PATH in .env}:/repository
     depends_on:
       db:
         condition: service_healthy
@@ -133,7 +133,7 @@ services:
     environment: *backup-env
     volumes:
       - media_data:/data/media:ro
-      - ${BACKUP_TARGET_PATH:-./backups}:/repository
+      - ${BACKUP_TARGET_PATH:?Set BACKUP_TARGET_PATH in .env}:/repository
     depends_on:
       db:
         condition: service_healthy
@@ -145,7 +145,7 @@ services:
     command: verify
     environment: *backup-env
     volumes:
-      - ${BACKUP_TARGET_PATH:-./backups}:/repository
+      - ${BACKUP_TARGET_PATH:?Set BACKUP_TARGET_PATH in .env}:/repository
 
   restore:
     profiles: ["restore"]
@@ -162,7 +162,7 @@ services:
       RESTIC_SNAPSHOT: ${RESTIC_SNAPSHOT:-latest}
     volumes:
       - media_data:/restore-media
-      - ${BACKUP_TARGET_PATH:-./backups}:/repository
+      - ${BACKUP_TARGET_PATH:?Set BACKUP_TARGET_PATH in .env}:/repository
     depends_on:
       db:
         condition: service_healthy

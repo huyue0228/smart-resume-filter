@@ -1,11 +1,20 @@
 import { useEffect, useRef, useState } from 'react'
-import { PageContainer } from '@ant-design/pro-components'
-import { message, Popconfirm, Space, Switch, Tag } from 'antd'
 import {
+  ModalForm,
+  PageContainer,
+  ProFormSelect,
+  ProFormSwitch,
+  ProFormText,
+} from '@ant-design/pro-components'
+import { Button, message, Popconfirm, Space, Switch, Tag } from 'antd'
+import {
+  createContact,
   deleteContact,
   fetchConfig,
   fetchContactFilterOptions,
   fetchContacts,
+  fetchDepartments,
+  updateContact,
   updateConfig,
 } from '../api/services'
 import ImportButton from '../components/ImportButton'
@@ -20,8 +29,18 @@ export default function DepartmentsPage() {
   const actionRef = useRef()
   const role = useRole()
   const canManageContacts = Boolean(role?.hasPermission?.('department.manage'))
+  const canImportContacts = Boolean(role?.hasPermission?.('resume.import'))
   const [welinkEnabled, setWelinkEnabled] = useState(false)
   const [welinkLoading, setWelinkLoading] = useState(false)
+  const [contactModal, setContactModal] = useState({ open: false, record: null })
+  const [departments, setDepartments] = useState([])
+
+  useEffect(() => {
+    if (!canManageContacts) return
+    fetchDepartments({ page_size: 500 })
+      .then(({ data }) => setDepartments(data?.results || []))
+      .catch(() => setDepartments([]))
+  }, [canManageContacts])
 
   useEffect(() => {
     if (!canManageContacts) return
@@ -62,6 +81,36 @@ export default function DepartmentsPage() {
     } catch (error) {
       message.error(error?.response?.data?.detail || '删除失败')
     }
+  }
+
+  const departmentOptions = departments
+    .filter((department) => department.level === 2 || department.level === 3)
+    .map((department) => ({
+      label: `${department.name}（${department.level === 3 ? '三级部门' : '二级部门'}）`,
+      value: department.id,
+    }))
+
+  const handleSave = async (values) => {
+    const department = departments.find((item) => item.id === values.department)
+    const isTertiary = department?.level === 3
+    const body = {
+      name: values.name?.trim(),
+      employee_no: values.employee_no?.trim(),
+      department: values.department,
+      contact_level: isTertiary ? 'tertiary' : 'secondary',
+      can_delegate: isTertiary ? false : Boolean(values.can_delegate),
+      is_active: Boolean(values.is_active),
+    }
+    if (contactModal.record) {
+      await updateContact(contactModal.record.id, body)
+    } else {
+      await createContact(body)
+    }
+    message.success('接口人已保存')
+    setContactModal({ open: false, record: null })
+    actionRef.current?.reload()
+    actionRef.current?.reloadOptions()
+    return true
   }
 
   const baseColumns = [
@@ -121,20 +170,14 @@ export default function DepartmentsPage() {
       render: (value) =>
         value ? <Tag color="green">启用</Tag> : <Tag color="default">停用</Tag>,
     },
-    {
-      title: '招聘主体',
-      dataIndex: 'entity',
-      width: 140,
-      filter: { type: 'text', param: 'entity', placeholder: '筛选主体' },
-      render: (_, r) => (r.entity ? <Tag color="blue">{r.entity}</Tag> : '-'),
-    },
-    {
+    canManageContacts && {
       title: '操作',
       valueType: 'option',
       fixed: 'right',
-      width: 90,
+      width: 130,
       render: (_, record) => (
         <Space>
+          <a onClick={() => setContactModal({ open: true, record })}>编辑</a>
           <Popconfirm
             title="删除接口人"
             description="将删除该接口人及绑定用户，历史分配记录仅保留快照。"
@@ -148,7 +191,7 @@ export default function DepartmentsPage() {
         </Space>
       ),
     },
-  ]
+  ].filter(Boolean)
   return (
     <PageContainer
       title="部门接口人"
@@ -190,18 +233,63 @@ export default function DepartmentsPage() {
         request={fetchContacts}
         filterOptionsRequest={fetchContactFilterOptions}
         toolBarRender={() => [
-          <ImportButton
-            key="import"
-            buttonText="导入接口人"
-            title="导入部门接口人信息"
-            fields={IMPORT_FIELDS}
-            onDone={() => {
-              actionRef.current?.reload()
-              actionRef.current?.reloadOptions()
-            }}
-          />,
-        ]}
+          canManageContacts && (
+            <Button
+              key="create"
+              type="primary"
+              onClick={() => setContactModal({ open: true, record: null })}
+            >
+              新增接口人
+            </Button>
+          ),
+          canImportContacts && (
+            <ImportButton
+              key="import"
+              buttonText="导入接口人"
+              title="导入部门接口人信息"
+              fields={IMPORT_FIELDS}
+              onDone={() => {
+                actionRef.current?.reload()
+                actionRef.current?.reloadOptions()
+              }}
+            />
+          ),
+        ].filter(Boolean)}
       />
+      {canManageContacts && (
+        <ModalForm
+          title={contactModal.record ? '编辑接口人' : '新增接口人'}
+          open={contactModal.open}
+          modalProps={{
+            destroyOnHidden: true,
+            onCancel: () => setContactModal({ open: false, record: null }),
+          }}
+          initialValues={
+            contactModal.record || { can_delegate: true, is_active: true }
+          }
+          onFinish={handleSave}
+        >
+          <ProFormText
+            name="name"
+            label="姓名"
+            rules={[{ required: true, whitespace: true, message: '请输入姓名' }]}
+          />
+          <ProFormText
+            name="employee_no"
+            label="工号"
+            rules={[{ required: true, whitespace: true, message: '请输入工号' }]}
+          />
+          <ProFormSelect
+            name="department"
+            label="所属部门"
+            showSearch
+            options={departmentOptions}
+            rules={[{ required: true, message: '请选择所属部门' }]}
+          />
+          <ProFormSwitch name="can_delegate" label="允许转派" />
+          <ProFormSwitch name="is_active" label="启用" />
+        </ModalForm>
+      )}
     </PageContainer>
   )
 }

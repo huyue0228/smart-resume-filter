@@ -3,6 +3,14 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 import ResumesPage from './ResumesPage'
+import {
+  exportAllocations,
+  exportCandidates,
+  fetchCandidateExportFields,
+  fetchCandidateFilterOptions,
+  bulkDispatchCandidates,
+} from '../api/services'
+import { downloadBlobFromResponse } from '../utils/download'
 
 const candidate = vi.hoisted(() => ({
   id: 1,
@@ -68,6 +76,7 @@ const candidate = vi.hoisted(() => ({
 
 const roleState = vi.hoisted(() => ({
   permissions: new Set(['attempt.view_all']),
+  user: { id: 1, username: 'tester' },
   contact: null,
   isContact: false,
   isSecondaryContact: false,
@@ -82,6 +91,7 @@ vi.mock('@ant-design/pro-components', () => ({
 vi.mock('../contexts/roleState', () => ({
   useRole: () => ({
     hasPermission: (code) => roleState.permissions.has(code),
+    user: roleState.user,
     contact: roleState.contact,
     isContact: roleState.isContact,
     isSecondaryContact: roleState.isSecondaryContact,
@@ -113,6 +123,7 @@ vi.mock('../components/SmartDataTable', () => ({
     request,
     params,
     actionRef,
+    batchActions,
   }) => {
     if (actionRef) {
       actionRef.current = {
@@ -139,6 +150,9 @@ vi.mock('../components/SmartDataTable', () => ({
             <button type="button" onClick={() => rowSelection?.onChange?.([3])}>
               改选一名候选人
             </button>
+            {rowSelection?.selectedRowKeys?.length ? batchActions?.({
+              clearSelection: () => rowSelection.onChange?.([]),
+            }) : null}
             <button
               type="button"
               onClick={() => request?.({
@@ -175,6 +189,7 @@ vi.mock('../api/services', () => ({
   exportCandidates: vi.fn(),
   fetchCandidates: vi.fn(),
   fetchCandidateFilterOptions: vi.fn(),
+  fetchCandidateExportFields: vi.fn(),
   fetchUndoStatus: vi.fn(),
   undoLastImport: vi.fn(),
   fetchContacts: vi.fn(),
@@ -195,11 +210,37 @@ vi.mock('../api/services', () => ({
   exportResumeResultReport: vi.fn(),
 }))
 
+vi.mock('../utils/download', () => ({
+  downloadBlobFromResponse: vi.fn(),
+}))
+
+const exportCatalog = {
+  version: 1,
+  groups: [
+    {
+      key: 'candidate',
+      label: '候选人',
+      fields: [
+        { key: 'candidate_name', label: '姓名', default_selected: true },
+        { key: 'candidate_phone', label: '手机号', default_selected: true },
+      ],
+    },
+    {
+      key: 'application',
+      label: '当前投递',
+      fields: [
+        { key: 'current_apply_id', label: '应聘ID', default_selected: true },
+      ],
+    },
+  ],
+}
+
 describe('ResumesPage detail', () => {
   beforeEach(() => {
     candidate.current_attempt = null
     candidate.attempts = []
     roleState.permissions = new Set(['attempt.view_all'])
+    roleState.user = { id: 1, username: 'tester' }
     roleState.contact = null
     roleState.isContact = false
     roleState.isSecondaryContact = false
@@ -208,6 +249,33 @@ describe('ResumesPage detail', () => {
     fetchAllocationMode.mockReset()
     fetchAllocationMode.mockResolvedValue({
       data: { default_mode: 'rule', available_modes: ['rule'], ai_ready: false },
+    })
+    fetchCandidateExportFields.mockReset()
+    fetchCandidateExportFields.mockResolvedValue({ data: exportCatalog })
+    exportCandidates.mockReset()
+    exportCandidates.mockResolvedValue({
+      data: new Blob(['zip']),
+      headers: {
+        'x-export-count': '3',
+        'x-export-missing': '1',
+        'x-export-candidate-count': '2',
+      },
+    })
+    exportAllocations.mockReset()
+    exportAllocations.mockResolvedValue({
+      data: new Blob(['zip']),
+      headers: {
+        'x-export-count': '1',
+        'x-export-missing': '0',
+        'x-export-candidate-count': '1',
+      },
+    })
+    downloadBlobFromResponse.mockReset()
+    fetchCandidateFilterOptions.mockReset()
+    fetchCandidateFilterOptions.mockResolvedValue({ data: {} })
+    bulkDispatchCandidates.mockReset()
+    bulkDispatchCandidates.mockResolvedValue({
+      data: { detail: '已下发 2 条，跳过 0 条，失败 0 条' },
     })
   })
 
@@ -221,6 +289,7 @@ describe('ResumesPage detail', () => {
       expect(screen.getByTestId(`table-${tableId}`).dataset.filterCount).toBe('0')
     }
     expect(screen.getByTestId('table-candidate-resumes').dataset.columns).not.toContain('预览')
+    expect(screen.getByTestId('table-candidates').dataset.columns).not.toContain('处理结果')
     expect(screen.queryByText('第一学历标签')).toBeNull()
     expect(screen.queryByText('最高学历标签')).toBeNull()
     expect(screen.getByText('平台A').classList.contains('ant-tag')).toBe(true)
@@ -283,7 +352,7 @@ describe('ResumesPage detail', () => {
 
     const currentSelected = screen.getByRole('checkbox', { name: '当前选中（0）' })
     expect(currentSelected.disabled).toBe(true)
-    expect(screen.getAllByRole('checkbox')).toHaveLength(7)
+    expect(screen.getAllByRole('checkbox')).toHaveLength(9)
     for (const checkbox of screen.getAllByRole('checkbox')) {
       expect(checkbox.checked).toBe(false)
     }
@@ -303,16 +372,16 @@ describe('ResumesPage detail', () => {
     expect(currentSelected.checked).toBe(true)
 
     const rawStatus = screen.getByRole('checkbox', { name: '待处理' })
-    const classifiedStatus = screen.getByRole('checkbox', { name: '已分类' })
+    const archivedStatus = screen.getByRole('checkbox', { name: '已归档' })
     await userEvent.click(rawStatus)
-    await userEvent.click(classifiedStatus)
+    await userEvent.click(archivedStatus)
     expect(currentSelected.checked).toBe(false)
     expect(rawStatus.checked).toBe(true)
-    expect(classifiedStatus.checked).toBe(true)
+    expect(archivedStatus.checked).toBe(true)
 
     await userEvent.click(currentSelected)
     expect(rawStatus.checked).toBe(false)
-    expect(classifiedStatus.checked).toBe(false)
+    expect(archivedStatus.checked).toBe(false)
     fireEvent.click(screen.getByRole('button', { name: '改选一名候选人' }))
     await userEvent.click(screen.getByRole('button', { name: '开始处理' }))
 
@@ -404,5 +473,86 @@ describe('ResumesPage detail', () => {
     await waitFor(() => expect(screen.queryByTestId('resume-preview')).toBeNull())
     expect(screen.getByTestId('selected-count').textContent).toBe('2')
     expect(screen.getByTestId('table-candidates').dataset.params).toBe('{}')
+  })
+
+  it('opens the field chooser for selected candidate export and submits fields with statistics', async () => {
+    roleState.permissions = new Set(['resume.view'])
+    const user = userEvent.setup()
+    render(<MemoryRouter><ResumesPage /></MemoryRouter>)
+
+    expect(screen.queryByRole('button', { name: /导出结果报表/ })).toBeNull()
+    await user.click(screen.getByRole('button', { name: '选择两名候选人' }))
+    await user.click(screen.getByRole('button', { name: /导出选中/ }))
+    expect(await screen.findByText('选择简历导出属性')).toBeTruthy()
+    expect(exportCandidates).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole('checkbox', { name: '手机号' }))
+    await user.click(screen.getByRole('button', { name: '导出 ZIP' }))
+
+    await waitFor(() => expect(exportCandidates).toHaveBeenCalledWith([1, 2], {
+      fields: 'candidate_name,current_apply_id',
+    }))
+    expect(downloadBlobFromResponse).toHaveBeenCalledWith(
+      expect.objectContaining({ headers: expect.objectContaining({ 'x-export-candidate-count': '2' }) }),
+      '简历导出.zip',
+    )
+    expect(await screen.findByText(/已导出 2 名候选人，包含 3 份简历，1 份缺文件/)).toBeTruthy()
+  })
+
+  it('keeps dispatch in the toolbar and freezes selected candidate ids', async () => {
+    roleState.permissions = new Set(['attempt.dispatch'])
+    const user = userEvent.setup()
+    render(<MemoryRouter><ResumesPage /></MemoryRouter>)
+
+    await user.click(screen.getByRole('button', { name: '选择两名候选人' }))
+    await user.click(screen.getByRole('button', { name: /下发$/ }))
+    expect(await screen.findByText('当前选中（冻结 2 人）')).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: '确认下发' }))
+
+    await waitFor(() => expect(bulkDispatchCandidates).toHaveBeenCalledWith({
+      candidate_ids: [1, 2],
+    }))
+    expect(screen.getByTestId('selected-count').textContent).toBe('0')
+  })
+
+  it('uses the frozen table filters when opening current-filter export', async () => {
+    roleState.permissions = new Set(['resume.view'])
+    const user = userEvent.setup()
+    render(<MemoryRouter><ResumesPage /></MemoryRouter>)
+
+    await user.click(screen.getByRole('button', { name: '加载候选人' }))
+    await user.click(screen.getByRole('button', { name: '选择两名候选人' }))
+    await user.click(screen.getByRole('button', { name: /导出当前筛选/ }))
+    await screen.findByRole('checkbox', { name: '姓名' })
+    await user.click(screen.getByRole('button', { name: '导出 ZIP' }))
+
+    await waitFor(() => expect(exportCandidates).toHaveBeenCalledWith(null, {
+      name: '张三',
+      system_status: 'raw',
+      fields: 'candidate_name,candidate_phone,current_apply_id',
+    }))
+  })
+
+  it('opens the same field chooser for an attempt-scoped detail export', async () => {
+    candidate.current_attempt = {
+      id: 31,
+      status: 'dispatched_l2',
+      contact: 10,
+      sub_contact: null,
+      feedback_at: null,
+    }
+    candidate.attempts = [candidate.current_attempt]
+    roleState.permissions = new Set(['attempt.export'])
+    const user = userEvent.setup()
+    render(<MemoryRouter><ResumesPage /></MemoryRouter>)
+
+    await user.click(screen.getByRole('button', { name: '打开候选人' }))
+    await user.click(screen.getByRole('button', { name: /导出$/ }))
+    await screen.findByRole('checkbox', { name: '姓名' })
+    await user.click(screen.getByRole('button', { name: '导出 ZIP' }))
+
+    await waitFor(() => expect(exportAllocations).toHaveBeenCalledWith([31], {
+      fields: 'candidate_name,candidate_phone,current_apply_id',
+    }))
   })
 })

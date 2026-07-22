@@ -10,9 +10,11 @@ import {
   Row,
   Select,
   Skeleton,
+  Space,
   Spin,
   Tag,
   Typography,
+  message,
 } from 'antd'
 import {
   CalendarOutlined,
@@ -20,12 +22,15 @@ import {
   ClockCircleOutlined,
   CommentOutlined,
   DeploymentUnitOutlined,
+  DownloadOutlined,
   ReloadOutlined,
   SearchOutlined,
   SendOutlined,
   TeamOutlined,
 } from '@ant-design/icons'
-import { fetchRecruitmentOverview } from '../api/services'
+import { exportResumeResultReport, fetchRecruitmentOverview } from '../api/services'
+import { useRole } from '../contexts/roleState'
+import { downloadBlobFromResponse } from '../utils/download'
 import {
   DoughnutChartCard,
   HorizontalBarChartCard,
@@ -105,7 +110,9 @@ function EfficiencyStrip({ values = {} }) {
 }
 
 export default function AnalyticsPage() {
+  const { hasPermission } = useRole()
   const [loading, setLoading] = useState(true)
+  const [reportExporting, setReportExporting] = useState(false)
   const [error, setError] = useState('')
   const [data, setData] = useState(null)
   const [filters, setFilters] = useState({})
@@ -143,6 +150,25 @@ export default function AnalyticsPage() {
     setDateRange(null)
     load({})
   }
+  const exportResultReport = async () => {
+    const activeFilters = data?.filters
+    if (!activeFilters?.date_from || !activeFilters?.date_to) return
+    setReportExporting(true)
+    try {
+      const params = {
+        imported_after: activeFilters.date_from,
+        imported_before: activeFilters.date_to,
+      }
+      if (activeFilters.department_id) params.department_id = activeFilters.department_id
+      const response = await exportResumeResultReport(params)
+      downloadBlobFromResponse(response, '简历结果报表.xlsx')
+      message.success('结果报表已导出')
+    } catch {
+      message.error('结果报表导出失败')
+    } finally {
+      setReportExporting(false)
+    }
+  }
   const initialLoading = loading && !data
   const summary = data?.summary || {}
   const conversion = data?.conversion || {}
@@ -157,14 +183,26 @@ export default function AnalyticsPage() {
   return (
     <PageContainer
       className="analytics-page"
-      title="DashBoard"
+      title="数据看板"
       content="聚焦候选规模、转化效率与招聘结果，所有阶段指标按候选人去重。"
       extra={(
-        <div className="analytics-as-of">
-          <CalendarOutlined />
-          <span>数据截至</span>
-          <strong>{asOf}</strong>
-        </div>
+        <Space wrap>
+          {hasPermission('resume.view') ? (
+            <Button
+              icon={<DownloadOutlined />}
+              loading={reportExporting}
+              disabled={!data?.filters?.date_from || !data?.filters?.date_to}
+              onClick={exportResultReport}
+            >
+              导出结果报表
+            </Button>
+          ) : null}
+          <div className="analytics-as-of">
+            <CalendarOutlined />
+            <span>数据截至</span>
+            <strong>{asOf}</strong>
+          </div>
+        </Space>
       )}
     >
       {error ? (

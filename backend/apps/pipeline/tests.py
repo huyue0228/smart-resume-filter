@@ -796,6 +796,28 @@ class AllocationDesignContractTests(TestCase):
         self.assertEqual(mocked.call_args.args[0], self.resume)
         self.assertEqual(mocked.call_args.args[1], self.job)
 
+    def test_direct_ai_allocation_ignores_rule_major_filter(self):
+        self.candidate.highest_major = "计算机科学与技术"
+        self.candidate.save(update_fields=["highest_major"])
+        m.JobMajor.objects.create(job=self.job, major="电气工程")
+
+        with patch(
+            "apps.pipeline.services.allocate.ai_service.screen_resume",
+            return_value=self._ai_result(),
+        ) as screen_resume:
+            allocate.run(mode="ai")
+
+        screen_resume.assert_called_once()
+        attempt = m.AssignmentAttempt.objects.get()
+        decision = m.AgentDispatchDecision.objects.get()
+        self.resume.refresh_from_db()
+        self.candidate.workflow.refresh_from_db()
+        self.assertEqual(attempt.source, m.AssignmentAttempt.SOURCE_AI)
+        self.assertEqual(decision.error_code, "")
+        self.assertEqual(self.resume.category_mode, "ai")
+        self.assertNotIn("major_not_matched", self.resume.category_reason)
+        self.assertNotIn("major_not_matched", self.candidate.workflow.archive_detail)
+
     def test_ai_current_job_lookup_does_not_load_unrelated_job_majors(self):
         for index in range(5):
             unrelated_job = m.Job.objects.create(
@@ -807,8 +829,9 @@ class AllocationDesignContractTests(TestCase):
             )
             m.JobMajor.objects.create(job=unrelated_job, major=f"无关专业{index}")
 
-        with self.assertNumQueries(2):
-            current_job = allocate._current_volunteer_job(self.resume)
+        with self.assertNumQueries(1):
+            job_pool, _mapping = allocate._mapped_job_pool(self.resume, mode="ai")
+            current_job = job_pool[0]
         with self.assertNumQueries(1):
             context = ai_service._current_job_context(current_job)
 
@@ -1003,6 +1026,12 @@ class AllocationDesignContractTests(TestCase):
         self.resume.resume_file = ""
         self.resume.save(update_fields=["resume_file"])
         run = m.ProcessingRun.objects.create(step="step2", mode="ai")
+        m.ProcessingRunJobCapacity.objects.create(
+            run=run,
+            job=self.job,
+            headcount_snapshot=self.job.headcount,
+            capacity=self.job.headcount,
+        )
 
         allocate.run(mode="ai", processing_run=run)
 
@@ -1185,10 +1214,14 @@ class AllocationDesignContractTests(TestCase):
             status_candidates.append((code, candidate, resume))
             return candidate, resume
 
-        classified, classified_resume = create_candidate(
-            "classified", job_category="技术类"
+        archived, archived_resume = create_candidate(
+            "archived", job_category="技术类"
         )
-        allocated, allocated_resume = create_candidate("allocated")
+        pending_reallocation, pending_reallocation_resume = create_candidate(
+            "pending_reallocation", job_category="技术类"
+        )
+        pending_review, pending_review_resume = create_candidate("pending_review")
+        pending_dispatch, pending_dispatch_resume = create_candidate("pending_dispatch")
         pending_screening, pending_screening_resume = create_candidate(
             "pending_screening"
         )
@@ -1216,9 +1249,30 @@ class AllocationDesignContractTests(TestCase):
                 workflow.save(update_fields=["passed_attempt"])
             return workflow, attempt
 
+        m.CandidateWorkflow.objects.create(
+            candidate=archived,
+            status=m.CandidateWorkflow.STATUS_IN_PROGRESS,
+            current_resume=archived_resume,
+            current_rank=1,
+            started_at=timezone.now(),
+        )
+        m.CandidateWorkflow.objects.create(
+            candidate=pending_reallocation,
+            status=m.CandidateWorkflow.STATUS_IN_PROGRESS,
+            current_resume=pending_reallocation_resume,
+            current_rank=1,
+            started_at=timezone.now(),
+            block_reason=m.CandidateWorkflow.BLOCK_JOB_HC_EXHAUSTED,
+            block_detail="当前任务岗位 HC 容量已用尽",
+        )
         create_attempt(
-            allocated,
-            allocated_resume,
+            pending_review,
+            pending_review_resume,
+            m.AssignmentAttempt.STATUS_PENDING_REVIEW,
+        )
+        create_attempt(
+            pending_dispatch,
+            pending_dispatch_resume,
             m.AssignmentAttempt.STATUS_PENDING_DISPATCH,
         )
         create_attempt(
@@ -1260,7 +1314,7 @@ class AllocationDesignContractTests(TestCase):
                 candidate_id__in=candidate_ids,
                 dispatch_strategy="rule",
             ).count(),
-            6,
+            8,
         )
         for _code, candidate, _resume in status_candidates:
             candidate.workflow.refresh_from_db()
@@ -1363,3 +1417,141 @@ class AllocationDesignContractTests(TestCase):
         self.assertEqual(workflow.passed_attempt, passed_attempt)
         self.assertEqual(workflow.attempts.count(), passed_attempt_count)
         self.assertEqual(passed_attempt.status, m.AssignmentAttempt.STATUS_PASSED)
+
+
+class JobCapacityAllocationTests(TestCase):
+    def setUp(self):
+        self.department_a = m.Department.objects.create(name="研发一部", level=2)
+        self.department_b = m.Department.objects.create(name="研发二部", level=2)
+        self.contact_a = m.Contact.objects.create(
+            name="一部接口人", employee_no="HC-L2-A", department=self.department_a,
+            contact_level=m.Contact.LEVEL_SECONDARY,
+        )
+        self.contact_b = m.Contact.objects.create(
+            name="二部接口人", employee_no="HC-L2-B", department=self.department_b,
+            contact_level=m.Contact.LEVEL_SECONDARY,
+        )
+        self.job_a = m.Job.objects.create(
+            entity="GW", department=self.department_a,
+            public_name="软件开发工程师", position_name="软件开发",
+            category="技术类", responsibilities="研发", headcount=2,
+        )
+        self.job_b = m.Job.objects.create(
+            entity="GW", department=self.department_b,
+            public_name="研发岗位", position_name="软件开发",
+            category="技术类", responsibilities="研发", headcount=1,
+        )
+
+    def _candidate(self, index):
+        candidate = m.Candidate.objects.create(
+            identity_hash=f"hc-candidate-{index}", name=f"候选人{index}",
+            phone=f"1381000{index:04d}",
+        )
+        resume = m.Resume.objects.create(
+            candidate=candidate, apply_id=f"HC-{index}", entity="GW",
+            position_name="软件开发工程师", volunteer_rank=1,
+        )
+        return candidate, resume
+
+    def test_run_snapshot_distributes_by_hc_and_exhausted_candidate_reenters_new_run(self):
+        candidates = [self._candidate(index)[0] for index in range(1, 5)]
+        run = runner.create_run(
+            "step2", mode="rule",
+            scope={"candidate_ids": [candidate.id for candidate in candidates]},
+        )
+
+        runner.execute_run(run.id)
+
+        capacities = {
+            item.job_id: (item.capacity, item.used_count)
+            for item in run.job_capacities.all()
+        }
+        self.assertEqual(capacities[self.job_a.id], (2, 2))
+        self.assertEqual(capacities[self.job_b.id], (1, 1))
+        assigned_job_ids = list(
+            m.Resume.objects.filter(candidate__in=candidates[:3])
+            .order_by("candidate_id").values_list("job_id", flat=True)
+        )
+        self.assertEqual(
+            assigned_job_ids, [self.job_a.id, self.job_a.id, self.job_b.id]
+        )
+
+        exhausted = candidates[3]
+        self.assertFalse(exhausted.workflow.attempts.exists())
+        self.assertEqual(
+            system_status.candidate_system_status(exhausted),
+            system_status.PENDING_REALLOCATION,
+        )
+        self.assertEqual(
+            run.scope_items.get(candidate=exhausted).reason_code,
+            "job_hc_exhausted",
+        )
+
+        rerun = runner.create_run(
+            "step2", mode="rule",
+            scope={"candidate_ids": [exhausted.id], "force_reprocess": True},
+        )
+        runner.execute_run(rerun.id)
+        self.assertEqual(exhausted.workflow.attempts.count(), 1)
+        self.assertEqual(
+            system_status.candidate_system_status(exhausted),
+            system_status.PENDING_DISPATCH,
+        )
+
+    def test_capacity_release_and_manual_assignment_bypass(self):
+        self.job_b.is_active = False
+        self.job_b.save(update_fields=["is_active"])
+        first, _first_resume = self._candidate(10)
+        run = runner.create_run(
+            "step2", mode="rule", scope={"candidate_ids": [first.id]}
+        )
+        runner.execute_run(run.id)
+        attempt = first.workflow.attempts.get()
+        capacity = attempt.capacity_reservation
+        self.assertEqual(capacity.used_count, 1)
+
+        allocate.cancel_attempt(attempt)
+        capacity.refresh_from_db()
+        attempt.refresh_from_db()
+        self.assertEqual(capacity.used_count, 0)
+        self.assertIsNotNone(attempt.capacity_released_at)
+
+        _second, second_resume = self._candidate(11)
+        manual_attempt = allocate.manual_assign(second_resume, self.contact_a)
+        self.assertIsNone(manual_attempt.capacity_reservation_id)
+
+    def test_ambiguous_and_missing_internal_position_are_archived_with_codes(self):
+        self.job_b.public_name = "软件开发工程师"
+        self.job_b.position_name = "另一个内部职位"
+        self.job_b.save(update_fields=["public_name", "position_name"])
+        ambiguous, _resume = self._candidate(20)
+        ambiguous_run = runner.create_run(
+            "step2", mode="rule", scope={"candidate_ids": [ambiguous.id]}
+        )
+        runner.execute_run(ambiguous_run.id)
+        self.assertEqual(
+            ambiguous.workflow.archive_reason,
+            m.CandidateWorkflow.ARCHIVE_JOB_MAPPING_AMBIGUOUS,
+        )
+        self.assertEqual(
+            ambiguous_run.scope_items.get(candidate=ambiguous).reason_code,
+            "job_mapping_ambiguous",
+        )
+
+        self.job_b.is_active = False
+        self.job_b.save(update_fields=["is_active"])
+        self.job_a.position_name = ""
+        self.job_a.save(update_fields=["position_name"])
+        missing, _resume = self._candidate(21)
+        missing_run = runner.create_run(
+            "step2", mode="rule", scope={"candidate_ids": [missing.id]}
+        )
+        runner.execute_run(missing_run.id)
+        self.assertEqual(
+            missing.workflow.archive_reason,
+            m.CandidateWorkflow.ARCHIVE_INTERNAL_POSITION_NAME_MISSING,
+        )
+        self.assertEqual(
+            missing_run.scope_items.get(candidate=missing).reason_code,
+            "internal_position_name_missing",
+        )

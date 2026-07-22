@@ -1,5 +1,5 @@
 """
-智能简历筛选系统 — Django 配置。
+简历宝 — Django 配置。
 
 Demo 默认：SQLite + Celery eager（同步执行，免装 Redis）。
 生产可通过环境变量切换 PostgreSQL，并启用 Celery + Redis。

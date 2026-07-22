@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { canAccessRoute, DEFAULT_AUTHENTICATED_PATH, getDefaultAuthenticatedPath } from './routePermissions'
 
 describe('route permissions', () => {
-  it('uses DashBoard as the authenticated landing page', () => {
+  it('uses the data dashboard as the authenticated landing page', () => {
     expect(DEFAULT_AUTHENTICATED_PATH).toBe('/analytics')
     expect(getDefaultAuthenticatedPath((code) => code === 'analytics.view')).toBe('/analytics')
   })

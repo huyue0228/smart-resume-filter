@@ -3,6 +3,7 @@ import { Outlet, useNavigate, useLocation } from 'react-router-dom'
 import { ProLayout } from '@ant-design/pro-components'
 import { Dropdown, Tag } from 'antd'
 import { UserOutlined } from '@ant-design/icons'
+import { APP_NAME } from '../appBrand'
 import { useRole, ROLES } from '../contexts/roleState'
 import { canAccessRoute } from '../routePermissions'
 import BrandLogo from '../components/BrandLogo'
@@ -69,7 +70,7 @@ export default function BasicLayout() {
     <ProLayout
       {...appLayoutSettings}
       className="srf-app-layout"
-      title="海纳智选"
+      title={APP_NAME}
       logo={<BrandLogo size={28} />}
       token={appLayoutToken}
       route={route}

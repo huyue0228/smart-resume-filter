@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { LoginForm, ProFormText } from '@ant-design/pro-components'
 import { Alert, Typography } from 'antd'
 import { LockOutlined, UserOutlined } from '@ant-design/icons'
+import { APP_NAME } from '../appBrand'
 import BrandLogo from '../components/BrandLogo'
 import { useRole } from '../contexts/roleState'
 
@@ -31,7 +32,7 @@ export default function LoginPage() {
     <div className="login-shell">
       <LoginForm
         logo={<BrandLogo size={44} />}
-        title="海纳智选"
+        title={APP_NAME}
         onFinish={handleFinish}
         submitter={{ searchConfig: { submitText: '登录' } }}
       >

@@ -2,10 +2,23 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import AnalyticsPage from './AnalyticsPage'
-import { fetchRecruitmentOverview } from '../api/services'
+import { exportResumeResultReport, fetchRecruitmentOverview } from '../api/services'
+
+const roleState = vi.hoisted(() => ({ permissions: new Set(['resume.view']) }))
 
 vi.mock('../api/services', () => ({
   fetchRecruitmentOverview: vi.fn(),
+  exportResumeResultReport: vi.fn(),
+}))
+
+vi.mock('../contexts/roleState', () => ({
+  useRole: () => ({
+    hasPermission: (code) => roleState.permissions.has(code),
+  }),
+}))
+
+vi.mock('../utils/download', () => ({
+  downloadBlobFromResponse: vi.fn(),
 }))
 
 vi.mock('react-chartjs-2', () => ({
@@ -34,7 +47,7 @@ const payload = {
     { key: 'ai', label: 'AI 分配', count: 2 },
   ],
   ai_recommendation_distribution: [
-    { key: 'ai_special_route', label: 'AI 专项强制分配', count: 1 },
+    { key: 'review', label: '人工复核', count: 1 },
   ],
   ai_error_distribution: [],
   job_ranking: [{ key: 1, label: '软件工程师', count: 5 }],
@@ -55,8 +68,11 @@ const payload = {
 
 describe('AnalyticsPage', () => {
   beforeEach(() => {
+    roleState.permissions = new Set(['resume.view'])
     fetchRecruitmentOverview.mockReset()
     fetchRecruitmentOverview.mockResolvedValue({ data: payload })
+    exportResumeResultReport.mockReset()
+    exportResumeResultReport.mockResolvedValue({ data: new Blob(['report']) })
   })
 
   it('renders the management overview, conversion, rankings and diagnosis sections', async () => {
@@ -70,9 +86,9 @@ describe('AnalyticsPage', () => {
     expect(screen.queryByText('按日趋势')).toBeNull()
     expect(screen.queryByText('最近候选人')).toBeNull()
     expect(screen.getByText('处理效率')).toBeTruthy()
-    expect(screen.getByText('AI 专项强制分配')).toBeTruthy()
+    expect(screen.getByText('人工复核')).toBeTruthy()
     expect(screen.getByRole('img', { name: /分配来源：规则分配 6/ })).toBeTruthy()
-    expect(screen.getByRole('img', { name: /AI 建议分布：AI 专项强制分配 1/ })).toBeTruthy()
+    expect(screen.getByRole('img', { name: /AI 建议分布：人工复核 1/ })).toBeTruthy()
     expect(screen.getByRole('img', { name: /岗位排行：软件工程师 5/ })).toBeTruthy()
     expect(screen.getByRole('img', { name: /二级部门排行：产品研发 5/ })).toBeTruthy()
     expect(screen.getByText('暂无 AI 错误记录')).toBeTruthy()
@@ -112,6 +128,55 @@ describe('AnalyticsPage', () => {
     await user.click(screen.getByRole('button', { name: /重置/ }))
     await waitFor(() => expect(fetchRecruitmentOverview).toHaveBeenCalledTimes(2))
     expect(fetchRecruitmentOverview).toHaveBeenLastCalledWith({})
+  })
+
+  it('exports the result report with the filters already applied to the dashboard', async () => {
+    const user = userEvent.setup()
+    render(<AnalyticsPage />)
+    await screen.findByText('招聘概览')
+
+    await user.click(screen.getByRole('combobox'))
+    await user.click(await screen.findByText('研发二部'))
+    await user.click(screen.getByRole('button', { name: /导出结果报表/ }))
+
+    await waitFor(() => expect(exportResumeResultReport).toHaveBeenCalledWith({
+      imported_after: '2026-06-17',
+      imported_before: '2026-07-16',
+    }))
+  })
+
+  it('includes the applied level-2 department in result report export', async () => {
+    const user = userEvent.setup()
+    fetchRecruitmentOverview
+      .mockResolvedValueOnce({ data: payload })
+      .mockResolvedValueOnce({
+        data: {
+          ...payload,
+          filters: { ...payload.filters, department_id: 1 },
+        },
+      })
+    render(<AnalyticsPage />)
+    await screen.findByText('招聘概览')
+
+    await user.click(screen.getByRole('combobox'))
+    await user.click(await screen.findByText('研发二部'))
+    await user.click(screen.getByRole('button', { name: /查询/ }))
+    await waitFor(() => expect(fetchRecruitmentOverview).toHaveBeenCalledTimes(2))
+    await user.click(screen.getByRole('button', { name: /导出结果报表/ }))
+
+    await waitFor(() => expect(exportResumeResultReport).toHaveBeenCalledWith({
+      imported_after: '2026-06-17',
+      imported_before: '2026-07-16',
+      department_id: 1,
+    }))
+  })
+
+  it('hides result report export without resume.view', async () => {
+    roleState.permissions = new Set()
+    render(<AnalyticsPage />)
+    await screen.findByText('招聘概览')
+
+    expect(screen.queryByRole('button', { name: /导出结果报表/ })).toBeNull()
   })
 
   it('shows an API failure and allows retry', async () => {

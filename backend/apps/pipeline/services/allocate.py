@@ -1,10 +1,11 @@
-"""Rule 前置检查、AI 深度筛选及强制分配领域服务。"""
+"""岗位与分配前置检查、AI 深度筛选及强制分配领域服务。"""
 import time
 import uuid
 from datetime import timedelta
+from fractions import Fraction
 
 from django.db import transaction
-from django.db.models import F, Max, Q
+from django.db.models import F, Max
 from django.utils import timezone
 
 from apps.core import models as m
@@ -15,6 +16,7 @@ from apps.pipeline.ai import service as ai_service
 from ..cancellation import raise_if_cancel_requested
 from ..strategies import get_rule_strategy
 from . import classify_school, school_admission
+from .job_mapping import JobMappingError, resolve_job_pool
 
 
 UNFEEDBACKED_STATUSES = [
@@ -44,7 +46,6 @@ AI_ATTENTION_REASON_CODES = {
     "reference_not_found": "ai_reference_invalidated",
     "guardrail_blocked": "ai_reference_invalidated",
     "ai_reference_invalidated": "ai_reference_invalidated",
-    "ai_special_route_unavailable": "ai_special_route_unavailable",
     "job_responsibility_missing": "job_responsibility_missing",
     "task_execution_error": "ai_connection_error",
 }
@@ -196,13 +197,45 @@ def _cancel_unfeedbacked_attempts(workflow, reason, source=None, sources=None):
         qs = qs.filter(source=source)
     if sources:
         qs = qs.filter(source__in=sources)
+    attempts = list(qs.select_for_update().order_by("id"))
     now = timezone.now()
-    return qs.update(
-        status=m.AssignmentAttempt.STATUS_CANCELLED,
-        cancelled_at=now,
-        cancel_reason=reason,
-        updated_at=now,
+    for attempt in attempts:
+        _release_attempt_capacity(attempt, released_at=now)
+        attempt.status = m.AssignmentAttempt.STATUS_CANCELLED
+        attempt.cancelled_at = now
+        attempt.cancel_reason = reason
+        attempt.save(
+            update_fields=[
+                "status",
+                "cancelled_at",
+                "cancel_reason",
+                "capacity_released_at",
+                "updated_at",
+            ]
+        )
+    return len(attempts)
+
+
+def _release_attempt_capacity(attempt, *, released_at=None):
+    if (
+        not attempt.capacity_reservation_id
+        or attempt.capacity_released_at
+        or attempt.status
+        not in {
+            m.AssignmentAttempt.STATUS_PENDING_REVIEW,
+            m.AssignmentAttempt.STATUS_PENDING_DISPATCH,
+        }
+    ):
+        return False
+    capacity = m.ProcessingRunJobCapacity.objects.select_for_update().get(
+        pk=attempt.capacity_reservation_id
     )
+    if capacity.used_count <= 0:
+        raise ValueError("岗位 HC 容量占用记录异常，无法释放")
+    capacity.used_count -= 1
+    capacity.save(update_fields=["used_count"])
+    attempt.capacity_released_at = released_at or timezone.now()
+    return True
 
 
 def _candidate_queryset(scope):
@@ -287,6 +320,122 @@ def _first_secondary_contact(department):
         .order_by("id")
         .first()
     )
+
+
+def _mapped_job_pool(resume, *, mode):
+    jobs_query = (
+        m.Job.objects.select_related("department", "department__parent")
+        .filter(is_active=True)
+        .order_by("id")
+    )
+    if mode == "rule":
+        jobs_query = jobs_query.prefetch_related("majors")
+    jobs = list(jobs_query)
+    jobs, mapping = resolve_job_pool(resume, jobs)
+    if mode == "rule":
+        return get_rule_strategy().filter_major_eligible_jobs(resume, jobs, mapping)
+    if mode == "ai":
+        return jobs, mapping
+    raise ValueError(f"未知岗位池模式: {mode}")
+
+
+def _targetable_job_pool(resume, *, mode):
+    jobs, mapping = _mapped_job_pool(resume, mode=mode)
+    _save_mapped_classification(resume, jobs[0], mapping, mode)
+    jobs_with_departments = [
+        job for job in jobs if _secondary_department(job.department)
+    ]
+    if not jobs_with_departments:
+        raise JobMappingError(
+            "secondary_department_missing",
+            f"已映射内部职位“{mapping['internal_name']}”，但未配置有效二级部门岗位",
+        )
+    contacts = {}
+    targetable = []
+    for job in jobs_with_departments:
+        contact = _first_secondary_contact(_secondary_department(job.department))
+        if contact:
+            targetable.append(job)
+            contacts[job.id] = contact
+    if not targetable:
+        department_names = "、".join(
+            sorted(
+                {
+                    _secondary_department(job.department).name
+                    for job in jobs_with_departments
+                }
+            )
+        )
+        raise JobMappingError(
+            "secondary_contact_missing",
+            f"已映射内部职位“{mapping['internal_name']}”，但二级部门“{department_names}”"
+            "没有启用的二级接口人",
+        )
+    return targetable, contacts, mapping
+
+
+def _select_job_capacity(processing_run, jobs, *, reserve):
+    """按 `(已用量 + 1) / 容量` 选择岗位；任务内行锁保证并发不超配。"""
+    jobs = sorted(jobs, key=lambda item: item.id)
+    if not processing_run:
+        return jobs[0], None
+    capacities = list(
+        m.ProcessingRunJobCapacity.objects.select_for_update()
+        .filter(run=processing_run, job_id__in=[job.id for job in jobs])
+        .order_by("job_id")
+    )
+    available = [
+        capacity
+        for capacity in capacities
+        if capacity.capacity > 0 and capacity.used_count < capacity.capacity
+    ]
+    if not available:
+        return None, None
+    selected = min(
+        available,
+        key=lambda item: (
+            Fraction(item.used_count + 1, item.capacity),
+            item.job_id,
+        ),
+    )
+    if reserve:
+        selected.used_count += 1
+        selected.save(update_fields=["used_count"])
+    jobs_by_id = {job.id: job for job in jobs}
+    return jobs_by_id[selected.job_id], selected
+
+
+def _mapped_classification_reason(mapping, job):
+    major_reason = mapping.get("major_reasons", {}).get(job.id, "")
+    return "；".join(
+        part
+        for part in [
+            f"对外职位名称精确映射内部职位：{mapping['internal_name']}",
+            f"岗位名精确命中对外发布名称：{mapping['public_name']}",
+            major_reason,
+        ]
+        if part
+    )
+
+
+def _save_mapped_classification(resume, job, mapping, mode):
+    resume.job = job
+    resume.job_category = job.category or "未分类"
+    resume.category_mode = mode
+    resume.category_reason = _mapped_classification_reason(mapping, job)
+    resume.save(
+        update_fields=["job", "job_category", "category_mode", "category_reason"]
+    )
+
+
+def _archive_reason_for_mapping_code(code):
+    if code == "job_mapping_ambiguous":
+        return m.CandidateWorkflow.ARCHIVE_JOB_MAPPING_AMBIGUOUS
+    if code == "internal_position_name_missing":
+        return m.CandidateWorkflow.ARCHIVE_INTERNAL_POSITION_NAME_MISSING
+    if code == "secondary_department_missing":
+        return m.CandidateWorkflow.ARCHIVE_DEPARTMENT_NOT_FOUND
+    return m.CandidateWorkflow.ARCHIVE_JOB_NOT_MATCHED
 
 
 def _assert_tertiary_contact(sub_contact, secondary_department):
@@ -404,6 +553,7 @@ def _create_attempt(
     special_route_confidence=None,
     special_route_evidence=None,
     special_route_config_snapshot=None,
+    capacity_reservation=None,
 ):
     now = timezone.now()
     sub_department = sub_contact.department if sub_contact else None
@@ -436,13 +586,14 @@ def _create_attempt(
         dispatched_at=now if sub_contact else None,
         assigned_to_sub_at=now if sub_contact else None,
         created_by=created_by if getattr(created_by, "is_authenticated", False) else None,
+        capacity_reservation=capacity_reservation,
     )
     _set_snapshots(attempt)
     attempt.save()
 
     if sub_contact:
         direct_note = (
-            "系统 AI 专项强制分配"
+            "系统 AI 自动分配"
             if route_code == "ai_special_route"
             else "HR 手动直达三级接口人"
         )
@@ -670,80 +821,25 @@ def _create_agent_failure_decision(
     )
 
 
-def _current_volunteer_job(resume):
-    """只查询当前志愿名称可能命中的启用岗位，再按稳定规则选出一个。"""
-    position_name = (resume.position_name or "").strip()
-    if not position_name:
-        return None
-    name_query = Q(public_name__icontains=position_name) | Q(
-        position_name__icontains=position_name
-    )
-    if resume.job_id:
-        name_query |= Q(pk=resume.job_id)
-    jobs = m.Job.objects.filter(is_active=True).filter(name_query)
-    entity = (resume.entity or "").strip()
-    if entity:
-        jobs = jobs.filter(Q(entity__iexact=entity) | Q(entity=""))
-    selected = get_rule_strategy().match_current_volunteer_job(resume, list(jobs))
-    if not selected:
-        return None
-    return m.Job.objects.select_related(
-        "department", "department__parent"
-    ).get(pk=selected.pk)
-
-
-def _volunteer_label(resume):
-    rank = f"第{resume.volunteer_rank}志愿" if resume.volunteer_rank else "当前志愿"
-    position_name = (resume.position_name or "").strip()
-    if not position_name:
-        return f"{rank}（未填写投递岗位）"
-    entity = (resume.entity or "").strip()
-    entity_suffix = f"（招聘主体：{entity}）" if entity else ""
-    return f"{rank}“{position_name}”{entity_suffix}"
-
-
-def _job_label(job):
-    name = (job.public_name or job.position_name or "").strip()
-    return f"岗位需求“{name or f'ID {job.id}'}”"
-
-
-def _job_not_configured_detail(resume):
-    if not (resume.position_name or "").strip():
-        return f"{_volunteer_label(resume)}，无法在岗位需求中定位启用岗位"
-    return f"{_volunteer_label(resume)}：岗位需求中未配置与该投递岗位匹配的启用岗位"
-
-
-def _rule_job_gap_detail(resume, strategy, jobs):
-    """区分岗位需求缺失与岗位已配置但专业不符合，避免笼统写“未匹配岗位”。"""
-    job = strategy.match_current_volunteer_job(resume, jobs)
-    if not job:
-        return _job_not_configured_detail(resume)
-    candidate_major = (resume.candidate.highest_major or "").strip() or "未填写"
-    return (
-        f"{_volunteer_label(resume)}已匹配{_job_label(job)}，"
-        f"但最高学历专业“{candidate_major}”不符合该岗位需求专业"
-    )
-
-
-def _ai_current_volunteer_prerequisite(resume):
-    """返回 AI 当前志愿可调用模型前的岗位、二级部门和接口人校验结果。"""
-    job = _current_volunteer_job(resume)
-    if not job:
-        return None, "guardrail_blocked", _job_not_configured_detail(resume)
-    department = _secondary_department(job.department)
-    if not department:
-        return (
-            job,
-            "reference_not_found",
-            f"{_volunteer_label(resume)}已匹配{_job_label(job)}，但该岗位未配置有效二级部门",
+def _ai_current_volunteer_prerequisite(resume, processing_run=None):
+    """直接完成 AI 当前志愿的岗位、部门、接口人和 HC 目标选择。"""
+    try:
+        jobs, _contacts, mapping = _targetable_job_pool(resume, mode="ai")
+    except JobMappingError as exc:
+        error_code = (
+            "reference_not_found"
+            if exc.code in {"secondary_department_missing", "secondary_contact_missing"}
+            else "guardrail_blocked"
         )
-    if not _first_secondary_contact(department):
+        return None, error_code, exc.detail
+    job, _capacity = _select_job_capacity(processing_run, jobs, reserve=False)
+    if not job:
         return (
-            job,
-            "reference_not_found",
-            f"{_volunteer_label(resume)}已匹配{_job_label(job)}并定位二级部门“{department.name}”，"
-            "但该部门没有启用的二级接口人",
+            None,
+            "guardrail_blocked",
+            f"当前任务中内部职位“{mapping['internal_name']}”的岗位 HC 容量已用尽",
         )
+    _save_mapped_classification(resume, job, mapping, "ai")
     return job, "", ""
 
 
@@ -799,9 +895,61 @@ def _apply_ai_result(workflow, resume, *, matched_rule, result):
     resume.save(
         update_fields=["job", "job_category", "category_mode", "category_reason"]
     )
-    special_config = ai_config.get_ai_special_route_config()
+    capacity_reservation = None
+    automatic_contact = result.contact
+    if decision.recommendation != m.AgentDispatchDecision.RECOMMEND_ARCHIVE:
+        try:
+            job_pool, contacts, mapping = _targetable_job_pool(resume, mode="ai")
+        except JobMappingError as exc:
+            if exc.code == "secondary_contact_missing":
+                _block_current_volunteer(
+                    workflow, m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND, exc.detail
+                )
+            else:
+                _archive(
+                    workflow, _archive_reason_for_mapping_code(exc.code), exc.detail
+                )
+            return None
+        selected_job, capacity_reservation = _select_job_capacity(
+            getattr(workflow, "_processing_run", None), job_pool, reserve=True
+        )
+        if not selected_job:
+            _save_mapped_classification(resume, job_pool[0], mapping, "ai")
+            _block_current_volunteer(
+                workflow,
+                m.CandidateWorkflow.BLOCK_JOB_HC_EXHAUSTED,
+                f"当前任务中内部职位“{mapping['internal_name']}”的岗位 HC 容量已用尽，"
+                "候选人保留当前志愿，等待新任务重新分配",
+            )
+            return None
+        _save_mapped_classification(resume, selected_job, mapping, "ai")
+        automatic_contact = contacts[selected_job.id]
+        decision.recommended_job = selected_job
+        decision.recommended_department = _secondary_department(selected_job.department)
+        decision.recommended_contact = automatic_contact
+        decision.recommended_contact_name_snapshot = automatic_contact.name
+        decision.recommended_contact_employee_no_snapshot = automatic_contact.employee_no
+        decision.save(
+            update_fields=[
+                "recommended_job",
+                "recommended_department",
+                "recommended_contact",
+                "recommended_contact_name_snapshot",
+                "recommended_contact_employee_no_snapshot",
+            ]
+        )
+    try:
+        special_config = ai_config.get_ai_special_route_config()
+    except (TypeError, ValueError) as exc:
+        decision.special_route_config_snapshot = {
+            "fallback_code": "config_invalid",
+            "fallback_error_type": type(exc).__name__,
+        }
+        decision.save(update_fields=["special_route_config_snapshot"])
+        special_config = None
     special_hit = (
-        special_config.enabled
+        special_config is not None
+        and special_config.enabled
         and decision.ai_specialist_match
         and decision.ai_specialist_confidence is not None
         and decision.ai_specialist_confidence > special_config.threshold
@@ -815,51 +963,41 @@ def _apply_ai_result(workflow, resume, *, matched_rule, result):
             tertiary_contact = m.Contact.objects.select_related(
                 "department__parent"
             ).get(pk=special_config.tertiary_contact_id)
+            snapshot = special_config.snapshot()
+            attempt = _force_assign_locked(
+                workflow=workflow,
+                resume=resume,
+                contact=tertiary_contact,
+                secondary_contact=secondary_contact,
+                source=m.AssignmentAttempt.SOURCE_AI,
+                mode="ai",
+                match_reason="AI 自动分配",
+                agent_decision=decision,
+                confidence_score=decision.confidence_score,
+                route_code="ai_special_route",
+                special_route_confidence=decision.ai_specialist_confidence,
+                special_route_evidence=decision.ai_specialist_evidence,
+                special_route_config_snapshot=snapshot,
+                invalidate_processing=False,
+                capacity_reservation=capacity_reservation,
+            )
         except (m.Contact.DoesNotExist, TypeError, ValueError) as exc:
-            detail = f"AI 专项分流配置不可用：{exc}"
-            decision.error_code = "ai_special_route_unavailable"
-            decision.error_message = detail
-            decision.special_route_config_snapshot = special_config.snapshot()
+            # 专项路由是后台增强能力，目标配置瞬时失效不能阻断普通 AI 结果。
+            # 失败原因仅写入内部审计快照，不进入候选人结果或公开错误码。
+            snapshot = special_config.snapshot()
+            snapshot["fallback_code"] = "target_unavailable"
+            snapshot["fallback_error_type"] = type(exc).__name__
+            decision.special_route_config_snapshot = snapshot
             decision.save(
-                update_fields=[
-                    "error_code",
-                    "error_message",
-                    "special_route_config_snapshot",
-                ]
+                update_fields=["special_route_config_snapshot"]
             )
-            _block_current_volunteer(
-                workflow,
-                "ai_special_route_unavailable",
-                detail,
+        else:
+            decision.special_route_applied = True
+            decision.special_route_config_snapshot = snapshot
+            decision.save(
+                update_fields=["special_route_applied", "special_route_config_snapshot"]
             )
-            return None
-
-        snapshot = special_config.snapshot()
-        attempt = _force_assign_locked(
-            workflow=workflow,
-            resume=resume,
-            contact=tertiary_contact,
-            secondary_contact=secondary_contact,
-            source=m.AssignmentAttempt.SOURCE_AI,
-            mode="ai",
-            match_reason=(
-                "AI 专项强制分配：专项置信度 "
-                f"{decision.ai_specialist_confidence:.2%}，目标三级接口人“{tertiary_contact.name}”"
-            ),
-            agent_decision=decision,
-            confidence_score=decision.confidence_score,
-            route_code="ai_special_route",
-            special_route_confidence=decision.ai_specialist_confidence,
-            special_route_evidence=decision.ai_specialist_evidence,
-            special_route_config_snapshot=snapshot,
-            invalidate_processing=False,
-        )
-        decision.special_route_applied = True
-        decision.special_route_config_snapshot = snapshot
-        decision.save(
-            update_fields=["special_route_applied", "special_route_config_snapshot"]
-        )
-        return attempt
+            return attempt
     if decision.recommendation == m.AgentDispatchDecision.RECOMMEND_ARCHIVE:
         _archive(
             workflow,
@@ -880,17 +1018,19 @@ def _apply_ai_result(workflow, resume, *, matched_rule, result):
             match_reason=decision.reason,
             review_required=True,
             status=m.AssignmentAttempt.STATUS_PENDING_REVIEW,
+            capacity_reservation=capacity_reservation,
         )
     return _create_attempt(
         workflow=workflow,
         resume=resume,
-        contact=result.contact,
+        contact=automatic_contact,
         source=m.AssignmentAttempt.SOURCE_AI,
         mode="ai",
         matched_rule=matched_rule,
         agent_decision=decision,
         confidence_score=decision.confidence_score,
         match_reason=decision.reason,
+        capacity_reservation=capacity_reservation,
     )
 
 
@@ -1073,7 +1213,7 @@ def process_ai_scope_item(run_id, scope_item_id):
     if not references_valid:
         ai_error = ai_service.AIServiceError(
             "ai_reference_invalidated",
-            "Rule 前置检查固定的岗位、二级部门或二级接口人在 AI 执行前已失效",
+            "岗位与分配前置检查固定的岗位、二级部门或二级接口人在 AI 执行前已失效",
         )
     else:
         try:
@@ -1191,31 +1331,38 @@ def process_ai_scope_item(run_id, scope_item_id):
             recommendation = decision.recommendation or ""
 
         _release_processing_claim(workflow.id, item.dispatch_token)
-        if decision.error_code == "ai_special_route_unavailable":
-            _scope_result(
-                item,
-                status="needs_attention",
-                result_type=RESULT_NEEDS_ATTENTION,
-                reason_code="ai_special_route_unavailable",
-                message=decision.error_message,
-            )
+        if workflow.block_reason == m.CandidateWorkflow.BLOCK_JOB_HC_EXHAUSTED:
+            reason_code = "job_hc_exhausted"
+            result_message = workflow.block_detail
+            recommendation = ""
+        elif (
+            workflow.archive_reason
+            == m.CandidateWorkflow.ARCHIVE_JOB_MAPPING_AMBIGUOUS
+        ):
+            reason_code = "job_mapping_ambiguous"
+            result_message = workflow.archive_detail
+            recommendation = ""
+        elif (
+            workflow.archive_reason
+            == m.CandidateWorkflow.ARCHIVE_INTERNAL_POSITION_NAME_MISSING
+        ):
+            reason_code = "internal_position_name_missing"
+            result_message = workflow.archive_detail
+            recommendation = ""
         else:
-            reason_code = (
-                "ai_special_route"
-                if decision.special_route_applied
-                else {
-                    m.AgentDispatchDecision.RECOMMEND_DISPATCH: "ai_dispatched",
-                    m.AgentDispatchDecision.RECOMMEND_REVIEW: "ai_review",
-                    m.AgentDispatchDecision.RECOMMEND_ARCHIVE: "ai_archived",
-                }.get(decision.recommendation, "ai_completed")
-            )
-            _scope_result(
-                item,
-                status="success",
-                result_type=RESULT_COMPLETED,
-                reason_code=reason_code,
-                message=decision.reason or decision.summary,
-            )
+            reason_code = {
+                m.AgentDispatchDecision.RECOMMEND_DISPATCH: "ai_dispatched",
+                m.AgentDispatchDecision.RECOMMEND_REVIEW: "ai_review",
+                m.AgentDispatchDecision.RECOMMEND_ARCHIVE: "ai_archived",
+            }.get(decision.recommendation, "ai_completed")
+            result_message = decision.reason or decision.summary
+        _scope_result(
+            item,
+            status="success",
+            result_type=RESULT_COMPLETED,
+            reason_code=reason_code,
+            message=result_message,
+        )
         return {
             "status": item.status,
             "result_type": item.result_type,
@@ -1274,7 +1421,7 @@ def _create_next_auto_attempt(
             return None
         _touch_workflow(workflow, resume, "ai")
         job, prerequisite_code, prerequisite_detail = _ai_current_volunteer_prerequisite(
-            resume
+            resume, processing_run
         )
         if prerequisite_detail:
             _create_agent_failure_decision(
@@ -1297,12 +1444,6 @@ def _create_next_auto_attempt(
             force=force_ai,
         )
 
-    jobs = list(
-        m.Job.objects.select_related("department")
-        .prefetch_related("majors")
-        .filter(is_active=True)
-    )
-    strategy = get_rule_strategy()
     resume = _effective_resume_for_attempt(
         workflow,
         advance_after_feedback=advance_after_feedback,
@@ -1316,32 +1457,34 @@ def _create_next_auto_attempt(
         return None
 
     _touch_workflow(workflow, resume, mode)
-    job, _category, classify_reason = _classify_resume(resume, strategy, jobs, "rule")
+    try:
+        job_pool, contacts, mapping = _targetable_job_pool(resume, mode="rule")
+    except JobMappingError as exc:
+        if exc.code == "secondary_contact_missing":
+            _block_current_volunteer(
+                workflow, m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND, exc.detail
+            )
+        else:
+            _archive(workflow, _archive_reason_for_mapping_code(exc.code), exc.detail)
+        return None
+
+    # 即使本任务容量已耗尽，也保留职位映射和岗位分类，供新任务直接回池。
+    _save_mapped_classification(resume, job_pool[0], mapping, "rule")
+    job, capacity_reservation = _select_job_capacity(
+        processing_run, job_pool, reserve=True
+    )
     if not job:
-        _archive(
-            workflow,
-            m.CandidateWorkflow.ARCHIVE_JOB_NOT_MATCHED,
-            _rule_job_gap_detail(resume, strategy, jobs),
+        detail = (
+            f"当前任务中内部职位“{mapping['internal_name']}”的岗位 HC 容量已用尽，"
+            "候选人保留当前志愿，等待新任务重新分配"
         )
-        return None
-    department = _secondary_department(job.department)
-    if not department:
-        _archive(
-            workflow,
-            m.CandidateWorkflow.ARCHIVE_DEPARTMENT_NOT_FOUND,
-            f"{_volunteer_label(resume)}已匹配{_job_label(job)}，"
-            "但该岗位未配置有效二级部门",
-        )
-        return None
-    contact = _first_secondary_contact(department)
-    if not contact:
         _block_current_volunteer(
-            workflow,
-            m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND,
-            f"{_volunteer_label(resume)}已匹配{_job_label(job)}并定位二级部门“{department.name}”，"
-            "但该部门没有启用的二级接口人",
+            workflow, m.CandidateWorkflow.BLOCK_JOB_HC_EXHAUSTED, detail
         )
         return None
+    _save_mapped_classification(resume, job, mapping, "rule")
+    contact = contacts[job.id]
+    classify_reason = _mapped_classification_reason(mapping, job)
 
     return _create_attempt(
         workflow=workflow,
@@ -1353,6 +1496,7 @@ def _create_next_auto_attempt(
         match_reason=_rule_match_reason(
             admission, resume, job, contact, classify_reason
         ),
+        capacity_reservation=capacity_reservation,
     )
 
 
@@ -1479,35 +1623,31 @@ def run_school_gate(scope=None, mode="rule", processing_run=None, processing_sta
     return f"院校分类与准入完成：通过 {passed}，规则不通过 {rejected}"
 
 
-def _ai_rule_precheck(resume):
-    job = _current_volunteer_job(resume)
+def _prepare_ai_target(resume, processing_run=None):
+    try:
+        job_pool, contacts, mapping = _targetable_job_pool(resume, mode="ai")
+    except JobMappingError as exc:
+        return None, None, None, exc.code, exc.detail
+    _save_mapped_classification(resume, job_pool[0], mapping, "ai")
+    job, _capacity = _select_job_capacity(processing_run, job_pool, reserve=False)
     if not job:
-        return None, None, None, "job_not_found", _job_not_configured_detail(resume)
-    department = _secondary_department(job.department)
-    if not department:
         return (
-            job,
-            None,
-            None,
-            "secondary_department_missing",
-            f"{_volunteer_label(resume)}已匹配{_job_label(job)}，但该岗位未配置有效二级部门",
+            job_pool[0],
+            _secondary_department(job_pool[0].department),
+            contacts[job_pool[0].id],
+            "job_hc_exhausted",
+            f"当前任务中内部职位“{mapping['internal_name']}”的岗位 HC 容量已用尽，"
+            "候选人保留当前志愿，等待新任务重新分配",
         )
-    contact = _first_secondary_contact(department)
-    if not contact:
-        return (
-            job,
-            department,
-            None,
-            "secondary_contact_missing",
-            f"{_volunteer_label(resume)}已匹配{_job_label(job)}并定位二级部门“{department.name}”，"
-            "但该部门没有启用的二级接口人",
-        )
-    return job, department, contact, "", ""
+    _save_mapped_classification(resume, job, mapping, "ai")
+    return job, _secondary_department(job.department), contacts[job.id], "", ""
 
 
 def _rule_result_code(workflow, attempt):
     if attempt:
         return "rule_assigned", attempt.match_reason
+    if workflow.block_reason == m.CandidateWorkflow.BLOCK_JOB_HC_EXHAUSTED:
+        return "job_hc_exhausted", workflow.block_detail
     if workflow.block_reason == m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND:
         return "secondary_contact_missing", workflow.block_detail
     if workflow.archive_reason == m.CandidateWorkflow.ARCHIVE_SCHOOL_RULE_NOT_MATCHED:
@@ -1520,6 +1660,13 @@ def _rule_result_code(workflow, attempt):
         return code, workflow.archive_detail
     if workflow.archive_reason == m.CandidateWorkflow.ARCHIVE_DEPARTMENT_NOT_FOUND:
         return "secondary_department_missing", workflow.archive_detail
+    if workflow.archive_reason == m.CandidateWorkflow.ARCHIVE_JOB_MAPPING_AMBIGUOUS:
+        return "job_mapping_ambiguous", workflow.archive_detail
+    if (
+        workflow.archive_reason
+        == m.CandidateWorkflow.ARCHIVE_INTERNAL_POSITION_NAME_MISSING
+    ):
+        return "internal_position_name_missing", workflow.archive_detail
     if workflow.archive_reason == m.CandidateWorkflow.ARCHIVE_JOB_NOT_MATCHED:
         code = (
             "major_not_matched"
@@ -1530,8 +1677,10 @@ def _rule_result_code(workflow, attempt):
     return "no_resume_available", workflow.archive_detail or "没有下一条可尝试志愿"
 
 
-def run_rule_precheck(scope=None, mode="rule", processing_run=None, processing_stage=None):
-    """Step3：Rule 模式完成确定性分配；AI 模式只冻结岗位/部门/接口人引用。"""
+def run_allocation_precheck(
+    scope=None, mode="rule", processing_run=None, processing_stage=None
+):
+    """Step3：Rule 完成专业审核与分配；AI 独立冻结岗位/部门/接口人引用。"""
     scope = scope or {}
     candidate_ids = list(candidate_ids_for_scope(scope))
     rules = school_admission.active_rules()
@@ -1617,17 +1766,20 @@ def run_rule_precheck(scope=None, mode="rule", processing_run=None, processing_s
                 completed += 1
                 continue
 
-            job, department, contact, reason_code, detail = _ai_rule_precheck(resume)
+            job, department, contact, reason_code, detail = _prepare_ai_target(
+                resume, processing_run
+            )
             _touch_workflow(workflow, resume, "ai")
             if reason_code:
-                if reason_code == "secondary_contact_missing":
-                    _block_current_volunteer(workflow, reason_code, detail)
-                else:
-                    archive_reason = (
-                        m.CandidateWorkflow.ARCHIVE_DEPARTMENT_NOT_FOUND
-                        if reason_code == "secondary_department_missing"
-                        else m.CandidateWorkflow.ARCHIVE_JOB_NOT_MATCHED
+                if reason_code in {"secondary_contact_missing", "job_hc_exhausted"}:
+                    block_reason = (
+                        m.CandidateWorkflow.BLOCK_JOB_HC_EXHAUSTED
+                        if reason_code == "job_hc_exhausted"
+                        else m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND
                     )
+                    _block_current_volunteer(workflow, block_reason, detail)
+                else:
+                    archive_reason = _archive_reason_for_mapping_code(reason_code)
                     _archive(workflow, archive_reason, detail)
                 if item:
                     _scope_result(
@@ -1640,13 +1792,6 @@ def run_rule_precheck(scope=None, mode="rule", processing_run=None, processing_s
                 completed += 1
                 continue
 
-            resume.job = job
-            resume.job_category = job.category
-            resume.category_mode = "ai"
-            resume.category_reason = "Rule 前置检查已固定当前志愿岗位、二级部门和二级接口人"
-            resume.save(
-                update_fields=["job", "job_category", "category_mode", "category_reason"]
-            )
             if item:
                 item.prepared_resume = resume
                 item.prepared_job = job
@@ -1681,7 +1826,7 @@ def run_rule_precheck(scope=None, mode="rule", processing_run=None, processing_s
             ]
         )
     return (
-        f"Rule 前置检查完成：AI 待深度筛选 {prepared}，"
+        f"岗位与分配前置检查完成：AI 待深度筛选 {prepared}，"
         f"已形成明确业务结果 {completed}"
     )
 
@@ -1931,6 +2076,7 @@ def _force_assign_locked(
     special_route_evidence=None,
     special_route_config_snapshot=None,
     invalidate_processing=True,
+    capacity_reservation=None,
 ):
     """人工接口与 AI 专项分流共用的强制分配核心；调用方必须锁定 workflow。"""
     if invalidate_processing:
@@ -1957,6 +2103,7 @@ def _force_assign_locked(
         special_route_confidence=special_route_confidence,
         special_route_evidence=special_route_evidence,
         special_route_config_snapshot=special_route_config_snapshot,
+        capacity_reservation=capacity_reservation,
     )
 
 
@@ -2177,10 +2324,16 @@ def submit_feedback(attempt, result, note="", *, user=None):
         ]
     )
     rules = school_admission.active_rules()
+    origin_run = (
+        attempt.capacity_reservation.run
+        if attempt.capacity_reservation_id
+        else None
+    )
     created = _create_next_auto_attempt(
         workflow,
         rules,
         mode=workflow.dispatch_strategy or attempt.match_mode or "rule",
+        processing_run=origin_run,
         advance_after_feedback=True,
     )
     if not created and workflow.archive_reason == m.CandidateWorkflow.ARCHIVE_NO_NEXT_RESUME:
@@ -2209,10 +2362,20 @@ def cancel_attempt(attempt, reason="hr_cancelled"):
         m.AssignmentAttempt.STATUS_PENDING_DISPATCH,
     ]:
         raise ValueError("仅待复核或待下发尝试可以取消")
+    now = timezone.now()
+    _release_attempt_capacity(attempt, released_at=now)
     attempt.status = m.AssignmentAttempt.STATUS_CANCELLED
-    attempt.cancelled_at = timezone.now()
+    attempt.cancelled_at = now
     attempt.cancel_reason = reason
-    attempt.save(update_fields=["status", "cancelled_at", "cancel_reason", "updated_at"])
+    attempt.save(
+        update_fields=[
+            "status",
+            "cancelled_at",
+            "cancel_reason",
+            "capacity_released_at",
+            "updated_at",
+        ]
+    )
     if not workflow.attempts.filter(status__in=UNFEEDBACKED_STATUSES).exists():
         _archive(
             workflow,

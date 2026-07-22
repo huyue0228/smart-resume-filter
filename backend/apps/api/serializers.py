@@ -1,7 +1,9 @@
 from rest_framework import serializers
 from django.contrib.auth.models import Group
+from django.db import transaction
 from django.utils import timezone
 
+from apps.accounts.contact_users import sync_contact_user
 from apps.accounts.models import User
 from apps.accounts.permissions import (
     PERMISSION_TREE,
@@ -13,6 +15,30 @@ from apps.accounts.permissions import (
 from apps.core import candidate_summary
 from apps.core import models as m
 from apps.core import system_status
+
+
+_PUBLIC_REASON_CODE_ALIASES = {
+    "ai_special_route": "ai_dispatched",
+    "ai_special_route_unavailable": "ai_connection_error",
+}
+
+
+def _public_reason_code(value):
+    return _PUBLIC_REASON_CODE_ALIASES.get(value, value)
+
+
+def _public_ai_message(value):
+    text = str(value or "")
+    return (
+        text.replace("AI 专项强制分配", "AI 自动分配")
+        .replace("AI 专项分流", "AI 后台分配")
+    )
+
+
+def _public_match_reason(attempt):
+    if attempt and attempt.route_code == "ai_special_route":
+        return "AI 自动分配"
+    return _public_ai_message(attempt.match_reason if attempt else "")
 
 
 def visible_candidate_attempt(candidate, user, *, permissions=None):
@@ -456,15 +482,32 @@ class CandidateSerializer(serializers.ModelSerializer):
                 if self._visible_attempt(obj)
                 else candidate_summary.REASON_NONE
             )
-        return candidate_summary.reason(obj)[0]
+        reason_type = candidate_summary.reason(obj)[0]
+        if reason_type:
+            return reason_type
+        if self.get_system_status(obj) == system_status.ARCHIVED and self._processing_item(obj):
+            return candidate_summary.REASON_ARCHIVE
+        return reason_type
 
     def get_reason_text(self, obj):
         if not self._is_full_view():
             attempt = self._visible_attempt(obj)
             if attempt:
-                return attempt.manual_reason or attempt.match_reason or attempt.feedback_note
+                return (
+                    attempt.manual_reason
+                    or _public_match_reason(attempt)
+                    or attempt.feedback_note
+                )
             return ""
-        return candidate_summary.reason(obj)[1]
+        status_code = self.get_system_status(obj)
+        item = self._processing_item(obj)
+        if (
+            status_code in {system_status.ARCHIVED, system_status.PENDING_REALLOCATION}
+            and item
+            and item.result_message
+        ):
+            return _public_ai_message(item.result_message)
+        return _public_ai_message(candidate_summary.reason(obj)[1])
 
     def get_archive_reason(self, obj):
         workflow = self._workflow(obj)
@@ -484,11 +527,9 @@ class CandidateSerializer(serializers.ModelSerializer):
         def resolve():
             request = self.context.get("request")
             query_params = getattr(request, "query_params", {}) if request else {}
-            run_id = query_params.get("processing_run_id")
-            items = list(obj.processing_scope_items.all())
-            if run_id:
-                items = [item for item in items if str(item.run_id) == str(run_id)]
-            return max(items, key=lambda item: (item.created_at, item.id)) if items else None
+            return candidate_summary.latest_processing_scope_item(
+                obj, query_params.get("processing_run_id")
+            )
 
         return self._cached_candidate_value("_processing_item_cache", obj, resolve)
 
@@ -498,7 +539,7 @@ class CandidateSerializer(serializers.ModelSerializer):
 
     def get_reason_code(self, obj):
         item = self._processing_item(obj)
-        return item.reason_code if item else ""
+        return _public_reason_code(item.reason_code) if item else ""
 
     def get_resumes(self, obj):
         if not self._is_full_view():
@@ -647,6 +688,19 @@ class SchoolSerializer(serializers.ModelSerializer):
             "school_tag",
             "school_tag_name",
         ]
+        read_only_fields = ["platform"]
+
+    def create(self, validated_data):
+        if "school_tag" in validated_data:
+            school_tag = validated_data.get("school_tag")
+            validated_data["platform"] = school_tag.name if school_tag else ""
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        if "school_tag" in validated_data:
+            school_tag = validated_data.get("school_tag")
+            validated_data["platform"] = school_tag.name if school_tag else ""
+        return super().update(instance, validated_data)
 
 
 class DepartmentSerializer(serializers.ModelSerializer):
@@ -678,6 +732,45 @@ class ContactSerializer(serializers.ModelSerializer):
             "can_delegate",
             "is_active",
         ]
+
+    def validate(self, attrs):
+        department = attrs.get("department")
+        if department is None and self.instance is not None:
+            department = self.instance.department
+        if department is None:
+            raise serializers.ValidationError({"department": "请选择所属部门"})
+        if department.level not in (2, 3):
+            raise serializers.ValidationError(
+                {"department": "接口人只能绑定二级或三级部门"}
+            )
+
+        contact_level = (
+            m.Contact.LEVEL_TERTIARY
+            if department.level == 3
+            else m.Contact.LEVEL_SECONDARY
+        )
+        attrs["contact_level"] = contact_level
+        if contact_level == m.Contact.LEVEL_TERTIARY:
+            attrs["can_delegate"] = False
+        return attrs
+
+    @transaction.atomic
+    def create(self, validated_data):
+        contact = super().create(validated_data)
+        try:
+            sync_contact_user(contact)
+        except ValueError as exc:
+            raise serializers.ValidationError({"employee_no": str(exc)}) from exc
+        return contact
+
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        contact = super().update(instance, validated_data)
+        try:
+            sync_contact_user(contact)
+        except ValueError as exc:
+            raise serializers.ValidationError({"employee_no": str(exc)}) from exc
+        return contact
 
 
 class SchoolTagSerializer(serializers.ModelSerializer):
@@ -1038,7 +1131,11 @@ class AssignmentAttemptSerializer(serializers.ModelSerializer):
     matched_rule_name = serializers.CharField(
         source="matched_rule.name", read_only=True, default=""
     )
+    match_reason = serializers.SerializerMethodField()
     agent_decision_summary = serializers.SerializerMethodField()
+
+    def get_match_reason(self, obj):
+        return _public_match_reason(obj)
 
     def get_agent_decision_summary(self, obj):
         decision = obj.agent_decision
@@ -1056,12 +1153,8 @@ class AssignmentAttemptSerializer(serializers.ModelSerializer):
             "evidence": decision.evidence,
             "risks": decision.risks,
             "risk_flags": decision.risk_flags,
-            "ai_specialist_match": decision.ai_specialist_match,
-            "ai_specialist_confidence": decision.ai_specialist_confidence,
-            "ai_specialist_evidence": decision.ai_specialist_evidence,
-            "special_route_applied": decision.special_route_applied,
-            "error_code": decision.error_code,
-            "error_message": decision.error_message,
+            "error_code": _public_reason_code(decision.error_code),
+            "error_message": _public_ai_message(decision.error_message),
         }
 
     class Meta:
@@ -1102,10 +1195,6 @@ class AssignmentAttemptSerializer(serializers.ModelSerializer):
             "cancelled_at",
             "cancel_reason",
             "manual_reason",
-            "route_code",
-            "special_route_confidence",
-            "special_route_evidence",
-            "special_route_config_snapshot",
             "department_name_snapshot",
             "contact_name_snapshot",
             "contact_employee_no_snapshot",
@@ -1116,6 +1205,8 @@ class AssignmentAttemptSerializer(serializers.ModelSerializer):
             "position_name_snapshot",
             "created_by_username_snapshot",
             "created_by",
+            "capacity_reservation",
+            "capacity_released_at",
             "created_at",
             "updated_at",
         ]
@@ -1139,12 +1230,10 @@ class AssignmentAttemptSerializer(serializers.ModelSerializer):
             "feedback_at",
             "cancelled_at",
             "cancel_reason",
-            "route_code",
-            "special_route_confidence",
-            "special_route_evidence",
-            "special_route_config_snapshot",
             "created_by",
             "created_by_username_snapshot",
+            "capacity_reservation",
+            "capacity_released_at",
         ]
 
 
@@ -1167,6 +1256,7 @@ class ProcessingRunSerializer(serializers.ModelSerializer):
             "ai_concurrency_limit", "ai_effective_concurrency",
             "ai_retry_count", "ai_rate_limit_count",
             "model_name", "prompt_version", "decision_version",
+            "job_hc_coefficient_snapshot",
             "created_at", "started_at", "finished_at", "elapsed_seconds",
             "undone_at", "undone_by", "error",
             "cancel_requested_at", "cancelled_at", "cancelled_by", "cancelled_by_username_snapshot",
@@ -1229,6 +1319,12 @@ class AgentDispatchDecisionSerializer(serializers.ModelSerializer):
     def get_recommended_job_name(self, obj):
         return self._job_name(obj.recommended_job)
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data["error_code"] = _public_reason_code(data.get("error_code"))
+        data["error_message"] = _public_ai_message(data.get("error_message"))
+        return data
+
     class Meta:
         model = m.AgentDispatchDecision
         fields = [
@@ -1259,11 +1355,6 @@ class AgentDispatchDecisionSerializer(serializers.ModelSerializer):
             "evidence",
             "risks",
             "risk_flags",
-            "ai_specialist_match",
-            "ai_specialist_confidence",
-            "ai_specialist_evidence",
-            "special_route_applied",
-            "special_route_config_snapshot",
             "error_code",
             "error_message",
             "model_name",

@@ -2,26 +2,101 @@
 import logging
 import random
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
 from celery import shared_task
 from celery.exceptions import MaxRetriesExceededError, Retry
-from django.db import transaction
+from django.conf import settings
+from django.db import close_old_connections, transaction
 from django.utils import timezone
 
 from apps.core import models as m
 
 from . import ai_config, runner
+from .ai import school_province
 from .services import allocate
 
 
 logger = logging.getLogger(__name__)
+_LOCAL_ENRICHMENT_EXECUTOR = ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="school-province-ai",
+)
 
 
 @shared_task
 def execute_runs_sequence_task(run_ids):
     """依次领取已创建的运行；每条运行在提交时已固化用户选择的单一模式。"""
     return [runner.execute_run(run_id).id for run_id in run_ids]
+
+
+@shared_task(
+    queue="ai",
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
+def enrich_school_provinces_task(school_ids):
+    """分批补全仍为空的院校省份；失败只写日志，不影响已经完成的导入。"""
+    school_ids = sorted(
+        {int(item) for item in school_ids if str(item).isdigit() and int(item) > 0}
+    )
+    if not school_ids or not ai_config.is_ai_available():
+        return {"status": "skipped", "requested": len(school_ids), "updated": 0}
+
+    schools = list(
+        m.School.objects.filter(id__in=school_ids, province="").order_by("id")
+    )
+    updated = 0
+    failed_batches = 0
+    for offset in range(0, len(schools), school_province.MAX_SCHOOLS_PER_REQUEST):
+        batch = schools[offset : offset + school_province.MAX_SCHOOLS_PER_REQUEST]
+        try:
+            provinces = school_province.infer_school_provinces(
+                [school.name for school in batch]
+            )
+        except Exception as exc:  # noqa: BLE001 - 不记录模型原文或连接详情
+            failed_batches += 1
+            logger.warning(
+                "School province enrichment failed batch_size=%s error_type=%s",
+                len(batch),
+                type(exc).__name__,
+            )
+            continue
+        for school in batch:
+            province = provinces.get(school.name, "")
+            if province:
+                # 排队后用户可能已手工维护；只更新此刻仍为空的记录。
+                updated += m.School.objects.filter(
+                    pk=school.id,
+                    province="",
+                ).update(province=province)
+    return {
+        "status": "completed" if not failed_batches else "partial",
+        "requested": len(schools),
+        "updated": updated,
+        "failed_batches": failed_batches,
+    }
+
+
+def _run_local_school_province_enrichment(school_ids):
+    close_old_connections()
+    try:
+        return enrich_school_provinces_task.run(school_ids)
+    finally:
+        close_old_connections()
+
+
+def submit_school_province_enrichment(school_ids):
+    """生产投递 Celery；本地 eager 仍放入后台线程，避免阻塞导入响应。"""
+    if settings.CELERY_TASK_ALWAYS_EAGER:
+        _LOCAL_ENRICHMENT_EXECUTOR.submit(
+            _run_local_school_province_enrichment,
+            list(school_ids),
+        )
+        return {"backend": "local_thread", "task_id": ""}
+    task = enrich_school_provinces_task.apply_async(args=[list(school_ids)], queue="ai")
+    return {"backend": "celery", "task_id": getattr(task, "id", "") or ""}
 
 
 @shared_task(

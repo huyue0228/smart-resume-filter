@@ -8,10 +8,10 @@ import re
 import zipfile
 
 import pandas as pd
-from django.contrib.auth.models import Group
 from django.conf import settings
 from django.db import transaction
 
+from apps.accounts.contact_users import sync_contact_user
 from apps.accounts.models import User
 from apps.accounts.permissions import ensure_rbac_defaults
 from apps.core import models as m
@@ -195,31 +195,6 @@ def _contact_level(row, dept):
     )
 
 
-def _contact_user_role(contact):
-    if contact.contact_level == m.Contact.LEVEL_TERTIARY:
-        return User.ROLE_TERTIARY_CONTACT, "三级接口人"
-    return User.ROLE_SECONDARY_CONTACT, "二级接口人"
-
-
-def _sync_contact_user(contact):
-    role, group_name = _contact_user_role(contact)
-    user, created = User.objects.update_or_create(
-        username=contact.employee_no,
-        defaults={
-            "role": role,
-            "contact": contact,
-            "is_active": contact.is_active,
-        },
-    )
-    if created or not user.has_usable_password():
-        user.set_password("pass1234")
-        user.save(update_fields=["password"])
-    contact_groups = Group.objects.filter(name__in=["二级接口人", "三级接口人"])
-    user.groups.remove(*contact_groups.exclude(name=group_name))
-    user.groups.add(Group.objects.get(name=group_name))
-    return user
-
-
 def _contact_has_history(contact):
     return (
         contact.assignment_attempts.exists()
@@ -249,6 +224,134 @@ def _split_majors(text):
     return [p for p in parts if p]
 
 
+def _normalized_job_key_part(value):
+    """岗位业务键按去空白、忽略大小写的口径比较。"""
+    return "".join(str(value or "").casefold().split())
+
+
+def _secondary_department_name(department):
+    if not department:
+        return ""
+    if department.level == 2:
+        return department.name
+    if department.level == 3 and department.parent:
+        return department.parent.name
+    return ""
+
+
+def _job_business_key(entity, department_name, public_name, position_name, category):
+    """岗位唯一业务键：主体、二级部门、对外名称、内部名称、岗位类别。"""
+    return tuple(
+        _normalized_job_key_part(value)
+        for value in (
+            entity,
+            department_name,
+            public_name,
+            position_name,
+            category,
+        )
+    )
+
+
+def _job_row_business_key(row):
+    return _job_business_key(
+        _val(row, "主体") or _val(row, "招聘主体"),
+        _val(row, "二层部门") or _val(row, "二级部门"),
+        _val(row, "对外发布名称"),
+        _val(row, "职位名称"),
+        _val(row, "岗位类别"),
+    )
+
+
+def _job_model_business_key(job):
+    return _job_business_key(
+        job.entity,
+        _secondary_department_name(job.department),
+        job.public_name,
+        job.position_name,
+        job.category,
+    )
+
+
+def _assert_unique_job_rows(job_rows):
+    rows_by_key = {}
+    for item in job_rows:
+        rows_by_key.setdefault(item["business_key"], []).append(item["excel_row"])
+    duplicates = [rows for rows in rows_by_key.values() if len(rows) > 1]
+    if duplicates:
+        row_text = "；".join("、".join(str(row) for row in rows) for rows in duplicates)
+        raise ValueError(f"岗位文件存在重复业务键，重复行：{row_text}")
+
+
+def _existing_jobs_by_business_key():
+    jobs_by_key = {}
+    duplicate_ids = []
+    jobs = list(
+        m.Job.objects.select_related("department", "department__parent").order_by("id")
+    )
+    for job in jobs:
+        key = _job_model_business_key(job)
+        if key in jobs_by_key:
+            duplicate_ids.extend([jobs_by_key[key].id, job.id])
+        else:
+            jobs_by_key[key] = job
+    if duplicate_ids:
+        ids = "、".join(str(job_id) for job_id in sorted(set(duplicate_ids)))
+        raise ValueError(f"数据库岗位存在重复业务键，岗位 ID：{ids}")
+    return jobs_by_key
+
+
+def _sync_jobs(job_rows, *, mode):
+    """按业务键幂等更新岗位；replace 额外停用文件外岗位。"""
+    jobs_by_key = _existing_jobs_by_business_key()
+    imported_job_ids = set()
+    for item in job_rows:
+        row = item["row"]
+        entity = _val(row, "主体") or _val(row, "招聘主体")
+        department = _get_department(
+            _val(row, "一层部门"),
+            _val(row, "二层部门") or _val(row, "二级部门"),
+            entity,
+        )
+        values = {
+            "entity": entity,
+            "department": department,
+            "category": _val(row, "岗位类别"),
+            "public_name": _val(row, "对外发布名称"),
+            "is_public": _to_bool(_val(row, "是否对外发布")),
+            "position_name": _val(row, "职位名称"),
+            "job_family": _val(row, "岗位族"),
+            "location": _val(row, "工作地点"),
+            "education": _val(row, "学历"),
+            "responsibilities": _val(row, "工作职责"),
+            "headcount": _to_int(_val(row, "需求数量")),
+            "is_active": True,
+        }
+        job = jobs_by_key.get(item["business_key"])
+        if job:
+            for field, value in values.items():
+                setattr(job, field, value)
+            job.save(update_fields=list(values))
+        else:
+            job = m.Job.objects.create(**values)
+            jobs_by_key[item["business_key"]] = job
+
+        job.majors.all().delete()
+        m.JobMajor.objects.bulk_create(
+            [
+                m.JobMajor(job=job, major=major)
+                for major in _split_majors(_val(row, "需求专业"))
+            ]
+        )
+        imported_job_ids.add(job.id)
+
+    if mode == "replace":
+        m.Job.objects.exclude(id__in=imported_job_ids).filter(is_active=True).update(
+            is_active=False
+        )
+    return len(imported_job_ids)
+
+
 def _gender_code(value):
     text = str(value or "").strip().lower()
     if text in ("男", "m", "male", "man", "1"):
@@ -273,6 +376,7 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
         "jobs_skipped": 0,
     }
     affected_candidate_ids = set()
+    schools_missing_province = set()
     warnings = []
     job_rows = []
 
@@ -280,16 +384,24 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
     if files.get("jobs"):
         jobs_df = _read_excel(files["jobs"])
         missing_responsibility_rows = []
+        candidate_job_rows = []
         for excel_row, (_, row) in enumerate(jobs_df.iterrows(), start=2):
             position = _val(row, "职位名称")
             public_name = _val(row, "对外发布名称")
             if not (position or public_name):
                 continue
+            item = {
+                "excel_row": excel_row,
+                "row": row,
+                "business_key": _job_row_business_key(row),
+            }
+            candidate_job_rows.append(item)
             if not _val(row, "工作职责"):
                 counts["jobs_skipped"] += 1
                 missing_responsibility_rows.append(excel_row)
                 continue
-            job_rows.append(row)
+            job_rows.append(item)
+        _assert_unique_job_rows(candidate_job_rows)
         if missing_responsibility_rows:
             warnings.append(
                 {
@@ -309,9 +421,6 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
         m.Resume.objects.all().delete()
         m.Candidate.objects.all().delete()
     if mode == "replace":
-        if files.get("jobs") and job_rows:
-            m.JobMajor.objects.all().delete()
-            m.Job.objects.all().delete()
         if files.get("schools"):
             m.School.objects.all().delete()
 
@@ -329,14 +438,20 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
                     code=tag_text,
                     defaults={"name": tag_text, "is_active": True},
                 )
-            m.School.objects.update_or_create(
+            province = _val(row, "所在省份") or _val(row, "省份")
+            school_defaults = {
+                "platform": tag_text,
+                "school_tag": school_tag,
+            }
+            # 文件明确给出的省份优先；空单元格不覆盖人工或 AI 已补全的数据。
+            if province:
+                school_defaults["province"] = province
+            school, _ = m.School.objects.update_or_create(
                 name=name,
-                defaults={
-                    "platform": tag_text,
-                    "province": _val(row, "所在省份") or _val(row, "省份"),
-                    "school_tag": school_tag,
-                },
+                defaults=school_defaults,
             )
+            if not school.province.strip():
+                schools_missing_province.add(school.id)
             counts["schools"] += 1
 
     # 部门接口人
@@ -376,32 +491,12 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
                     ),
                 },
             )
-            _sync_contact_user(contact)
+            sync_contact_user(contact)
             counts["contacts"] += 1
 
     # 岗位需求
-    if files.get("jobs"):
-        for row in job_rows:
-            position = _val(row, "职位名称")
-            public_name = _val(row, "对外发布名称")
-            entity = _val(row, "主体")
-            dept = _get_department(_val(row, "一层部门"), _val(row, "二层部门"), entity)
-            job = m.Job.objects.create(
-                entity=entity,
-                department=dept,
-                category=_val(row, "岗位类别"),
-                public_name=public_name,
-                is_public=_to_bool(_val(row, "是否对外发布")),
-                position_name=position,
-                job_family=_val(row, "岗位族"),
-                location=_val(row, "工作地点"),
-                education=_val(row, "学历"),
-                responsibilities=_val(row, "工作职责"),
-                headcount=_to_int(_val(row, "需求数量")),
-            )
-            for major in _split_majors(_val(row, "需求专业")):
-                m.JobMajor.objects.create(job=job, major=major)
-            counts["jobs"] += 1
+    if files.get("jobs") and job_rows:
+        counts["jobs"] = _sync_jobs(job_rows, mode=mode)
 
     # 简历信息列表 → Candidate + Resume
     resume_by_apply = {}
@@ -490,5 +585,7 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
 
     # 仅供 API 在创建后台 ProcessingRun 时冻结处理范围，不作为导入统计直接返回。
     counts["_candidate_ids"] = sorted(affected_candidate_ids)
+    # 仅供 API 在提交事务完成后投递低优先级 AI 补全，不进入导入统计。
+    counts["_school_ids_missing_province"] = sorted(schools_missing_province)
     counts["_warnings"] = warnings
     return counts

@@ -16,9 +16,11 @@ SUMMARY_HEADERS = [
     "导入简历数",
     "分配简历数",
     "待处理",
-    "已分类",
-    "已分配",
-    "待筛选",
+    "已归档",
+    "待重新分配",
+    "待复核",
+    "待下发",
+    "待业务反馈",
     "通过",
     "不通过",
 ]
@@ -41,8 +43,10 @@ DETAIL_HEADERS = [
 ]
 STATUS_ORDER = [
     system_status.RAW,
-    system_status.CLASSIFIED,
-    system_status.ALLOCATED,
+    system_status.ARCHIVED,
+    system_status.PENDING_REALLOCATION,
+    system_status.PENDING_REVIEW,
+    system_status.PENDING_DISPATCH,
     system_status.PENDING_SCREENING,
     system_status.SCREENING_PASSED,
     system_status.SCREENING_REJECTED,
@@ -70,33 +74,13 @@ def latest_effective_attempt(resume):
     return attempts[-1] if attempts else None
 
 
+def current_effective_attempt(report_resume):
+    current = system_status.current_resume(report_resume.candidate)
+    return latest_effective_attempt(current) if current else None
+
+
 def resume_report_status(resume, attempt):
-    if attempt:
-        if attempt.status == m.AssignmentAttempt.STATUS_PASSED:
-            return system_status.SCREENING_PASSED
-        if attempt.status == m.AssignmentAttempt.STATUS_REJECTED:
-            return system_status.SCREENING_REJECTED
-        if attempt.status in {
-            m.AssignmentAttempt.STATUS_DISPATCHED_L2,
-            m.AssignmentAttempt.STATUS_ASSIGNED_L3,
-        }:
-            return system_status.PENDING_SCREENING
-        if attempt.status in {
-            m.AssignmentAttempt.STATUS_PENDING_REVIEW,
-            m.AssignmentAttempt.STATUS_PENDING_DISPATCH,
-        }:
-            return system_status.ALLOCATED
-    candidate = resume.candidate
-    classified = bool(
-        resume.job_category
-        and (
-            candidate.first_degree_tag_id
-            or candidate.highest_degree_tag_id
-            or candidate.first_degree_platform
-            or candidate.highest_degree_platform
-        )
-    )
-    return system_status.CLASSIFIED if classified else system_status.RAW
+    return system_status.candidate_system_status(resume.candidate)
 
 
 def _attempt_text(attempt, snapshot_field, related_field):
@@ -123,7 +107,7 @@ def build_result_report(resumes):
     source_labels = dict(m.AssignmentAttempt.SOURCE_CHOICES)
 
     for resume in resumes:
-        attempt = latest_effective_attempt(resume)
+        attempt = current_effective_attempt(resume)
         status_code = resume_report_status(resume, attempt)
         department_name = _attempt_text(
             attempt, "department_name_snapshot", "department"

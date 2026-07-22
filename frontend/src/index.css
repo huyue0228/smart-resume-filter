@@ -201,7 +201,10 @@ body {
 }
 
 .srf-smart-data-table .ant-pro-table-list-toolbar {
+  position: relative;
+  z-index: 4;
   padding-inline: 18px;
+  background: var(--srf-surface);
 }
 
 .srf-smart-data-table .ant-pro-table-list-toolbar-title {
@@ -215,6 +218,12 @@ body {
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.1px;
+}
+
+/* 横向滚动时固定列表头必须高于后绘制的普通表头，否则会被遮住。 */
+.srf-smart-data-table .ant-table-thead > tr > th.ant-table-cell-fix-left,
+.srf-smart-data-table .ant-table-thead > tr > th.ant-table-cell-fix-right {
+  z-index: 3;
 }
 
 .srf-smart-data-table .ant-table-tbody > tr > td {
@@ -237,6 +246,7 @@ body {
 
 .srf-table-pagination-sticky.ant-pagination {
   box-sizing: border-box;
+  justify-content: flex-end;
   margin: 0 !important;
   padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
   background: transparent;
@@ -252,6 +262,13 @@ body {
   bottom: 0;
   left: var(--srf-sticky-pagination-left);
   width: var(--srf-sticky-pagination-width);
+}
+
+.srf-smart-data-table--viewport-scroll .ant-table-body {
+  height: var(--srf-table-body-height);
+  max-height: var(--srf-table-body-height) !important;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .srf-column-resize-handle:hover {

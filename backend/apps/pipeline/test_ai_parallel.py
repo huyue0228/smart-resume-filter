@@ -105,6 +105,7 @@ class AIParallelPipelineTests(TestCase):
             position_name="后端工程师",
             category="技术类",
             responsibilities="负责后端服务开发和稳定性建设。",
+            headcount=100,
         )
 
     def _candidate(self, index):
@@ -202,6 +203,33 @@ class AIParallelPipelineTests(TestCase):
         self.assertEqual((run.processed_count, run.success_count), (1, 1))
         self.assertEqual((stage.processed_count, stage.success_count), (1, 1))
         self.assertEqual(m.AssignmentAttempt.objects.get().source, "ai")
+
+    def test_formal_ai_run_ignores_rule_major_filter_and_persists_ai_result(self):
+        candidate, resume = self._candidate(188)
+        candidate.highest_major = "计算机科学与技术"
+        candidate.save(update_fields=["highest_major"])
+        m.JobMajor.objects.create(job=self.job, major="电气工程")
+        run = runner.create_run(
+            "step2", mode="ai", scope={"candidate_ids": [candidate.id]}
+        )
+
+        with patch.object(
+            allocate.ai_service,
+            "screen_resume",
+            return_value=self._ai_result(resume),
+        ) as screen_resume:
+            runner.execute_run(run.id)
+
+        screen_resume.assert_called_once()
+        item = run.scope_items.get()
+        resume.refresh_from_db()
+        workflow = m.CandidateWorkflow.objects.get(candidate=candidate)
+        self.assertEqual((item.result_type, item.reason_code), ("completed", "ai_dispatched"))
+        self.assertEqual(resume.category_mode, "ai")
+        self.assertTrue(m.AgentDispatchDecision.objects.filter(workflow=workflow).exists())
+        self.assertTrue(m.AssignmentAttempt.objects.filter(workflow=workflow, source="ai").exists())
+        self.assertNotEqual(item.reason_code, "major_not_matched")
+        self.assertNotIn("major_not_matched", workflow.archive_detail)
 
     def test_only_timeout_is_failed_and_rate_limit_needs_attention(self):
         timeout_candidate, _ = self._candidate(89)
@@ -408,7 +436,44 @@ class AIParallelPipelineTests(TestCase):
         self.assertEqual(routed_decision.processing_run, run)
         self.assertEqual(
             run.scope_items.get(candidate=routed_candidate).reason_code,
-            "ai_special_route",
+            "ai_dispatched",
+        )
+
+    def test_unavailable_special_route_target_falls_back_to_normal_ai(self):
+        for key, value in {
+            "ai_special_route_enabled": True,
+            "ai_special_route_threshold": 0.9,
+            "ai_special_route_secondary_contact_id": self.contact.id,
+            "ai_special_route_tertiary_contact_id": 999999,
+        }.items():
+            m.Config.objects.update_or_create(key=key, defaults={"value": value})
+
+        candidate, resume = self._candidate(97)
+        run = runner.create_run(
+            "step2", mode="ai", scope={"candidate_ids": [candidate.id]}
+        )
+
+        with patch.object(
+            allocate.ai_service,
+            "screen_resume",
+            return_value=self._ai_result(resume, specialist_confidence=0.96),
+        ):
+            runner.execute_run(run.id)
+
+        attempt = m.AssignmentAttempt.objects.get(workflow__candidate=candidate)
+        decision = m.AgentDispatchDecision.objects.get(workflow__candidate=candidate)
+        item = run.scope_items.get(candidate=candidate)
+        self.assertEqual(attempt.route_code, "")
+        self.assertEqual(attempt.status, m.AssignmentAttempt.STATUS_PENDING_DISPATCH)
+        self.assertEqual(decision.error_code, "")
+        self.assertFalse(decision.special_route_applied)
+        self.assertEqual(
+            decision.special_route_config_snapshot["fallback_code"],
+            "target_unavailable",
+        )
+        self.assertEqual(
+            (item.result_type, item.reason_code),
+            (m.ProcessingRunScopeItem.RESULT_COMPLETED, "ai_dispatched"),
         )
 
     @override_settings(CELERY_TASK_ALWAYS_EAGER=False)

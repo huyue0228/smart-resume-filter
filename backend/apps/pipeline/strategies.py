@@ -1,6 +1,8 @@
-"""筛选/匹配策略：规则 与 AI 走统一接口，可切换、互不耦合。"""
+"""Rule 专业审核策略；岗位精确映射由独立领域服务负责。"""
 
 from apps.core import models as m
+
+from .services.job_mapping import JobMappingError, normalized, resolve_job_pool
 
 
 class RuleStrategy:
@@ -21,7 +23,7 @@ class RuleStrategy:
 
     def _normalized(self, value):
         """统一文本比较口径：忽略大小写和空白，但保留原始语义。"""
-        return "".join((value or "").lower().split())
+        return normalized(value)
 
     def _is_wildcard_major(self, value):
         """判断岗位需求专业是否表达“专业不限”。
@@ -124,102 +126,38 @@ class RuleStrategy:
                 )
         return False, "候选人最高学历专业未命中岗位需求专业"
 
-    def _entity_matched(self, resume, job):
-        """招聘主体硬约束。
-
-        只有投递主体和岗位主体双方都有值时才强制一致；任一侧为空时放行，
-        兼容历史样例数据和未维护主体的岗位需求。
-        """
-        resume_entity = self._normalized(resume.entity)
-        job_entity = self._normalized(job.entity)
-        return not resume_entity or not job_entity or resume_entity == job_entity
-
-    def _entity_rank(self, resume, job):
-        """多岗位命中时，同主体岗位优先于主体缺失岗位。"""
-        resume_entity = self._normalized(resume.entity)
-        job_entity = self._normalized(job.entity)
-        if resume_entity and job_entity and resume_entity == job_entity:
-            return 0
-        return 1
-
-    def _job_name_matches(self, pos, job):
-        """返回岗位名命中的优先级和可展示原因。
-
-        优先级从强到弱：
-        1. 投递岗位精确命中岗位需求的对外发布名称。
-        2. 投递岗位精确命中岗位需求的职位名称。
-        3. 与对外发布名称存在包含关系。
-        4. 与职位名称存在包含关系。
-        这样可以避免多个岗位同时命中时依赖数据库自然顺序。
-        """
-        normalized_pos = self._normalized(pos)
-        public_name = self._normalized(job.public_name)
-        position_name = self._normalized(job.position_name)
-        if public_name and normalized_pos == public_name:
-            return 0, f"岗位名精确命中对外发布名称：{job.public_name}"
-        if position_name and normalized_pos == position_name:
-            return 1, f"岗位名精确命中职位名称：{job.position_name}"
-        if public_name and (
-            public_name in normalized_pos or normalized_pos in public_name
-        ):
-            return 2, f"岗位名包含命中对外发布名称：{job.public_name}"
-        if position_name and (
-            position_name in normalized_pos or normalized_pos in position_name
-        ):
-            return 3, f"岗位名包含命中职位名称：{job.position_name}"
-        return None
-
-    def _candidate_jobs(self, resume, jobs, pos):
-        """收集并排序当前投递可尝试的岗位需求。
-
-        排序键为 `(主体优先级, 岗位名命中优先级, job.id)`，最后用 job.id
-        兜底，确保同一批数据重复运行时结果稳定。
-        """
-        candidates = []
+    def filter_major_eligible_jobs(self, resume, jobs, mapping):
+        """在已完成精确映射的岗位池上执行 Rule 专业审核。"""
+        eligible = []
+        major_reasons = {}
         for job in jobs:
-            if not self._entity_matched(resume, job):
-                continue
-            name_match = self._job_name_matches(pos, job)
-            if not name_match:
-                continue
-            name_rank, name_reason = name_match
-            candidates.append(
-                (
-                    (self._entity_rank(resume, job), name_rank, job.id or 0),
-                    job,
-                    name_reason,
-                )
+            matched, major_reason = self._major_match_reason(resume, job)
+            if matched:
+                eligible.append(job)
+                major_reasons[job.id] = major_reason
+        if not eligible:
+            candidate_major = (resume.candidate.highest_major or "").strip() or "未填写"
+            raise JobMappingError(
+                "major_not_matched",
+                f"已映射内部职位“{mapping['internal_name']}”，但最高学历专业"
+                f"“{candidate_major}”不符合岗位需求专业",
             )
-        return sorted(candidates, key=lambda item: item[0])
-
-    def match_current_volunteer_job(self, resume, jobs):
-        """从已按当前志愿定向查询的岗位中稳定选择唯一岗位，不校验专业。"""
-        pos = (resume.position_name or "").strip()
-        if not pos:
-            return None
-        candidates = self._candidate_jobs(resume, jobs, pos)
-        return candidates[0][1] if candidates else None
-
-    def _classify_if_major_matched(self, resume, job, name_reason):
-        """岗位名命中后再校验专业，不通过则继续尝试下一个岗位。"""
-        matched, reason = self._major_match_reason(resume, job)
-        if not matched:
-            return None
-        return job, job.category or "未分类", f"{name_reason}；{reason}"
+        return eligible, {**mapping, "major_reasons": major_reasons}
 
     def classify(self, resume, jobs):
-        """为单条投递选择一个岗位需求。
-
-        只返回第一条“主体/岗位名/专业”全部通过的岗位；如果某个岗位名命中
-        但专业不匹配，会继续尝试下一条候选岗位，而不是立即判定投递失败。
-        """
-        pos = (resume.position_name or "").strip()
-        if pos:
-            for _rank, job, name_reason in self._candidate_jobs(resume, jobs, pos):
-                result = self._classify_if_major_matched(resume, job, name_reason)
-                if result:
-                    return result
-        return None, "未匹配", ""
+        """按严格职位映射返回稳定的首个专业合格岗位。"""
+        try:
+            jobs, mapping = resolve_job_pool(resume, jobs)
+            jobs, mapping = self.filter_major_eligible_jobs(resume, jobs, mapping)
+        except JobMappingError as exc:
+            return None, "未匹配", exc.detail
+        job = jobs[0]
+        reason = (
+            f"对外职位名称精确映射内部职位：{mapping['internal_name']}；"
+            f"岗位名精确命中对外发布名称：{mapping['public_name']}；"
+            f"{mapping['major_reasons'].get(job.id, '')}"
+        ).rstrip("；")
+        return job, job.category or "未分类", reason
 
 
 def get_rule_strategy():

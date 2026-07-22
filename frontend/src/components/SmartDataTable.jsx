@@ -20,6 +20,9 @@ import {
 } from './smartDataTableUtils'
 
 const DEFAULT_COLUMN_WIDTH = 120
+const MIN_VIEWPORT_BODY_HEIGHT = 180
+const VIEWPORT_BOTTOM_GAP = 8
+const RESIZE_SETTLE_DELAY = 80
 const EMPTY_COLUMN_STATE = {}
 const EMPTY_STICKY_PAGINATION_METRICS = {
   fixed: false,
@@ -177,7 +180,8 @@ const SmartDataTable = forwardRef(function SmartDataTable(
     params: externalParams,
     options,
     scroll,
-    stickyPagination = false,
+    stickyPagination = true,
+    viewportScroll = true,
     ...tableProps
   },
   forwardedRef,
@@ -202,9 +206,11 @@ const SmartDataTable = forwardRef(function SmartDataTable(
   const [selectedRows, setSelectedRows] = useState([])
   const tableRootRef = useRef()
   const stickyPaginationFrameRef = useRef()
+  const stickyPaginationResizeTimerRef = useRef()
   const [stickyPaginationMetrics, setStickyPaginationMetrics] = useState(
     EMPTY_STICKY_PAGINATION_METRICS,
   )
+  const [viewportBodyHeight, setViewportBodyHeight] = useState(0)
   const hasDataRequest = Boolean(dataRequest)
 
   const resolvedPagination = useMemo(() => {
@@ -214,6 +220,7 @@ const SmartDataTable = forwardRef(function SmartDataTable(
   const stickyPaginationEnabled = Boolean(
     stickyPagination && resolvedPagination && resolvedPagination !== false,
   )
+  const viewportScrollEnabled = Boolean(viewportScroll && stickyPaginationEnabled)
   const mergedPagination = useMemo(() => {
     if (!stickyPaginationEnabled) return resolvedPagination
     const paginationProps = resolvedPagination === true ? {} : resolvedPagination
@@ -231,6 +238,7 @@ const SmartDataTable = forwardRef(function SmartDataTable(
         sameStickyPaginationMetrics(previous, EMPTY_STICKY_PAGINATION_METRICS)
           ? previous
           : EMPTY_STICKY_PAGINATION_METRICS)
+      setViewportBodyHeight((previous) => (previous ? 0 : previous))
       return
     }
 
@@ -265,7 +273,26 @@ const SmartDataTable = forwardRef(function SmartDataTable(
 
     setStickyPaginationMetrics((previous) =>
       sameStickyPaginationMetrics(previous, next) ? previous : next)
-  }, [stickyPaginationEnabled])
+
+    if (viewportScrollEnabled && isVisible) {
+      const headerElement = root.querySelector('.ant-table-thead')
+      const headerBottom = headerElement?.getBoundingClientRect().bottom || 0
+      const availableHeight = Math.floor(
+        viewportHeight
+        - headerBottom
+        - Math.ceil(paginationRect.height)
+        - VIEWPORT_BOTTOM_GAP,
+      )
+      const nextBodyHeight = headerBottom > 0
+        ? Math.max(MIN_VIEWPORT_BODY_HEIGHT, availableHeight)
+        : 0
+      setViewportBodyHeight((previous) => (
+        previous === nextBodyHeight ? previous : nextBodyHeight
+      ))
+    } else {
+      setViewportBodyHeight((previous) => (previous ? 0 : previous))
+    }
+  }, [stickyPaginationEnabled, viewportScrollEnabled])
 
   const scheduleStickyPaginationUpdate = useCallback(() => {
     if (stickyPaginationFrameRef.current !== undefined) return
@@ -274,6 +301,16 @@ const SmartDataTable = forwardRef(function SmartDataTable(
       updateStickyPagination()
     })
   }, [updateStickyPagination])
+
+  const scheduleStickyPaginationResizeUpdate = useCallback(() => {
+    if (stickyPaginationResizeTimerRef.current !== undefined) {
+      window.clearTimeout(stickyPaginationResizeTimerRef.current)
+    }
+    stickyPaginationResizeTimerRef.current = window.setTimeout(() => {
+      stickyPaginationResizeTimerRef.current = undefined
+      scheduleStickyPaginationUpdate()
+    }, RESIZE_SETTLE_DELAY)
+  }, [scheduleStickyPaginationUpdate])
 
   useEffect(() => {
     if (!stickyPaginationEnabled) {
@@ -286,11 +323,12 @@ const SmartDataTable = forwardRef(function SmartDataTable(
 
     const root = tableRootRef.current
     if (!root) return undefined
-    const resizeObserver = new ResizeObserver(scheduleStickyPaginationUpdate)
+    // 侧边栏折叠会连续改变表格宽度；等待尺寸稳定后再统一测量，避免动画逐帧重排。
+    const resizeObserver = new ResizeObserver(scheduleStickyPaginationResizeUpdate)
     const mutationObserver = new MutationObserver(scheduleStickyPaginationUpdate)
     resizeObserver.observe(root)
     mutationObserver.observe(root, { childList: true, subtree: true })
-    window.addEventListener('resize', scheduleStickyPaginationUpdate)
+    window.addEventListener('resize', scheduleStickyPaginationResizeUpdate)
     window.addEventListener('scroll', scheduleStickyPaginationUpdate, true)
     document.addEventListener('fullscreenchange', scheduleStickyPaginationUpdate)
     scheduleStickyPaginationUpdate()
@@ -298,15 +336,23 @@ const SmartDataTable = forwardRef(function SmartDataTable(
     return () => {
       resizeObserver.disconnect()
       mutationObserver.disconnect()
-      window.removeEventListener('resize', scheduleStickyPaginationUpdate)
+      window.removeEventListener('resize', scheduleStickyPaginationResizeUpdate)
       window.removeEventListener('scroll', scheduleStickyPaginationUpdate, true)
       document.removeEventListener('fullscreenchange', scheduleStickyPaginationUpdate)
       if (stickyPaginationFrameRef.current !== undefined) {
         window.cancelAnimationFrame(stickyPaginationFrameRef.current)
         stickyPaginationFrameRef.current = undefined
       }
+      if (stickyPaginationResizeTimerRef.current !== undefined) {
+        window.clearTimeout(stickyPaginationResizeTimerRef.current)
+        stickyPaginationResizeTimerRef.current = undefined
+      }
     }
-  }, [scheduleStickyPaginationUpdate, stickyPaginationEnabled])
+  }, [
+    scheduleStickyPaginationResizeUpdate,
+    scheduleStickyPaginationUpdate,
+    stickyPaginationEnabled,
+  ])
 
   const loadOptions = useCallback(async () => {
     if (!filterOptionsRequest) return
@@ -462,7 +508,10 @@ const SmartDataTable = forwardRef(function SmartDataTable(
     : null
 
   const tableRootClassName = appendClassName(
-    'srf-smart-data-table',
+    appendClassName(
+      'srf-smart-data-table',
+      viewportScrollEnabled ? 'srf-smart-data-table--viewport-scroll' : '',
+    ),
     stickyPaginationMetrics.fixed ? 'srf-smart-data-table--pagination-fixed' : '',
   )
   const tableRootStyle = {
@@ -470,6 +519,7 @@ const SmartDataTable = forwardRef(function SmartDataTable(
     '--srf-sticky-pagination-height': `${stickyPaginationMetrics.height}px`,
     '--srf-sticky-pagination-left': `${stickyPaginationMetrics.left}px`,
     '--srf-sticky-pagination-width': `${stickyPaginationMetrics.width}px`,
+    '--srf-table-body-height': `${viewportBodyHeight}px`,
   }
 
   return (
@@ -541,7 +591,11 @@ const SmartDataTable = forwardRef(function SmartDataTable(
           }
         } : undefined}
         rowSelection={mergedRowSelection}
-        scroll={{ ...scroll, x: Math.max(Number(scroll?.x || 0), totalWidth) }}
+        scroll={{
+          ...scroll,
+          x: Math.max(Number(scroll?.x || 0), totalWidth),
+          y: scroll?.y ?? (viewportBodyHeight || undefined),
+        }}
         search={false}
       />
     </Space>

@@ -60,7 +60,7 @@ export default function SchoolAdmissionRulesTab() {
   const schoolTagOptions = useMemo(
     () =>
       schoolTags.map((tag) => ({
-        label: `${tag.name}（${tag.code}）`,
+        label: tag.name,
         value: tag.id,
       })),
     [schoolTags],

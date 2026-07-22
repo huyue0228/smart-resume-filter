@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 077
 
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ -n "${DEPLOY_ROOT:-}" ]]; then
@@ -46,19 +47,105 @@ choose() {
   done
 }
 
-require_value() {
-  local key="$1"
-  local value
-  value="$(sed -n "s/^${key}=//p" "$ENV_FILE" | tail -n 1)"
-  [[ -n "$value" && "$value" != change-me* && "$value" != *"你的服务器"* ]] || {
-    echo "请先在 ${ENV_FILE} 设置有效的 ${key}。"
-    exit 1
-  }
-}
-
 env_value() {
   local key="$1"
   sed -n "s/^${key}=//p" "$ENV_FILE" | tail -n 1
+}
+
+is_placeholder_value() {
+  local value="$1"
+  [[ -z "$value" || "$value" == change-me* || "$value" == auto-generate* ]]
+}
+
+set_env_value() {
+  local key="$1"
+  local value="$2"
+  local tmp_file="${ENV_FILE}.tmp.$$"
+  awk -v key="$key" -v value="$value" '
+    BEGIN { prefix = key "="; written = 0 }
+    index($0, prefix) == 1 {
+      if (!written) {
+        print prefix value
+        written = 1
+      }
+      next
+    }
+    { print }
+    END {
+      if (!written) print prefix value
+    }
+  ' "$ENV_FILE" > "$tmp_file"
+  chmod 600 "$tmp_file"
+  mv "$tmp_file" "$ENV_FILE"
+}
+
+generate_random_secret() {
+  local secret
+  secret="$(od -An -N 48 -tx1 /dev/urandom | tr -d '[:space:]')"
+  [[ "${#secret}" -eq 96 ]] || {
+    echo "无法从 /dev/urandom 生成部署密钥。"
+    exit 1
+  }
+  printf '%s' "$secret"
+}
+
+has_existing_resources() {
+  [[ -n "$(docker ps -aq --filter "label=com.docker.compose.project=${PROJECT_NAME}" 2>/dev/null)" ]] ||
+    [[ -n "$(docker volume ls -q --filter "label=com.docker.compose.project=${PROJECT_NAME}" 2>/dev/null)" ]]
+}
+
+needs_secret_generation() {
+  local key value
+  for key in DJANGO_SECRET_KEY POSTGRES_PASSWORD RESTIC_PASSWORD; do
+    value="$(env_value "$key")"
+    if is_placeholder_value "$value"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+initialize_secret_values() {
+  local key value
+  needs_secret_generation || return 0
+  if has_existing_resources; then
+    echo "检测到已有容器或数据卷，但 ${ENV_FILE} 缺少原部署密钥。"
+    echo "为避免数据库失联或 AI 连接密文无法解密，脚本不会生成新密钥；请恢复原 ${ENV_FILE}。"
+    exit 1
+  fi
+  for key in DJANGO_SECRET_KEY POSTGRES_PASSWORD RESTIC_PASSWORD; do
+    value="$(env_value "$key")"
+    if is_placeholder_value "$value"; then
+      set_env_value "$key" "$(generate_random_secret)"
+    fi
+  done
+  chmod 600 "$ENV_FILE"
+  echo "已在 ${ENV_FILE} 自动生成 Django、PostgreSQL 和 restic 三项独立随机密钥（内容不回显）。"
+}
+
+require_value() {
+  local key="$1"
+  local value
+  value="$(env_value "$key")"
+  if is_placeholder_value "$value" || [[ "$value" == *"你的服务器"* ]]; then
+    echo "请先在 ${ENV_FILE} 设置有效的 ${key}。"
+    exit 1
+  fi
+}
+
+validate_backup_target() {
+  local path
+  require_value BACKUP_TARGET_PATH
+  path="$(env_value BACKUP_TARGET_PATH)"
+  [[ "$path" == /* && "$path" != "/" ]] || {
+    echo "BACKUP_TARGET_PATH 必须是异机挂载或外置磁盘上的绝对路径。"
+    exit 1
+  }
+  [[ -d "$path" && -w "$path" ]] || {
+    echo "备份目录不存在或不可写：${path}"
+    echo "请先把异机存储/外置磁盘挂载到该目录，或修改 ${ENV_FILE} 的 BACKUP_TARGET_PATH。"
+    exit 1
+  }
 }
 
 verify_checksums() {
@@ -83,19 +170,31 @@ verify_checksums() {
 [[ -f "$COMPOSE_FILE" ]] || { echo "缺少 ${COMPOSE_FILE}。"; exit 1; }
 command -v docker >/dev/null || { echo "未找到 docker。"; exit 1; }
 docker compose version >/dev/null || { echo "未找到 Docker Compose v2。"; exit 1; }
+docker info >/dev/null 2>&1 || { echo "Docker daemon 不可用，请先启动 Docker。"; exit 1; }
 
 if [[ ! -f "$ENV_FILE" ]]; then
-  choose "未找到环境文件" "创建 .env 模板并退出" "取消"
+  if has_existing_resources; then
+    echo "检测到已有容器或数据卷，但缺少原 ${ENV_FILE}。"
+    echo "为避免数据库失联或 AI 连接密文无法解密，脚本不会创建新环境文件；请恢复原 ${ENV_FILE}。"
+    exit 1
+  fi
+  choose "未找到环境文件" "创建 .env、自动生成密钥并退出" "取消"
   [[ "$MENU_CHOICE" == "1" ]] || { echo "已取消，未执行 Docker 变更。"; exit 0; }
   cp .env.example "$ENV_FILE"
-  echo "已创建 ${ENV_FILE}。请编辑必填项后重新执行本脚本。"
+  chmod 600 "$ENV_FILE"
+  initialize_secret_values
+  echo "已创建 ${ENV_FILE}。静态运行参数已预置，三项密钥已自动生成。"
+  echo "请只确认 DJANGO_ALLOWED_HOSTS，并确保 BACKUP_TARGET_PATH 对应的外置/异机存储已挂载，然后重新执行本脚本。"
   exit 0
 fi
 
+chmod 600 "$ENV_FILE"
+initialize_secret_values
 require_value DJANGO_SECRET_KEY
 require_value DJANGO_ALLOWED_HOSTS
 require_value POSTGRES_PASSWORD
 require_value RESTIC_PASSWORD
+validate_backup_target
 
 case "$DEPLOY_MODE" in
   auto)
@@ -148,6 +247,8 @@ echo "- 部署模式：${DEPLOY_MODE}"
 [[ "$DEPLOY_MODE" == "offline" ]] && echo "- 导入镜像：${IMAGE_TAR}"
 [[ "$DEPLOY_MODE" == "source" ]] && echo "- 从当前源码构建项目镜像"
 echo "- 使用环境文件：${ENV_FILE}（不会显示其中的密钥）"
+echo "- 镜像、端口、并发、OCR、数据库标识、备份周期和保留策略已使用预设值"
+echo "- 现场仅需确认允许访问的 IP/域名与外置/异机备份挂载路径"
 echo "- 仅首次部署会写入基础权限和预置数据；升级不会重置管理员配置"
 
 choose "部署前检查" "已完成环境和 .env 检查，继续部署" "先修改 .env，暂不部署" "取消"

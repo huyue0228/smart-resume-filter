@@ -154,6 +154,9 @@ export function fetchCandidates(params) {
 export function fetchCandidateFilterOptions() {
   return client.get('/candidates/filter-options/')
 }
+export function fetchCandidateExportFields() {
+  return client.get('/candidates/export-fields/')
+}
 export function deleteCandidate(id) {
   return client.delete(`/candidates/${id}/`)
 }
@@ -184,6 +187,12 @@ export function fetchSchools(params) {
 export function fetchSchoolFilterOptions() {
   return client.get('/schools/filter-options/')
 }
+export function createSchool(body) {
+  return client.post('/schools/', body)
+}
+export function updateSchool(id, body) {
+  return client.patch(`/schools/${id}/`, body)
+}
 export function fetchDepartments(params) {
   return client.get('/departments/', { params })
 }
@@ -192,6 +201,12 @@ export function fetchContacts(params) {
 }
 export function fetchContactFilterOptions() {
   return client.get('/contacts/filter-options/')
+}
+export function createContact(body) {
+  return client.post('/contacts/', body)
+}
+export function updateContact(id, body) {
+  return client.patch(`/contacts/${id}/`, body)
 }
 export function deleteContact(id) {
   return client.delete(`/contacts/${id}/`)

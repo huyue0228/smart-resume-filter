@@ -7,9 +7,9 @@ import { allRoute } from './menuRoutes'
 import '../index.css'
 
 describe('BasicLayout menu hierarchy', () => {
-  it('puts DashBoard and processing tasks before the collapsible menu groups', () => {
+  it('puts the data dashboard and processing tasks before the collapsible menu groups', () => {
     expect(allRoute.routes.map((route) => route.name)).toEqual([
-      'DashBoard',
+      '数据看板',
       '处理任务',
       '数据管理',
       '系统设置',

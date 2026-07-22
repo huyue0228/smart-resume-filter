@@ -25,7 +25,10 @@ export default function SchoolTagsTab() {
       await updateSchoolTag(modal.record.id, body)
       message.success('标签已保存')
     } else {
-      await createSchoolTag(body)
+      await createSchoolTag({
+        ...body,
+        code: String(values.name || '').trim(),
+      })
       message.success('标签已创建')
     }
     modal.close()
@@ -35,16 +38,10 @@ export default function SchoolTagsTab() {
 
   const baseColumns = [
     {
-      title: '编码',
-      dataIndex: 'code',
-      width: 150,
-      fixed: 'left',
-      filter: { type: 'text', param: 'code', placeholder: '筛选编码' },
-    },
-    {
       title: '名称',
       dataIndex: 'name',
       width: 160,
+      fixed: 'left',
       filter: { type: 'text', param: 'name', placeholder: '筛选名称' },
       render: (value) => <SchoolTagBadge value={value} />,
     },
@@ -127,11 +124,6 @@ export default function SchoolTagsTab() {
         }
         onFinish={saveTag}
       >
-        <ProFormText
-          name="code"
-          label="标签编码"
-          rules={[{ required: true, message: '请输入标签编码' }]}
-        />
         <ProFormText
           name="name"
           label="标签名称"

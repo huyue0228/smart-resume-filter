@@ -12,10 +12,10 @@ import {
   Typography,
   Tooltip,
   Select,
+  Radio,
   Input,
   Popconfirm,
   Alert,
-  DatePicker,
 } from 'antd'
 import {
   DeleteOutlined,
@@ -46,12 +46,12 @@ import {
   fetchEligibleSubContacts,
   submitAllocationFeedback,
   exportAllocations,
-  exportResumeResultReport,
 } from '../api/services'
 import ImportButton from '../components/ImportButton'
 import ResumePreview from '../components/ResumePreview'
 import SchoolTagBadge from '../components/SchoolTagBadge'
 import SmartDataTable from '../components/SmartDataTable'
+import ResumeExportModal from '../components/ResumeExportModal'
 import { useProcessRunner } from '../components/useProcessRunner'
 import { useRole } from '../contexts/roleState'
 import { downloadBlobFromResponse } from '../utils/download'
@@ -82,13 +82,6 @@ const PROCESSING_RESULT_LABELS = {
   cancelled: '取消',
 }
 
-const PROCESSING_RESULT_META = {
-  completed: { text: '处理完成', color: 'success' },
-  needs_attention: { text: '需处理', color: 'warning' },
-  failed: { text: '失败', color: 'error' },
-  cancelled: { text: '已取消', color: 'default' },
-}
-
 const REASON_CODE_OPTIONS = {
   education_not_eligible: '学历不符合',
   school_not_eligible: '院校不符合',
@@ -97,14 +90,15 @@ const REASON_CODE_OPTIONS = {
   secondary_department_missing: '缺少岗位二级部门',
   secondary_contact_missing: '缺少二级接口人',
   major_not_matched: '专业不匹配',
+  job_mapping_ambiguous: '职位映射歧义',
+  internal_position_name_missing: '内部职位缺失',
+  job_hc_exhausted: '岗位 HC 已满',
   llm_timeout: '模型超时',
   resume_text_unavailable: '简历正文不可用',
   ai_connection_error: 'AI 连接异常',
   ai_rate_limited: 'AI 限流',
   ai_invalid_output: 'AI 输出不合法',
   ai_reference_invalidated: 'AI 引用已失效',
-  ai_special_route_unavailable: 'AI 专项分流配置不可用',
-  ai_special_route: 'AI 专项强制分配',
   rule_assigned: 'Rule 分配成功',
   ai_dispatched: 'AI 建议下发',
   ai_review: 'AI 待复核',
@@ -146,22 +140,34 @@ const SYSTEM_STATUS_OPTIONS = {
     text: '待处理',
     color: 'default',
     status: 'Default',
-    description: '当前候选人/当前投递尚未完成岗位类别和院校标签分类',
+    description: '没有完成过 Rule/AI 筛选；仅提交或排队不算处理',
   },
-  classified: {
-    text: '已分类',
-    color: 'blue',
-    status: 'Processing',
-    description: '已完成岗位类别和院校标签分类，但没有有效业务部门推荐或下发尝试',
+  archived: {
+    text: '已归档',
+    color: 'default',
+    status: 'Default',
+    description: '已有处理证据，但当前志愿没有有效分配状态',
   },
-  allocated: {
-    text: '已分配',
+  pending_reallocation: {
+    text: '待重新分配',
+    color: 'orange',
+    status: 'Warning',
+    description: '岗位已匹配，但本任务 HC 容量不足，等待新任务重新分配',
+  },
+  pending_review: {
+    text: '待复核',
     color: 'gold',
     status: 'Warning',
-    description: '存在待复核/待下发等 HR 待处理尝试，业务部门尚不可见',
+    description: '存在当前志愿的待 HR 复核尝试',
+  },
+  pending_dispatch: {
+    text: '待下发',
+    color: 'blue',
+    status: 'Processing',
+    description: '存在当前志愿的待下发尝试',
   },
   pending_screening: {
-    text: '待筛选',
+    text: '待业务反馈',
     color: 'processing',
     status: 'Processing',
     description: '存在已下发二级/已转派三级尝试，已给业务部门但尚未反馈',
@@ -214,13 +220,12 @@ const REASON_TYPE = {
 export default function ResumesPage() {
   const actionRef = useRef()
   const [searchParams, setSearchParams] = useSearchParams()
-  const { hasPermission, contact, isContact, isSecondaryContact } = useRole()
+  const { hasPermission, contact, isContact, isSecondaryContact, user } = useRole()
   const canViewAgentDecisions = hasPermission('attempt.view_all')
   const canRunPipeline = hasPermission('pipeline.run')
   const canImport = hasPermission('resume.import')
   const canDispatch = hasPermission('attempt.dispatch')
   const canExport = hasPermission('resume.view') || hasPermission('attempt.export')
-  const canExportResultReport = hasPermission('resume.view')
   const canSelectCandidates = canDispatch || canExport || canImport
   const { run } = useProcessRunner()
   const [undo, setUndo] = useState({ available: false })
@@ -231,6 +236,7 @@ export default function ResumesPage() {
   const [agentDecisionDetail, setAgentDecisionDetail] = useState(null)
   const [retryingDecisionId, setRetryingDecisionId] = useState(null)
   const [exporting, setExporting] = useState(false)
+  const [exportTarget, setExportTarget] = useState(null)
   const [processing, setProcessing] = useState(false)
   const [processModalOpen, setProcessModalOpen] = useState(false)
   const [processStatusSelection, setProcessStatusSelection] = useState([])
@@ -241,6 +247,13 @@ export default function ResumesPage() {
   const [lastQuery, setLastQuery] = useState({})
   const [selectedRowKeys, setSelectedRowKeys] = useState([])
   const [bulkDispatching, setBulkDispatching] = useState(false)
+  const [bulkDispatchModal, setBulkDispatchModal] = useState({
+    open: false,
+    scope: 'filters',
+    candidateIds: [],
+    filters: { system_statuses: ['pending_dispatch'] },
+    options: {},
+  })
   const [bulkDeleting, setBulkDeleting] = useState(false)
   const [dispatchingId, setDispatchingId] = useState(null)
   const [manualModal, setManualModal] = useState({
@@ -267,32 +280,6 @@ export default function ResumesPage() {
     note: '',
     loading: false,
   })
-  const [reportModal, setReportModal] = useState({
-    open: false,
-    range: null,
-    loading: false,
-  })
-
-  const handleExportResultReport = async () => {
-    const [start, end] = reportModal.range || []
-    if (!start || !end) {
-      message.warning('请选择导入日期范围')
-      return
-    }
-    setReportModal((prev) => ({ ...prev, loading: true }))
-    try {
-      const response = await exportResumeResultReport({
-        imported_after: start.format('YYYY-MM-DD'),
-        imported_before: end.format('YYYY-MM-DD'),
-      })
-      downloadBlobFromResponse(response, '简历结果报表.xlsx')
-      message.success('结果报表已导出')
-      setReportModal({ open: false, range: null, loading: false })
-    } catch {
-      setReportModal((prev) => ({ ...prev, loading: false }))
-    }
-  }
-
   const openManualAssign = async (resume, attempt = null) => {
     setManualModal((prev) => ({ ...prev, open: true, resume, attempt, loading: true }))
     try {
@@ -326,7 +313,7 @@ export default function ResumesPage() {
       message.success('已创建人工分配尝试')
       setManualModal({ open: false, resume: null, attempt: null, contacts: [], contactId: undefined, secondaryId: undefined, reason: '', loading: false })
       setDetailRecord(null)
-      actionRef.current?.reload()
+      actionRef.current?.reload?.()
     } catch {
       setManualModal((prev) => ({ ...prev, loading: false }))
     }
@@ -452,28 +439,62 @@ export default function ResumesPage() {
     }
   }
 
-  const handleBulkDispatch = (candidateIds = []) => {
-    const selected = candidateIds.length > 0
-    Modal.confirm({
-      title: selected ? '批量下发选中简历？' : '下发当前筛选下全部简历？',
-      content: selected
-        ? `将处理选中的 ${candidateIds.length} 名候选人，仅下发当前有效的待下发记录。`
-        : '将按当前简历库筛选条件处理全部候选人，仅下发当前有效的待下发记录。',
-      okText: selected ? '下发选中' : '下发当前筛选',
-      onOk: async () => {
-        setBulkDispatching(true)
-        try {
-          const { data } = await bulkDispatchCandidates(
-            selected ? { candidate_ids: candidateIds } : { candidate_filters: lastQuery },
-          )
-          message.success(data?.detail || '批量下发完成')
-          setSelectedRowKeys([])
-          actionRef.current?.reload()
-        } finally {
-          setBulkDispatching(false)
-        }
+  const openBulkDispatch = () => {
+    const candidateIds = [...selectedRowKeys]
+    const toArray = (value) => value == null || value === ''
+      ? []
+      : Array.isArray(value) ? value : String(value).split(',').filter(Boolean)
+    setBulkDispatchModal({
+      open: true,
+      scope: candidateIds.length ? 'selected' : 'filters',
+      candidateIds,
+      filters: {
+        system_statuses: toArray(lastQuery.system_status).length
+          ? toArray(lastQuery.system_status)
+          : ['pending_dispatch'],
+        current_entity_in: toArray(lastQuery.current_entity_in),
+        current_position_name_in: toArray(lastQuery.current_position_name_in),
+        job_department_name_in: toArray(lastQuery.job_department_name_in),
+        current_job_category_in: toArray(lastQuery.current_job_category_in),
+        school_tag_in: toArray(lastQuery.school_tag_in),
+        allocation_source: toArray(lastQuery.allocation_source),
       },
+      options: {},
     })
+    fetchCandidateFilterOptions()
+      .then(({ data }) => setBulkDispatchModal((previous) => ({
+        ...previous,
+        options: data || {},
+      })))
+      .catch(() => {})
+  }
+
+  const submitBulkDispatch = async () => {
+    setBulkDispatching(true)
+    try {
+      const selected = bulkDispatchModal.scope === 'selected'
+      const candidateFilters = Object.fromEntries(
+        Object.entries(bulkDispatchModal.filters).filter(([, value]) => value?.length),
+      )
+      const { data } = await bulkDispatchCandidates(
+        selected
+          ? { candidate_ids: bulkDispatchModal.candidateIds }
+          : { candidate_filters: candidateFilters },
+      )
+      message.success(data?.detail || '批量下发完成')
+      setBulkDispatchModal((previous) => ({ ...previous, open: false }))
+      setSelectedRowKeys([])
+      actionRef.current?.reload?.()
+    } finally {
+      setBulkDispatching(false)
+    }
+  }
+
+  const updateBulkDispatchFilter = (key, value) => {
+    setBulkDispatchModal((previous) => ({
+      ...previous,
+      filters: { ...previous.filters, [key]: value },
+    }))
   }
 
   const openAssignModal = async (attempt) => {
@@ -520,17 +541,6 @@ export default function ResumesPage() {
       reloadCandidates()
     } catch {
       setFeedbackModal((previous) => ({ ...previous, loading: false }))
-    }
-  }
-
-  const handleAttemptExport = async (attempt) => {
-    setExporting(true)
-    try {
-      const response = await exportAllocations([attempt.id], {})
-      downloadBlobFromResponse(response, 'resume_export.zip')
-      message.success('简历已导出')
-    } finally {
-      setExporting(false)
     }
   }
 
@@ -628,23 +638,36 @@ export default function ResumesPage() {
     })
   }
 
-  const handleExport = async (candidateIds = []) => {
+  const openCandidateExport = (candidateIds = []) => {
+    const selected = candidateIds.length > 0
+    setExportTarget({
+      type: 'candidates',
+      ids: selected ? [...candidateIds] : null,
+      params: selected ? {} : { ...lastQuery },
+    })
+  }
+
+  const openAttemptExport = (attempt) => {
+    if (!attempt?.id) return
+    setExportTarget({ type: 'attempts', ids: [attempt.id], params: {} })
+  }
+
+  const handleExport = async (fields) => {
+    if (!exportTarget) return
     setExporting(true)
     try {
-      const selected = candidateIds.length > 0
-      const resp = await exportCandidates(selected ? candidateIds : null, selected ? {} : lastQuery)
+      const params = { ...exportTarget.params, fields: fields.join(',') }
+      const resp = exportTarget.type === 'attempts'
+        ? await exportAllocations(exportTarget.ids, params)
+        : await exportCandidates(exportTarget.ids, params)
       const count = Number(resp.headers?.['x-export-count'] ?? 0)
       const missing = Number(resp.headers?.['x-export-missing'] ?? 0)
-      if (count === 0 && missing === 0) {
-        message.warning(
-          selected ? '选中的候选人暂无可导出的简历文件' : '当前筛选结果暂无可导出的简历文件',
-        )
-      } else {
-        downloadBlobFromResponse(resp, 'resumes_export.zip')
-        message.success(
-          `已导出 ${count} 份简历${missing ? `，${missing} 份缺文件（见压缩包内清单）` : ''}`,
-        )
-      }
+      const candidateCount = Number(resp.headers?.['x-export-candidate-count'] ?? 0)
+      downloadBlobFromResponse(resp, '简历导出.zip')
+      message.success(
+        `已导出 ${candidateCount} 名候选人，包含 ${count} 份简历${missing ? `，${missing} 份缺文件（见压缩包内清单）` : ''}`,
+      )
+      setExportTarget(null)
     } catch {
       message.error('导出失败')
     } finally {
@@ -730,8 +753,8 @@ export default function ResumesPage() {
             loading={exporting}
             onClick={() => (
               hasPermission('resume.view')
-                ? handleExport([record.id])
-                : handleAttemptExport(attempt)
+                ? openCandidateExport([record.id])
+                : openAttemptExport(attempt)
             )}
           >
             导出
@@ -915,23 +938,6 @@ export default function ResumesPage() {
       },
     },
     {
-      title: '处理结果',
-      dataIndex: 'processing_result',
-      width: 110,
-      filter: {
-        type: 'select',
-        param: 'result_type',
-        options: Object.entries(PROCESSING_RESULT_META).map(([value, item]) => ({
-          value,
-          label: item.text,
-        })),
-      },
-      render: (value) => {
-        const item = PROCESSING_RESULT_META[value]
-        return item ? <Tag color={item.color}>{item.text}</Tag> : '-'
-      },
-    },
-    {
       title: '原因',
       dataIndex: 'reason_type',
       width: 240,
@@ -1006,34 +1012,13 @@ export default function ResumesPage() {
         onRowClick={(record) => setDetailRecord(record)}
         batchActions={({ clearSelection }) => (
           <Space wrap className="resume-selection-actions">
-            {canDispatch && (
-              <Button
-                type="link"
-                size="small"
-                icon={<SendOutlined />}
-                loading={bulkDispatching}
-                onClick={() => handleBulkDispatch(selectedRowKeys)}
-              >
-                下发选中
-              </Button>
-            )}
-            {canDispatch && (
-              <Button
-                type="link"
-                size="small"
-                loading={bulkDispatching}
-                onClick={() => handleBulkDispatch([])}
-              >
-                下发当前筛选
-              </Button>
-            )}
             {canExport && (
               <Button
                 type="link"
                 size="small"
                 icon={<DownloadOutlined />}
                 loading={exporting}
-                onClick={() => handleExport(selectedRowKeys)}
+                onClick={() => openCandidateExport(selectedRowKeys)}
               >
                 导出选中
               </Button>
@@ -1043,7 +1028,7 @@ export default function ResumesPage() {
                 type="link"
                 size="small"
                 loading={exporting}
-                onClick={() => handleExport([])}
+                onClick={() => openCandidateExport([])}
               >
                 导出当前筛选
               </Button>
@@ -1085,12 +1070,13 @@ export default function ResumesPage() {
           >
             处理简历
           </Button>,
-          canExportResultReport && <Button
-            key="result-report"
-            icon={<DownloadOutlined />}
-            onClick={() => setReportModal({ open: true, range: null, loading: false })}
+          canDispatch && <Button
+            key="dispatch"
+            icon={<SendOutlined />}
+            loading={bulkDispatching}
+            onClick={openBulkDispatch}
           >
-            导出结果报表
+            下发
           </Button>,
           canImport && <Button
             key="undo"
@@ -1105,28 +1091,80 @@ export default function ResumesPage() {
         request={requestCandidates}
       />
       <Modal
-        title="导出简历结果报表"
-        open={reportModal.open}
-        okText="导出 Excel"
+        title="批量下发"
+        open={bulkDispatchModal.open}
+        okText="确认下发"
         cancelText="取消"
-        confirmLoading={reportModal.loading}
-        okButtonProps={{ disabled: !reportModal.range?.[0] || !reportModal.range?.[1] }}
-        onOk={handleExportResultReport}
+        confirmLoading={bulkDispatching}
+        okButtonProps={{
+          disabled: bulkDispatchModal.scope === 'selected'
+            ? bulkDispatchModal.candidateIds.length === 0
+            : !Object.values(bulkDispatchModal.filters).some((value) => value?.length),
+        }}
+        onOk={submitBulkDispatch}
         onCancel={() => {
-          if (!reportModal.loading) setReportModal({ open: false, range: null, loading: false })
+          if (!bulkDispatching) {
+            setBulkDispatchModal((previous) => ({ ...previous, open: false }))
+          }
         }}
       >
         <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-          <Typography.Text>
-            按应聘记录首次导入日期导出全部结果，不受当前表格筛选影响。
-          </Typography.Text>
-          <DatePicker.RangePicker
-            value={reportModal.range}
-            onChange={(range) => setReportModal((prev) => ({ ...prev, range }))}
-            style={{ width: '100%' }}
+          <Alert
+            type="info"
+            showIcon
+            message="只处理当前志愿下状态为“待下发”的有效记录，其他候选人会计入跳过。"
           />
+          <Radio.Group
+            value={bulkDispatchModal.scope}
+            onChange={(event) => setBulkDispatchModal((previous) => ({
+              ...previous,
+              scope: event.target.value,
+            }))}
+          >
+            <Space direction="vertical">
+              <Radio
+                value="selected"
+                disabled={!bulkDispatchModal.candidateIds.length}
+              >
+                当前选中（冻结 {bulkDispatchModal.candidateIds.length} 人）
+              </Radio>
+              <Radio value="filters">按业务枚举筛选</Radio>
+            </Space>
+          </Radio.Group>
+          {bulkDispatchModal.scope === 'filters' && (
+            <Space direction="vertical" size="small" style={{ width: '100%' }}>
+              {[
+                ['system_statuses', '简历状态', Object.entries(SYSTEM_STATUS_OPTIONS).map(([value, item]) => ({ value, label: item.text }))],
+                ['current_entity_in', '招聘主体', bulkDispatchModal.options.current_entity || []],
+                ['current_position_name_in', '投递岗位', bulkDispatchModal.options.current_position_name || []],
+                ['job_department_name_in', '岗位部门', bulkDispatchModal.options.job_department_name || []],
+                ['current_job_category_in', '岗位类别', bulkDispatchModal.options.current_job_category || []],
+                ['school_tag_in', '院校标签', bulkDispatchModal.options.school_tag || []],
+                ['allocation_source', '分配来源', Object.entries(SOURCE_TEXT).map(([value, label]) => ({ value, label }))],
+              ].map(([key, label, options]) => (
+                <div key={key}>
+                  <Typography.Text type="secondary">{label}</Typography.Text>
+                  <Select
+                    mode="multiple"
+                    allowClear
+                    value={bulkDispatchModal.filters[key] || []}
+                    options={options}
+                    onChange={(value) => updateBulkDispatchFilter(key, value)}
+                    style={{ width: '100%', marginTop: 4 }}
+                  />
+                </div>
+              ))}
+            </Space>
+          )}
         </Space>
       </Modal>
+      <ResumeExportModal
+        open={Boolean(exportTarget)}
+        userKey={user?.id || user?.username}
+        exporting={exporting}
+        onCancel={() => setExportTarget(null)}
+        onExport={handleExport}
+      />
       <ResumeProcessModal
         open={processModalOpen}
         processing={processing}
@@ -1362,16 +1400,6 @@ export default function ResumesPage() {
                     render: (value) => (value == null ? '-' : `${Math.round(value * 100)}%`),
                   },
                   {
-                    title: 'AI 专项',
-                    key: 'ai_specialist',
-                    width: 120,
-                    render: (_, decision) => decision.ai_specialist_match ? (
-                      <Tag color={decision.special_route_applied ? 'purple' : 'blue'}>
-                        {decision.special_route_applied ? '已强制分配' : `${Math.round((decision.ai_specialist_confidence || 0) * 100)}%`}
-                      </Tag>
-                    ) : '-',
-                  },
-                  {
                     title: '固定评估岗位',
                     dataIndex: 'evaluated_job_name',
                     ellipsis: true,
@@ -1429,14 +1457,6 @@ export default function ResumesPage() {
             </Descriptions.Item>
             <Descriptions.Item label="固定评估岗位">{agentDecisionDetail.evaluated_job_name || '-'}</Descriptions.Item>
             <Descriptions.Item label="Rule 固定二级部门">{agentDecisionDetail.recommended_department_name || '-'}</Descriptions.Item>
-            <Descriptions.Item label="AI 专项匹配">
-              {agentDecisionDetail.ai_specialist_match
-                ? `${Math.round((agentDecisionDetail.ai_specialist_confidence || 0) * 100)}%${agentDecisionDetail.special_route_applied ? '（已强制分配）' : ''}`
-                : '未命中'}
-            </Descriptions.Item>
-            <Descriptions.Item label="专项证据" span={2}>
-              {(agentDecisionDetail.ai_specialist_evidence || []).join('；') || '-'}
-            </Descriptions.Item>
             <Descriptions.Item label="摘要" span={2}>{agentDecisionDetail.summary || '-'}</Descriptions.Item>
             <Descriptions.Item label="理由" span={2}>{agentDecisionDetail.reason || '-'}</Descriptions.Item>
             <Descriptions.Item label="简历证据" span={2}>{(agentDecisionDetail.evidence || []).join('；') || '-'}</Descriptions.Item>

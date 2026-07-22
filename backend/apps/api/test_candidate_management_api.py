@@ -1,5 +1,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from io import BytesIO
+import zipfile
 
 from django.contrib.auth.models import Group
 from django.test import TestCase
@@ -149,7 +151,12 @@ class ContactCandidateExportApiTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["X-Export-Count"], "1")
-        self.assertEqual(response.content.decode("utf-8"), "selected resume")
+        self.assertEqual(response["X-Export-Candidate-Count"], "1")
+        with zipfile.ZipFile(BytesIO(response.content)) as archive:
+            self.assertEqual(
+                archive.read("简历文件/候选人甲.txt").decode("utf-8"),
+                "selected resume",
+            )
 
     def test_contact_filtered_export_respects_candidate_filters(self):
         with TemporaryDirectory() as media_root:
@@ -167,4 +174,9 @@ class ContactCandidateExportApiTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["X-Export-Count"], "1")
-        self.assertEqual(response.content.decode("utf-8"), "filtered resume")
+        self.assertEqual(response["X-Export-Candidate-Count"], "1")
+        with zipfile.ZipFile(BytesIO(response.content)) as archive:
+            self.assertEqual(
+                archive.read("简历文件/候选人甲.txt").decode("utf-8"),
+                "filtered resume",
+            )

@@ -6,7 +6,7 @@ import {
   ProFormSwitch,
   ProFormText,
 } from '@ant-design/pro-components'
-import { Button, Popconfirm, Select, Space, Tabs, Tag, Tree, message } from 'antd'
+import { Button, Modal, Popconfirm, Space, Tabs, Tag, Tree, message } from 'antd'
 import {
   createRole,
   createUser,
@@ -51,6 +51,7 @@ export default function UsersPage() {
   const [permissionTree, setPermissionTree] = useState([])
   const [userModal, setUserModal] = useState({ open: false, record: null })
   const [roleModal, setRoleModal] = useState({ open: false, record: null })
+  const [permissionModalOpen, setPermissionModalOpen] = useState(false)
   const [activeRole, setActiveRole] = useState(null)
   const [checkedPermissions, setCheckedPermissions] = useState([])
   const [savingPermissions, setSavingPermissions] = useState(false)
@@ -187,6 +188,7 @@ export default function UsersPage() {
             onClick={() => {
               setActiveRole(record)
               setCheckedPermissions(record.permissions || [])
+              setPermissionModalOpen(true)
             }}
           >
             配置权限
@@ -206,6 +208,7 @@ export default function UsersPage() {
       message.success('角色权限已保存')
       roleActionRef.current?.reload()
       await loadOptions()
+      setPermissionModalOpen(false)
     } finally {
       setSavingPermissions(false)
     }
@@ -261,41 +264,40 @@ export default function UsersPage() {
               />
             ),
           },
-          {
-            key: 'permissions',
-            label: '权限配置',
-            children: (
-              <Space direction="vertical" style={{ width: '100%' }} size={16}>
-                <Select
-                  placeholder="选择角色"
-                  style={{ width: 320 }}
-                  options={roleOptions}
-                  value={activeRole?.id}
-                  onChange={(id) => {
-                    const role = roles.find((item) => item.id === id)
-                    setActiveRole(role)
-                    setCheckedPermissions(role?.permissions || [])
-                  }}
-                />
-                <Tree
-                  checkable
-                  treeData={treeData(permissionTree)}
-                  checkedKeys={checkedPermissions}
-                  onCheck={(keys) => setCheckedPermissions(keys)}
-                />
-                <Button
-                  type="primary"
-                  disabled={!activeRole}
-                  loading={savingPermissions}
-                  onClick={saveRolePermissions}
-                >
-                  保存权限
-                </Button>
-              </Space>
-            ),
-          },
         ]}
       />
+
+      <Modal
+        title={`配置权限：${activeRole?.name || ''}`}
+        open={permissionModalOpen}
+        destroyOnHidden
+        onCancel={() => {
+          setPermissionModalOpen(false)
+          setActiveRole(null)
+          setCheckedPermissions([])
+        }}
+        footer={[
+          <Button key="cancel" onClick={() => setPermissionModalOpen(false)}>
+            取消
+          </Button>,
+          <Button
+            key="save"
+            type="primary"
+            disabled={!activeRole}
+            loading={savingPermissions}
+            onClick={saveRolePermissions}
+          >
+            保存权限
+          </Button>,
+        ]}
+      >
+        <Tree
+          checkable
+          treeData={treeData(permissionTree)}
+          checkedKeys={checkedPermissions}
+          onCheck={(keys) => setCheckedPermissions(keys)}
+        />
+      </Modal>
 
       <ModalForm
         title={userModal.record ? '编辑用户' : '新增用户'}

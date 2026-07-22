@@ -1,10 +1,10 @@
-# 智能简历筛选系统
+# 简历宝
 
-校招智能简历筛选系统。候选人采用 Rule-first 主流程：「Step1 查重与志愿排序 → Step2 院校分类及学历/院校准入 → Step3 Rule 前置检查 → Step4 AI 深度筛选（仅 AI 模式）」。岗位需求、部门和接口人是独立维护的基础数据。系统按正式项目方式建设：后端启用登录与 RBAC 权限校验，前端菜单和按钮由后端权限码驱动；AI Agent 与专项强制分流已接入，W3 认证和 WeLink 真实下发仍待外部接口确认。
+“简历宝”是面向校园招聘的智能简历筛选平台。候选人采用 Rule-first 主流程：「Step1 查重与志愿排序 → Step2 院校分类及学历/院校准入 → Step3 Rule 前置检查 → Step4 AI 深度筛选（仅 AI 模式）」。岗位需求、部门和接口人是独立维护的基础数据。系统按正式项目方式建设：后端启用登录与 RBAC 权限校验，前端菜单和按钮由后端权限码驱动；AI Agent 与专项强制分流已接入，W3 认证和 WeLink 真实下发仍待外部接口确认。
 
 设计文档以 [`docs/需求描述.md`](docs/需求描述.md)、[`docs/后端设计.md`](docs/后端设计.md)、[`docs/数据库设计.md`](docs/数据库设计.md)、[`docs/前端设计.md`](docs/前端设计.md) 为准。
 
-当前实现已包含：候选人聚合简历库、招聘分析看板、精确处理结果/原因筛选、可拖拽列宽、PDF 预览和筛选导出、Token 登录、RBAC、加密增量备份与隔离恢复演练，以及 Rule-first 流程、真实 PDF/OCR 解析、OpenAI 结构化输出、AI 专项强制分配、决策审计和 HR 处置闭环。
+当前实现已包含：候选人聚合简历库、招聘分析看板、精确处理结果/原因筛选、可拖拽列宽、PDF 预览和筛选导出、Token 登录、RBAC、加密增量备份与隔离恢复演练，以及 Rule-first 流程、真实 PDF/OCR 解析、OpenAI 结构化输出、后台智能路由审计和 HR 处置闭环。
 
 > 上生产前仍需完成真实数据隐私评审、模型评测、容量压测和外部系统联调；本轮不包含 worker heartbeat 超时恢复、Prometheus/集中日志/告警、3 万条压测、CI 或浏览器 E2E。
 
@@ -113,21 +113,20 @@ git checkout --detach <交付说明中的发布标签或 commit>
 
 ### 3. 创建服务器 `.env`
 
-在项目根目录复制 `.env.example` 为 `.env`。Docker Compose 会自动读取该文件。
+推荐直接使用项目部署脚本。首次运行会创建权限为 `600` 的 `.env`，自动生成三项独立随机密钥，然后退出等待确认目标服务器信息：
 
 ```bash
-cp .env.example .env
+bash skills/smart-resume-offline-deploy/scripts/deploy.sh
 ```
 
-必须修改：
+镜像版本、端口、Gunicorn/worker/OCR 参数、数据库名与用户、备份周期及保留策略均已预先写入模板。现场只需确认：
 
-- `DJANGO_SECRET_KEY`：换成随机长字符串。
-- `POSTGRES_PASSWORD`：换成强密码。
-- `RESTIC_PASSWORD`：换成独立强密码，不得与数据库密码或 `DJANGO_SECRET_KEY` 相同。
-- `BACKUP_TARGET_PATH`：生产环境指向异机挂载或外置磁盘，不要放在 Docker 数据卷所在的同一块本机磁盘。
 - `DJANGO_ALLOWED_HOSTS`：填服务器 IP 或域名，多个值用英文逗号分隔。
-- `APP_VERSION`：建议发布时改成明确版本号，如 `2026-07-03-1`，方便回滚和排查。
-- `DOCKER_PLATFORM`：内网服务器是常见 x86_64 Linux 时保持 `linux/amd64`；如果是 ARM 服务器，改成 `linux/arm64` 后重新构建镜像包。
+- `BACKUP_TARGET_PATH`：默认约定为 `/mnt/smart-resume-filter-backups`。先把异机共享目录或外置磁盘挂载到这里；现场挂载点不同才修改该值。脚本会拒绝不存在、不可写或非绝对路径。
+
+确认后再次运行同一命令即可部署。`DJANGO_SECRET_KEY`、`POSTGRES_PASSWORD` 和 `RESTIC_PASSWORD` 由脚本从 `/dev/urandom` 自动生成且不回显。检测到旧容器或旧数据卷时，脚本绝不重新生成密钥；升级或灾后重建必须恢复原 `.env`，否则数据库可能无法连接，既有 AI 连接密文也可能无法解密。
+
+源码部署到 ARM 服务器时才需要把 `DOCKER_PLATFORM` 改为 `linux/arm64`；离线发布包已经固定为 `linux/amd64`，`APP_VERSION` 也由发布脚本写入，不在部署现场决定。
 
 启用 AI 模式前，使用管理员账号进入「系统设置 → AI 模型连接」完成连接配置并执行测试。内网 DeepSeek V4 与 GLM 4.7 共用同一地址；页面配置 Base URL、可选访问令牌和 API 风格，并通过该地址的 OpenAI-compatible `GET /models` 获取模型 ID（也可直接输入），不配置服务商/Profile。模型连接只从系统设置中的数据库配置读取，部署环境变量不会参与决定。API Key 非空时仅允许写入并加密保存，页面和 API 均不会回显；无鉴权内网服务可留空。未配置可用连接时内部决策可记录 `ai_not_configured`，候选人级统一映射为 `needs_attention + ai_connection_error`，不会回退 Rule。
 
@@ -287,7 +286,7 @@ docker compose logs --tail=100 ai-worker
 - 应用版本、数据库版本、备份时间、文件数量、大小和 SHA-256 清单。
 - `BACKUP_TARGET_PATH/status/` 下的最近尝试（含失败原因）、最近成功和 Prometheus 文本格式状态文件（本轮不部署 Prometheus/告警服务）。
 
-生产环境必须先在 `.env` 配置独立的 `RESTIC_PASSWORD`，并把 `BACKUP_TARGET_PATH` 指向异机挂载或外置磁盘。仓库默认保留 48 个小时版本、30 个每日版本和 12 个每月版本。手工执行一次备份：
+生产环境的 `RESTIC_PASSWORD` 由首次部署脚本自动生成，并把 `BACKUP_TARGET_PATH` 指向已挂载的异机或外置存储。仓库默认保留 48 个小时版本、30 个每日版本和 12 个每月版本。手工执行一次备份：
 
 ```bash
 docker compose --profile backup run --rm backup
@@ -340,7 +339,7 @@ docker compose up -d
 
 ### 10. AI Agent 配置
 
-以下 AI 运行阈值、超时、并发、重试和专项分流参数统一在「系统设置 → AI 模型连接」的“AI 运行参数”“AI 专项配置”页签维护：
+「系统设置 → AI 模型连接」包含“模型连接”“AI 运行参数”和“AI 专项”三个页签。AI 运行参数页维护：
 
 - `ai_dispatch_threshold`
 - `ai_review_threshold`
@@ -348,12 +347,10 @@ docker compose up -d
 - `ai_concurrency`（所有 worker/运行共享的自适应并发上限，默认 8，范围 1–20）
 - `ai_retry_count`
 - `ai_retry_backoff_seconds`
-- `ai_special_route_enabled`（默认关闭）
-- `ai_special_route_threshold`（默认 0.90，严格大于才触发）
-- `ai_special_route_secondary_contact_id`
-- `ai_special_route_tertiary_contact_id`
 
-上述模型连接、运行参数和专项配置均由 `settings.manage_ai_connection` 保护；管理员角色默认拥有该权限，也可在「用户权限」按角色授予。模型连接页配置共享内网 Base URL、API 风格和可选 API Key，通过 `GET /models` 获取模型 ID，同时允许直接输入模型 ID，并执行一次最小真实模型测试，不展示服务商/Profile。API Key 非空时仅可写入；服务端用 Django `SECRET_KEY` 派生的 Fernet 密钥加密存储，GET、前端状态和测试结果都不会返回明文或密文。未获授权的 HR 和接口人不可见、不可调用相关配置、模型发现和测试接口。系统不再提供全局 AI 分配开关；当前完整连接配置测试有效时，上传和处理简历才可选择 AI。
+模型连接和运行参数均由 `settings.manage_ai_connection` 保护；管理员角色默认拥有该权限，也可在「用户权限」按角色授予。模型连接页配置共享内网 Base URL、API 风格和可选 API Key，通过 `GET /models` 获取模型 ID，同时允许直接输入模型 ID，并执行一次最小真实模型测试，不展示服务商/Profile。API Key 非空时仅可写入；服务端用 Django `SECRET_KEY` 派生的 Fernet 密钥加密存储，GET、前端状态和测试结果都不会返回明文或密文。未获授权的 HR 和接口人不可见、不可调用相关配置、模型发现和测试接口。系统不再提供全局 AI 分配开关；当前完整连接配置测试有效时，上传和处理简历才可选择 AI。
+
+“AI 专项”页签维护默认关闭的 `ai_special_route_enabled / ai_special_route_threshold / ai_special_route_secondary_contact_id / ai_special_route_tertiary_contact_id`：获授权用户选择父级二级接口人后，只能选择其下属三级接口人作为固定目标；已启用状态下切换目标时，页面会先安全关闭专项、更新链路并按最终开关状态恢复。专项命中、证据和内部审计仍不在候选人详情、处理原因或招聘分析中展示。专项证据不足或目标配置失效时会继续普通 AI 结论，不产生候选人报错。
 
 模型连接仅由管理员保存的数据库配置决定；运行时不会读取部署环境变量中的 API 风格、模型、Base URL 或 API Key，也不读取模型服务商/Profile 模板。通常无需为改动模型连接重启 backend/worker。
 
@@ -370,7 +367,7 @@ docker compose logs --tail=200 ai-worker
 上线前至少完成：
 
 - `.env` 不提交 Git，不复制到公开位置。
-- `DJANGO_SECRET_KEY` 和 `POSTGRES_PASSWORD` 已改为强随机值。
+- `.env` 权限为 `600`，且 `DJANGO_SECRET_KEY`、`POSTGRES_PASSWORD`、`RESTIC_PASSWORD` 已由首次部署脚本分别生成强随机值。
 - `DJANGO_DEBUG=False`。
 - `DJANGO_ALLOWED_HOSTS` 只填写实际 IP/域名，避免长期使用 `*`。
 - PostgreSQL `5432` 和 Redis `6379` 不暴露到公网；如无外部访问需求，只允许内网或安全组限制。
@@ -438,7 +435,7 @@ docker compose up -d
 - 二级接口人：只能查看下发给自己的分配，只能转派给本二级部门下的三级接口人。
 - 三级接口人：只能查看转派给自己的分配，并提交通过/未通过反馈。
 
-「系统设置 → AI 模型连接」的“AI 运行参数”和“AI 专项配置”页签维护：
+「系统设置 → AI 模型连接」的“AI 运行参数”页签维护：
 
 - `ai_dispatch_threshold`
 - `ai_review_threshold`
@@ -446,21 +443,17 @@ docker compose up -d
 - `ai_concurrency`（所有 worker/运行共享的自适应并发上限，默认 8，范围 1–20）
 - `ai_retry_count`
 - `ai_retry_backoff_seconds`
-- `ai_special_route_enabled`（默认关闭）
-- `ai_special_route_threshold`（默认 0.90，严格大于才触发）
-- `ai_special_route_secondary_contact_id`
-- `ai_special_route_tertiary_contact_id`
 
 「配置项」已删除“系统参数”页签，只保留院校标签、院校准入和专业词表等业务配置。`welink_enabled` 开关移动到「数据管理 → 部门接口人」页面，由部门接口人维护权限控制；全局 AI 分配开关不再提供。
 
-拥有 `settings.manage_ai_connection` 的角色可在「系统设置 → AI 模型连接」配置共享内网 Base URL、API 风格和可选 API Key，通过 `GET /models` 选择或直接输入模型 ID，并执行最小真实模型测试；同页还集中维护 AI 运行参数和 AI 专项配置。管理员角色默认拥有该权限，HR/接口人未被授权时不可访问。页面不展示服务商/Profile。Key 非空时仅允许写入、不会被读取接口返回，服务端以由 Django `SECRET_KEY` 派生的 Fernet 密文存储。运行时只读取该数据库配置。日常修改连接请使用授权角色的配置页，避免在 shell、文档或工单中传播 API Key。当前完整连接配置测试成功后，上传和“处理简历”弹窗才会开放 AI 模式；保存连接或清除 Key 后测试状态失效，只能选择 Rule，直至重新测试成功。
+拥有 `settings.manage_ai_connection` 的角色可在「系统设置 → AI 模型连接」配置共享内网 Base URL、API 风格和可选 API Key，通过 `GET /models` 选择或直接输入模型 ID，并执行最小真实模型测试；同页还集中维护 AI 运行参数和“AI 专项”路由。管理员角色默认拥有该权限，HR/接口人未被授权时不可访问。页面不展示服务商/Profile；专项内部命中证据和审计字段仍不对外展示。Key 非空时仅允许写入、不会被读取接口返回，服务端以由 Django `SECRET_KEY` 派生的 Fernet 密文存储。运行时只读取该数据库配置。日常修改连接请使用授权角色的配置页，避免在 shell、文档或工单中传播 API Key。当前完整连接配置测试成功后，上传和“处理简历”弹窗才会开放 AI 模式；保存连接或清除 Key 后测试状态失效，只能选择 Rule，直至重新测试成功。
 
 ## 主要流程
 
 1. 使用 `admin` 或 `hr` 登录。
 2. 在简历库、岗位需求、院校清单、部门接口人页面导入对应 Excel/简历包；岗位表的“工作职责”列必填，缺失职责的岗位行会被跳过并返回行号，其余行继续导入。也可先执行 `gen_sample` 和 `load_sample`。
 3. 上传简历和人工“处理简历”都选择本次 Rule / AI 模式并只创建一条运行：上传 Rule 执行 Step1–Step3、AI 执行 Step1–Step4，人工处理从 Step2 开始。Rule 始终可选，当前模型连接测试有效时才可选 AI。AI 会把当前岗位工作职责（最多 12,000 字符）纳入岗位要求分析；历史岗位未补工作职责时转为“需处理”，不调用模型。生产 AI Step4 由有界调度器投递专用 `ai` 队列，所有 AI worker 共享 Redis 自适应并发上限。
-4. HR 在简历库查看处理完成、需处理、模型超时失败及精确原因，并处置待下发、待复核和专项强制分配结果。
+4. HR 在简历库查看处理完成、需处理、模型超时失败及精确原因，并处置待下发、待复核和 AI 自动分配结果。后台智能路由不显示独立标签、原因或证据。
 5. HR 单条、批量或一键全部下发给二级接口人。
 6. 二级接口人登录后仅看到自己的分配，可导出简历并转派本部门三级接口人。
 7. 三级接口人登录后仅看到转派给自己的分配，可导出简历并提交反馈。
@@ -489,7 +482,7 @@ docker compose up -d
 | GET | `/api/pipeline/runs/` | 处理运行记录 |
 | GET | `/api/analytics/recruitment-overview/` | 需要 `analytics.view`；按导入 cohort 返回招聘总览、转化、耗时、趋势和分布，默认最近 30 天，缓存 5 分钟 |
 | GET | `/api/allocation-mode/` | 具有 `pipeline.run` 或 `resume.import` 权限时返回 `default_mode`、`available_modes` 和 `ai_ready`，不泄露模型连接信息 |
-| GET/PATCH | `/api/ai-connection/settings/`、`/api/ai-connection/settings/{key}/` | 具有 `settings.manage_ai_connection` 权限时读取/更新 AI 运行参数和 AI 专项配置 |
+| GET/PATCH | `/api/ai-connection/settings/`、`/api/ai-connection/settings/{key}/` | 具有 `settings.manage_ai_connection` 权限时读取/更新 AI 运行参数和“AI 专项”配置；页面按 `runtime / special_route` 分页签展示 |
 | GET | `/api/workflow-attempts/` | 分配尝试，后端按登录用户过滤数据范围 |
 | POST | `/api/workflow-attempts/{id}/dispatch/` | HR 单条下发 |
 | POST | `/api/workflow-attempts/bulk-dispatch/` | HR 批量或一键全部下发 |

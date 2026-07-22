@@ -16,7 +16,7 @@ export const allRoute = {
   routes: [
     {
       path: '/analytics',
-      name: 'DashBoard',
+      name: '数据看板',
       icon: <BarChartOutlined />,
     },
     {

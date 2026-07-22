@@ -61,7 +61,7 @@ export default function MajorDictionaryTab() {
   const categoryOptions = useMemo(
     () =>
       categories.map((category) => ({
-        label: `${category.name}（${category.code}）`,
+        label: category.name,
         value: category.id,
       })),
     [categories],
@@ -69,7 +69,7 @@ export default function MajorDictionaryTab() {
 
   const saveCategory = async (values) => {
     const body = {
-      code: values.code,
+      code: categoryModal.record?.code || String(values.name || '').trim(),
       name: values.name,
       description: values.description || '',
       is_active: Boolean(values.is_active),
@@ -112,14 +112,7 @@ export default function MajorDictionaryTab() {
   }
 
   const categoryBaseColumns = [
-    {
-      title: '编码',
-      dataIndex: 'code',
-      width: 170,
-      fixed: 'left',
-      filter: { type: 'text', param: 'code', placeholder: '筛选编码' },
-    },
-    { title: '名称', dataIndex: 'name', width: 180, filter: { type: 'text', param: 'name', placeholder: '筛选名称' } },
+    { title: '名称', dataIndex: 'name', width: 180, fixed: 'left', filter: { type: 'text', param: 'name', placeholder: '筛选名称' } },
     {
       title: '说明',
       dataIndex: 'description',
@@ -344,11 +337,6 @@ export default function MajorDictionaryTab() {
         initialValues={categoryInitialValues}
         onFinish={saveCategory}
       >
-        <ProFormText
-          name="code"
-          label="大类编码"
-          rules={[{ required: true, message: '请输入大类编码' }]}
-        />
         <ProFormText
           name="name"
           label="大类名称"

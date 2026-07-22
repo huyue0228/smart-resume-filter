@@ -77,6 +77,19 @@ def latest_effective_attempt(workflow, resume_id=None):
     return sorted(attempts, key=lambda attempt: (attempt.attempt_no, attempt.id))[-1]
 
 
+def latest_processing_scope_item(candidate, run_id=None):
+    """返回简历库当前展示的候选人处理结果。
+
+    未指定运行时取候选人全部处理记录中的最新一条；从处理任务跳转进入
+    简历库时，只在该运行范围内取最新一条。筛选和序列化必须共用这个口径，
+    否则历史原因会命中筛选，但列表展示的是另一条更新记录。
+    """
+    items = list(candidate.processing_scope_items.all())
+    if run_id not in (None, ""):
+        items = [item for item in items if str(item.run_id) == str(run_id)]
+    return max(items, key=lambda item: (item.created_at, item.id)) if items else None
+
+
 def allocation_source(candidate):
     """返回简历库主列表应展示的分配来源。
 

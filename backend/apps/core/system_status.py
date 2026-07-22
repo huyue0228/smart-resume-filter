@@ -8,17 +8,21 @@ from apps.core.name_pinyin import name_to_pinyin
 
 
 RAW = "raw"
-CLASSIFIED = "classified"
-ALLOCATED = "allocated"
+ARCHIVED = "archived"
+PENDING_REALLOCATION = "pending_reallocation"
+PENDING_REVIEW = "pending_review"
+PENDING_DISPATCH = "pending_dispatch"
 PENDING_SCREENING = "pending_screening"
 SCREENING_PASSED = "screening_passed"
 SCREENING_REJECTED = "screening_rejected"
 
 LABELS = {
     RAW: "待处理",
-    CLASSIFIED: "已分类",
-    ALLOCATED: "已分配",
-    PENDING_SCREENING: "待筛选",
+    ARCHIVED: "已归档",
+    PENDING_REALLOCATION: "待重新分配",
+    PENDING_REVIEW: "待复核",
+    PENDING_DISPATCH: "待下发",
+    PENDING_SCREENING: "待业务反馈",
     SCREENING_PASSED: "通过",
     SCREENING_REJECTED: "不通过",
 }
@@ -33,6 +37,10 @@ ACTIVE_ATTEMPT_STATUSES = {
 }
 
 
+class InvalidSystemStatus(ValueError):
+    pass
+
+
 def normalize_statuses(value):
     if not value:
         return []
@@ -40,7 +48,13 @@ def normalize_statuses(value):
         values = value.split(",")
     else:
         values = value
-    return [item for item in [str(v).strip() for v in values] if item in LABELS]
+    normalized = [str(item).strip() for item in values if str(item).strip()]
+    unknown = sorted(set(normalized) - set(LABELS))
+    if unknown:
+        raise InvalidSystemStatus(
+            f"不支持的简历状态：{','.join(unknown)}；可选值为 {','.join(LABELS)}"
+        )
+    return list(dict.fromkeys(normalized))
 
 
 def normalize_workflow_statuses(value):
@@ -73,31 +87,26 @@ def current_resume(candidate, workflow=None):
 
 def candidate_system_status(candidate):
     workflow = _workflow(candidate)
-    attempt = _latest_effective_attempt(workflow)
-    if workflow and workflow.status == m.CandidateWorkflow.STATUS_PASSED:
-        return SCREENING_PASSED
+    resume = current_resume(candidate, workflow)
+    attempt = candidate_summary.latest_effective_attempt(
+        workflow, resume_id=resume.id if resume else None
+    )
     if attempt and attempt.status == m.AssignmentAttempt.STATUS_PASSED:
         return SCREENING_PASSED
     if attempt and attempt.status == m.AssignmentAttempt.STATUS_REJECTED:
-        return SCREENING_REJECTED
-    if (
-        workflow
-        and workflow.status == m.CandidateWorkflow.STATUS_ARCHIVED
-        and workflow.archive_reason == m.CandidateWorkflow.ARCHIVE_ALL_REJECTED
-    ):
         return SCREENING_REJECTED
     if attempt and attempt.status in [
         m.AssignmentAttempt.STATUS_DISPATCHED_L2,
         m.AssignmentAttempt.STATUS_ASSIGNED_L3,
     ]:
         return PENDING_SCREENING
-    if attempt and attempt.status in [
-        m.AssignmentAttempt.STATUS_PENDING_REVIEW,
-        m.AssignmentAttempt.STATUS_PENDING_DISPATCH,
-    ]:
-        return ALLOCATED
-    resume = current_resume(candidate, workflow)
-    return CLASSIFIED if _is_classified(candidate, resume) else RAW
+    if attempt and attempt.status == m.AssignmentAttempt.STATUS_PENDING_REVIEW:
+        return PENDING_REVIEW
+    if attempt and attempt.status == m.AssignmentAttempt.STATUS_PENDING_DISPATCH:
+        return PENDING_DISPATCH
+    if workflow and workflow.block_reason == m.CandidateWorkflow.BLOCK_JOB_HC_EXHAUSTED:
+        return PENDING_REALLOCATION
+    return ARCHIVED if _has_processing_evidence(candidate, workflow) else RAW
 
 
 def system_status_label(status):
@@ -153,7 +162,7 @@ def filter_queryset_by_processing_result(qs, params):
     if not result:
         return qs.filter(processing_scope_items__run_id=run_id).distinct()
     if result not in PROCESSING_RESULT_VALUES:
-        return qs.none()
+        raise ValueError(f"不支持的处理结果：{result}")
 
     result_types = {
         "success": m.ProcessingRunScopeItem.RESULT_COMPLETED,
@@ -339,19 +348,15 @@ def apply_candidate_filters(qs, params):
             qs,
             lambda candidate: candidate_summary.reason(candidate)[0] == expected_reason,
         )
-    processing_result = _value(params, "result_type")
-    reason_code = _value(params, "reason_code")
+    reason_codes = _list_value(params, "reason_code")
     run_id = _value(params, "processing_run_id")
-    if processing_result:
-        filters = {"processing_scope_items__result_type": processing_result}
-        if run_id:
-            filters["processing_scope_items__run_id"] = run_id
-        qs = qs.filter(**filters)
-    if reason_code:
-        filters = {"processing_scope_items__reason_code": reason_code}
-        if run_id:
-            filters["processing_scope_items__run_id"] = run_id
-        qs = qs.filter(**filters)
+    if reason_codes:
+        # 原因筛选必须命中列表当前 ScopeItem；主表不再支持处理结果表头筛选。
+        def matches_current_processing_item(candidate):
+            item = candidate_summary.latest_processing_scope_item(candidate, run_id)
+            return bool(item and item.reason_code in reason_codes)
+
+        qs = _filter_by_candidate_summary(qs, matches_current_processing_item)
     if _value(params, "imported_after"):
         qs = qs.filter(imported_at__date__gte=_value(params, "imported_after"))
     if _value(params, "imported_before"):
@@ -474,27 +479,30 @@ def _workflow(candidate):
         return None
 
 
-def _latest_effective_attempt(workflow):
-    if not workflow:
-        return None
-    attempts = [
-        attempt
-        for attempt in workflow.attempts.all()
-        if attempt.status in ACTIVE_ATTEMPT_STATUSES
-    ]
-    if not attempts:
-        return None
-    return sorted(attempts, key=lambda attempt: (attempt.attempt_no, attempt.id))[-1]
-
-
-def _is_classified(candidate, resume):
-    if not resume or not resume.job_category:
-        return False
-    return bool(
-        candidate.first_degree_tag_id
-        or candidate.highest_degree_tag_id
-        or candidate.first_degree_platform
-        or candidate.highest_degree_platform
+def _has_processing_evidence(candidate, workflow):
+    """排队/提交不算处理；只认已落地的筛选、决策、尝试或业务阻塞证据。"""
+    if workflow:
+        if workflow.archive_reason or workflow.block_reason or workflow.started_at:
+            return True
+        if list(workflow.attempts.all()):
+            return True
+        if workflow.agent_decisions.exists():
+            return True
+    if any(
+        resume.category_mode in {"rule", "ai"} or bool(resume.job_category)
+        for resume in candidate.resumes.all()
+    ):
+        return True
+    terminal_statuses = {
+        "success",
+        "needs_attention",
+        "failed",
+        "skipped_manual_change",
+        "cancelled",
+    }
+    return any(
+        bool(item.result_type) or item.status in terminal_statuses
+        for item in candidate.processing_scope_items.all()
     )
 
 
@@ -518,7 +526,7 @@ def _list_value(params, key):
                 for item in str(value).split(",")
                 if item.strip()
             ]
-    value = _value(params, key)
+    value = params.get(key) if hasattr(params, "get") else None
     if value is None:
         return []
     if isinstance(value, list):

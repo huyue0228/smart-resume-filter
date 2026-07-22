@@ -1,63 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Alert, Button, InputNumber, Select, Space, Switch, Tag, message } from 'antd'
+import { Alert, Button, InputNumber, Space, Switch, Tag, message } from 'antd'
 import {
   fetchAIConnectionSettings,
   updateAIConnectionSetting,
 } from '../../api/services'
 import SmartDataTable from '../../components/SmartDataTable'
 
-const SECTION_META = {
-  runtime: {
-    title: 'AI 运行参数',
-    description: '这些参数只影响新提交的 AI 处理任务，不改变已经运行或完成的任务。',
-  },
-  special_route: {
-    title: 'AI 专项配置',
-    description: '专项分流默认关闭；启用前需先保存有效的父级二级接口人和目标三级接口人。',
-  },
-}
-
-function ContactSelect({ record, value, onChange, contacts, drafts }) {
-  const secondaryId = Number(drafts.ai_special_route_secondary_contact_id || 0)
-  const selectedSecondary = contacts.find((item) => item.id === secondaryId)
-  const isSecondary = record.key === 'ai_special_route_secondary_contact_id'
-  const level = isSecondary ? 'secondary' : 'tertiary'
-  const options = contacts.filter((item) => {
-    if (item.contact_level !== level) return false
-    if (isSecondary || !selectedSecondary) return true
-    return item.parent_department === selectedSecondary.department
-  })
-
-  return (
-    <Select
-      showSearch
-      style={{ width: '100%' }}
-      value={Number(value || 0)}
-      optionFilterProp="label"
-      onChange={onChange}
-      options={[
-        { value: 0, label: '未配置' },
-        ...options.map((item) => ({
-          value: item.id,
-          label: `${item.name}（${item.employee_no} / ${item.department_name || '-'}）`,
-        })),
-      ]}
-    />
-  )
-}
-
-function SettingEditor({ record, value, onChange, contacts, drafts }) {
-  if (record.key.endsWith('_contact_id')) {
-    return (
-      <ContactSelect
-        record={record}
-        value={value}
-        onChange={onChange}
-        contacts={contacts}
-        drafts={drafts}
-      />
-    )
-  }
+function SettingEditor({ record, value, onChange }) {
   if (record.value_type === 'boolean') {
     return <Switch checked={Boolean(value)} onChange={onChange} />
   }
@@ -73,26 +22,22 @@ function SettingEditor({ record, value, onChange, contacts, drafts }) {
   )
 }
 
-export default function AISettingsTab({ section }) {
+export default function AISettingsTab() {
   const [settings, setSettings] = useState([])
-  const [contacts, setContacts] = useState([])
   const [drafts, setDrafts] = useState({})
   const [loading, setLoading] = useState(false)
   const [savingKey, setSavingKey] = useState('')
-  const meta = SECTION_META[section]
-
   const load = useCallback(async () => {
     setLoading(true)
     try {
       const { data } = await fetchAIConnectionSettings()
-      const nextSettings = (data?.settings || []).filter((item) => item.section === section)
+      const nextSettings = (data?.settings || []).filter((item) => item.section === 'runtime')
       setSettings(nextSettings)
-      setContacts(data?.contacts || [])
       setDrafts(Object.fromEntries(nextSettings.map((item) => [item.key, item.value])))
     } finally {
       setLoading(false)
     }
-  }, [section])
+  }, [])
 
   useEffect(() => {
     load()
@@ -132,13 +77,11 @@ export default function AISettingsTab({ section }) {
     {
       title: '值',
       dataIndex: 'value',
-      width: section === 'special_route' ? 300 : 180,
+      width: 180,
       render: (_, record) => (
         <SettingEditor
           record={record}
           value={drafts[record.key]}
-          contacts={contacts}
-          drafts={drafts}
           onChange={(value) => setDrafts((values) => ({ ...values, [record.key]: value }))}
         />
       ),
@@ -162,9 +105,14 @@ export default function AISettingsTab({ section }) {
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <Alert type="info" showIcon message={meta.title} description={meta.description} />
+      <Alert
+        type="info"
+        showIcon
+        message="AI 运行参数"
+        description="这些参数只影响新提交的 AI 处理任务，不改变已经运行或完成的任务。"
+      />
       <SmartDataTable
-        tableId={`ai-settings-${section}`}
+        tableId="ai-settings-runtime"
         rowKey="key"
         loading={loading}
         columns={columns}

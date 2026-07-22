@@ -168,6 +168,7 @@ POSTGRES_DB=srf
 POSTGRES_USER=srf_user
 POSTGRES_PASSWORD=build-only-not-for-deployment
 RESTIC_PASSWORD=build-only-not-for-deployment
+BACKUP_TARGET_PATH=/tmp/smart-resume-release-backups
 EOF
 
 cd "$REPO_ROOT"
