@@ -1,58 +1,116 @@
-import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { LoginForm, ProFormText } from '@ant-design/pro-components'
-import { Alert, Typography } from 'antd'
-import { LockOutlined, UserOutlined } from '@ant-design/icons'
+import { useEffect, useRef, useState } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
+import { Alert, Button, Spin, Typography } from 'antd'
+import { LoginOutlined } from '@ant-design/icons'
 import { APP_NAME } from '../appBrand'
+import { fetchW3OAuth2Status } from '../api/services'
 import BrandLogo from '../components/BrandLogo'
 import { useRole } from '../contexts/roleState'
 
-const { Text } = Typography
+const { Text, Title } = Typography
 
-export default function LoginPage() {
+const OAUTH2_ERROR_MESSAGES = {
+  state_invalid: 'W3 登录状态已失效，请重新发起登录',
+  provider_denied: 'W3 未授权本次登录',
+  authorization_code_missing: 'W3 未返回授权码，请重新登录',
+  token_exchange_failed: 'W3 登录凭据交换失败，请稍后重试',
+  userinfo_failed: '无法获取 W3 用户信息，请稍后重试',
+  employee_no_missing: 'W3 用户信息中缺少工号，请联系管理员',
+  email_missing: 'W3 用户信息中缺少有效邮箱，请联系管理员',
+  account_not_found: '该 W3 工号和邮箱尚未绑定同一系统账号，请联系管理员',
+  account_inactive: '该系统账号已停用，请联系管理员',
+}
+
+function redirectBrowserToW3(url) {
+  window.location.replace(url)
+}
+
+export default function LoginPage({ redirectToW3 = redirectBrowserToW3 }) {
   const navigate = useNavigate()
-  const { login } = useRole()
-  const [error, setError] = useState('')
+  const [searchParams] = useSearchParams()
+  const { completeW3OAuth2Login } = useRole()
+  const oauth2Error = searchParams.get('oauth2_error')
+  const oauth2Success = searchParams.get('oauth2') === 'success'
+  const [error, setError] = useState(
+    oauth2Error
+      ? OAUTH2_ERROR_MESSAGES[oauth2Error] || 'W3 登录失败，请重新登录'
+      : '',
+  )
+  const [startUrl, setStartUrl] = useState(null)
+  const [statusAttempt, setStatusAttempt] = useState(0)
+  const completingRef = useRef(false)
 
-  const handleFinish = async (values) => {
-    setError('')
-    try {
-      await login(values)
-      navigate('/', {
-        replace: true,
+  useEffect(() => {
+    let cancelled = false
+    fetchW3OAuth2Status()
+      .then(({ data }) => {
+        if (cancelled) return
+        const url = data?.ready ? data.start_url : null
+        setStartUrl(url)
+        if (!oauth2Error && !oauth2Success) {
+          if (url) {
+            redirectToW3(url)
+          } else {
+            setError('W3 登录尚未正确配置，请联系管理员')
+          }
+        }
       })
-      return true
-    } catch (err) {
-      setError(err?.response?.data?.detail || '登录失败')
-      return false
+      .catch(() => {
+        if (!cancelled && !oauth2Error && !oauth2Success) {
+          setError('无法获取 W3 登录状态，请稍后重试')
+        }
+      })
+    return () => {
+      cancelled = true
     }
-  }
+  }, [oauth2Error, oauth2Success, redirectToW3, statusAttempt])
+
+  useEffect(() => {
+    if (!oauth2Success || completingRef.current) return
+    completingRef.current = true
+    setError('')
+    completeW3OAuth2Login()
+      .then(() => navigate('/', { replace: true }))
+      .catch((err) => {
+        completingRef.current = false
+        setError(err?.response?.data?.detail || 'W3 登录凭据领取失败，请重新登录')
+      })
+  }, [completeW3OAuth2Login, navigate, oauth2Success])
 
   return (
     <div className="login-shell">
-      <LoginForm
-        logo={<BrandLogo size={44} />}
-        title={APP_NAME}
-        onFinish={handleFinish}
-        submitter={{ searchConfig: { submitText: '登录' } }}
-      >
-        {error && <Alert type="error" showIcon message={error} />}
-        <ProFormText
-          name="username"
-          fieldProps={{ size: 'large', prefix: <UserOutlined /> }}
-          placeholder="用户名"
-          rules={[{ required: true, message: '请输入用户名' }]}
-        />
-        <ProFormText.Password
-          name="password"
-          fieldProps={{ size: 'large', prefix: <LockOutlined /> }}
-          placeholder="密码"
-          rules={[{ required: true, message: '请输入密码' }]}
-        />
-        <Text type="secondary">
-          本地初始化账号可通过 README 查看；生产环境请在 W3 接入后禁用临时密码登录。
-        </Text>
-      </LoginForm>
+      <div className="login-redirect-card">
+        <BrandLogo size={52} />
+        <Title level={3}>{APP_NAME}</Title>
+        {error ? (
+          <>
+            <Alert type="error" showIcon message={error} />
+            <Button
+              block
+              icon={<LoginOutlined />}
+              onClick={() => {
+                if (startUrl) {
+                  redirectToW3(startUrl)
+                  return
+                }
+                setError('')
+                setStatusAttempt((value) => value + 1)
+              }}
+              size="large"
+              type="primary"
+            >
+              {startUrl ? '重新发起 W3 登录' : '重新检查 W3 登录'}
+            </Button>
+          </>
+        ) : (
+          <>
+            <Spin size="large" />
+            <Text type="secondary">
+              {oauth2Success ? '正在完成 W3 登录…' : '正在跳转至 W3 登录…'}
+            </Text>
+          </>
+        )}
+      </div>
     </div>
   )
 }

@@ -87,6 +87,13 @@ export default function UsersPage() {
       filter: { type: 'text', param: 'username', placeholder: '筛选用户名' },
     },
     {
+      title: '邮箱',
+      dataIndex: 'email',
+      width: 220,
+      ellipsis: true,
+      filter: { type: 'text', param: 'email', placeholder: '筛选邮箱' },
+    },
+    {
       title: '角色类型',
       dataIndex: 'role',
       width: 130,
@@ -133,32 +140,36 @@ export default function UsersPage() {
       valueType: 'option',
       width: 170,
       render: (_, record) => (
-        <Space>
-          <a onClick={() => setUserModal({ open: true, record })}>编辑</a>
-          <a
-            onClick={async () => {
-              await updateUser(record.id, { is_active: !record.is_active })
-              message.success(record.is_active ? '已停用' : '已启用')
-              userActionRef.current?.reload()
-            }}
-          >
-            {record.is_active ? '停用' : '启用'}
-          </a>
-          <Popconfirm
-            title="删除用户"
-            description="删除后账号、Token 和角色绑定会清理；若绑定接口人，将同步删除接口人，历史记录仅保留快照。"
-            okText="删除"
-            okButtonProps={{ danger: true }}
-            onConfirm={async () => {
-              await deleteUser(record.id)
-              message.success('用户已删除')
-              await loadOptions()
-              userActionRef.current?.reload()
-            }}
-          >
-            <a style={{ color: '#cf1322' }}>删除</a>
-          </Popconfirm>
-        </Space>
+        record.is_protected ? (
+          <Tag color="gold">内置保护</Tag>
+        ) : (
+          <Space>
+            <a onClick={() => setUserModal({ open: true, record })}>编辑</a>
+            <a
+              onClick={async () => {
+                await updateUser(record.id, { is_active: !record.is_active })
+                message.success(record.is_active ? '已停用' : '已启用')
+                userActionRef.current?.reload()
+              }}
+            >
+              {record.is_active ? '停用' : '启用'}
+            </a>
+            <Popconfirm
+              title="删除用户"
+              description="删除后账号、Token 和角色绑定会清理；若绑定接口人，将同步删除接口人，历史记录仅保留快照。"
+              okText="删除"
+              okButtonProps={{ danger: true }}
+              onConfirm={async () => {
+                await deleteUser(record.id)
+                message.success('用户已删除')
+                await loadOptions()
+                userActionRef.current?.reload()
+              }}
+            >
+              <a style={{ color: '#cf1322' }}>删除</a>
+            </Popconfirm>
+          </Space>
+        )
       ),
     },
   ]
@@ -215,7 +226,7 @@ export default function UsersPage() {
   }
 
   return (
-    <PageContainer title="用户权限" content="维护本地用户、RBAC 角色与后端预置权限点绑定。">
+    <PageContainer title="用户权限" content="维护系统用户、RBAC 角色与后端预置权限点绑定。">
       <Tabs
         items={[
           {
@@ -327,7 +338,14 @@ export default function UsersPage() {
         }}
       >
         <ProFormText name="username" label="用户名" rules={[{ required: true }]} />
-        <ProFormText name="email" label="邮箱" />
+        <ProFormText
+          name="email"
+          label="邮箱"
+          rules={[
+            { required: true, whitespace: true, message: '请输入邮箱' },
+            { type: 'email', message: '请输入有效邮箱' },
+          ]}
+        />
         <ProFormText.Password
           name="password"
           label={userModal.record ? '重置密码' : '密码'}

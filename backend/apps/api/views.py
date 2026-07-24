@@ -1,7 +1,9 @@
 import logging
+import hmac
 import mimetypes
 import os
 import re
+import time
 from datetime import date, datetime, time as datetime_time, timedelta
 from urllib.parse import quote
 
@@ -11,7 +13,7 @@ from django.contrib.auth.models import Group
 from django.db import transaction
 from django.db.models import Count, Prefetch
 from django.db.models.deletion import ProtectedError
-from django.http import HttpResponse
+from django.http import HttpResponse, HttpResponseRedirect
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework.authtoken.models import Token
@@ -22,7 +24,12 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.accounts import oauth2
 from apps.accounts.models import User
+from apps.accounts.protected_users import (
+    PROTECTED_ADMIN_USERNAME,
+    is_protected_admin,
+)
 from apps.accounts.permissions import (
     HasPermissionCode,
     PERMISSION_TREE,
@@ -180,7 +187,11 @@ def _clear_user_references(users):
 
 
 def _delete_users(users):
-    users = [user for user in users if user and user.id]
+    users = [
+        user
+        for user in users
+        if user and user.id and not is_protected_admin(user)
+    ]
     if not users:
         return
     _clear_user_references(users)
@@ -209,7 +220,9 @@ def delete_contact_and_bound_users(contact):
         locked_contact = m.Contact.objects.select_for_update().get(pk=contact.pk)
         users = list(User.objects.select_for_update().filter(contact=locked_contact))
         _clear_contact_references(locked_contact)
-        User.objects.filter(contact=locked_contact).update(contact=None)
+        User.objects.filter(contact=locked_contact).exclude(
+            username=PROTECTED_ADMIN_USERNAME
+        ).update(contact=None)
         _delete_users(users)
         locked_contact.delete()
 
@@ -263,6 +276,11 @@ class AuthLoginView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
+        if not oauth2.get_config().local_login_enabled:
+            return Response(
+                {"detail": "本地密码登录已禁用，请使用 W3 登录"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         username = request.data.get("username", "")
         password = request.data.get("password", "")
         user = authenticate(request, username=username, password=password)
@@ -277,6 +295,192 @@ class AuthLoginView(APIView):
                 "user": serializers.CurrentUserSerializer(user).data,
             }
         )
+
+
+def _oauth2_redirect(url):
+    response = HttpResponseRedirect(url)
+    response["Cache-Control"] = "no-store"
+    response["Referrer-Policy"] = "no-referrer"
+    return response
+
+
+class W3OAuth2StatusView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        config = oauth2.get_config()
+        ready = False
+        if config.enabled:
+            try:
+                config.require_ready()
+                ready = True
+            except oauth2.OAuth2ConfigurationError:
+                pass
+        response = Response(
+            {
+                "enabled": config.enabled,
+                "ready": ready,
+                "local_login_enabled": config.local_login_enabled,
+                "start_url": "/api/auth/w3/start/" if ready else None,
+            }
+        )
+        response["Cache-Control"] = "no-store"
+        return response
+
+
+class W3OAuth2StartView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        config = oauth2.get_config()
+        try:
+            authorization_url, state_value, verifier = (
+                oauth2.create_authorization_request(config)
+            )
+        except oauth2.OAuth2ConfigurationError:
+            return Response(
+                {"detail": "W3 OAuth2 尚未正确配置"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        request.session["w3_oauth2_transaction"] = {
+            "state": state_value,
+            "verifier": verifier,
+            "created_at": time.time(),
+        }
+        request.session.modified = True
+        return _oauth2_redirect(authorization_url)
+
+
+class W3OAuth2CallbackView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        config = oauth2.get_config()
+        try:
+            config.require_ready()
+        except oauth2.OAuth2ConfigurationError:
+            return Response(
+                {"detail": "W3 OAuth2 尚未正确配置"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        transaction_data = request.session.pop("w3_oauth2_transaction", None)
+        request.session.modified = True
+        state_value = request.query_params.get("state", "")
+        if not self._valid_transaction(config, transaction_data, state_value):
+            return self._error_redirect(config, "state_invalid")
+        if request.query_params.get("error"):
+            return self._error_redirect(config, "provider_denied")
+
+        code = request.query_params.get("code", "")
+        if not code:
+            return self._error_redirect(config, "authorization_code_missing")
+
+        try:
+            access_token = oauth2.exchange_code(
+                config, code, transaction_data.get("verifier", "")
+            )
+            userinfo = oauth2.fetch_userinfo(config, access_token)
+            employee_no = oauth2.extract_employee_no(
+                userinfo, config.employee_no_field
+            )
+            email = oauth2.extract_email(userinfo, config.email_field)
+        except oauth2.OAuth2ProtocolError as exc:
+            logger.warning("W3 OAuth2 登录失败：%s", exc.code)
+            return self._error_redirect(config, exc.code)
+
+        user = User.objects.filter(
+            username=employee_no,
+            email__iexact=email,
+        ).first()
+        if not user:
+            logger.warning("W3 OAuth2 工号和邮箱未映射到同一本地账号")
+            return self._error_redirect(config, "account_not_found")
+        if not user.is_active:
+            return self._error_redirect(config, "account_inactive")
+
+        token, _ = Token.objects.get_or_create(user=user)
+        request.session.cycle_key()
+        request.session["w3_oauth2_pending_login"] = {
+            "token": token.key,
+            "user_id": user.pk,
+            "created_at": time.time(),
+        }
+        request.session.modified = True
+        return _oauth2_redirect(
+            oauth2.add_query_params(
+                config.frontend_callback_url, {"oauth2": "success"}
+            )
+        )
+
+    @staticmethod
+    def _valid_transaction(config, transaction_data, state_value):
+        if not isinstance(transaction_data, dict) or not state_value:
+            return False
+        stored_state = transaction_data.get("state")
+        created_at = transaction_data.get("created_at")
+        if not isinstance(stored_state, str) or not isinstance(
+            created_at, (int, float)
+        ):
+            return False
+        if time.time() - created_at > config.transaction_ttl_seconds:
+            return False
+        return hmac.compare_digest(stored_state, state_value)
+
+    @staticmethod
+    def _error_redirect(config, error_code):
+        return _oauth2_redirect(
+            oauth2.add_query_params(
+                config.frontend_callback_url, {"oauth2_error": error_code}
+            )
+        )
+
+
+class W3OAuth2CompleteView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        config = oauth2.get_config()
+        pending = request.session.pop("w3_oauth2_pending_login", None)
+        request.session.modified = True
+        if not self._valid_pending(config, pending):
+            return Response(
+                {"detail": "W3 登录凭据无效或已过期，请重新登录"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        user = User.objects.filter(pk=pending["user_id"], is_active=True).first()
+        if not user or not Token.objects.filter(
+            user=user, key=pending["token"]
+        ).exists():
+            return Response(
+                {"detail": "W3 登录账号不可用，请联系管理员"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        response = Response(
+            {
+                "token": pending["token"],
+                "user": serializers.CurrentUserSerializer(user).data,
+            }
+        )
+        response["Cache-Control"] = "no-store"
+        return response
+
+    @staticmethod
+    def _valid_pending(config, pending):
+        if not isinstance(pending, dict):
+            return False
+        token = pending.get("token")
+        user_id = pending.get("user_id")
+        created_at = pending.get("created_at")
+        if (
+            not isinstance(token, str)
+            or not token
+            or not isinstance(user_id, int)
+            or user_id <= 0
+            or not isinstance(created_at, (int, float))
+        ):
+            return False
+        return time.time() - created_at <= config.transaction_ttl_seconds
 
 
 class AuthLogoutView(APIView):
@@ -1212,6 +1416,8 @@ class ContactViewSet(PermissionedModelViewSet):
             qs = _filter_indexed_name(qs, "", p["name"])
         if p.get("employee_no"):
             qs = qs.filter(employee_no__icontains=p["employee_no"])
+        if p.get("email"):
+            qs = qs.filter(email__icontains=p["email"])
         department_values = _query_list_values(p, "department_in")
         if department_values:
             qs = qs.filter(department_id__in=department_values)
@@ -1829,6 +2035,8 @@ class UserViewSet(PermissionedModelViewSet):
         p = self.request.query_params
         if p.get("username"):
             qs = qs.filter(username__icontains=p["username"])
+        if p.get("email"):
+            qs = qs.filter(email__icontains=p["email"])
         if p.get("role"):
             qs = qs.filter(role=p["role"])
         role_values = _query_list_values(p, "roles_in")
@@ -1842,8 +2050,21 @@ class UserViewSet(PermissionedModelViewSet):
             qs = qs.filter(is_active=p["is_active"] == "true")
         return qs.distinct()
 
+    def update(self, request, *args, **kwargs):
+        if is_protected_admin(self.get_object()):
+            return Response(
+                {"detail": "内置管理员不允许编辑、停用或修改角色"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return super().update(request, *args, **kwargs)
+
     def destroy(self, request, *args, **kwargs):
         user = self.get_object()
+        if is_protected_admin(user):
+            return Response(
+                {"detail": "内置管理员不允许删除"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         delete_user_and_bound_contact(user)
         return Response(status=status.HTTP_204_NO_CONTENT)
 

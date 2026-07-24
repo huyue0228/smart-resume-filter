@@ -9,10 +9,13 @@ import zipfile
 
 import pandas as pd
 from django.conf import settings
+from django.core.exceptions import ValidationError
+from django.core.validators import validate_email
 from django.db import transaction
 
 from apps.accounts.contact_users import sync_contact_user
 from apps.accounts.models import User
+from apps.accounts.protected_users import PROTECTED_ADMIN_USERNAME
 from apps.accounts.permissions import ensure_rbac_defaults
 from apps.core import models as m
 
@@ -206,7 +209,9 @@ def _contact_has_history(contact):
 
 
 def _disable_contact_users(contact):
-    User.objects.filter(contact=contact).update(is_active=False)
+    User.objects.filter(contact=contact).exclude(
+        username=PROTECTED_ADMIN_USERNAME
+    ).update(is_active=False)
 
 
 def _deactivate_contact(contact):
@@ -458,19 +463,42 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
     if files.get("contacts"):
         ensure_rbac_defaults()
         df = _read_excel(files["contacts"])
-        imported_employee_nos = {
-            _val(row, "工号") for _, row in df.iterrows() if _val(row, "工号")
-        }
+        contact_rows = []
+        email_owners = {}
+        for excel_row, (_, row) in enumerate(df.iterrows(), start=2):
+            no = _val(row, "工号")
+            if not no:
+                continue
+            email = (_val(row, "邮箱") or _val(row, "电子邮箱")).casefold()
+            if not email:
+                raise ValueError(f"部门接口人第 {excel_row} 行缺少邮箱")
+            try:
+                validate_email(email)
+            except ValidationError as exc:
+                raise ValueError(
+                    f"部门接口人第 {excel_row} 行邮箱格式无效"
+                ) from exc
+            owner = email_owners.get(email)
+            if owner and owner != no:
+                raise ValueError(
+                    f"部门接口人文件中邮箱 {email} 对应多个工号"
+                )
+            email_owners[email] = no
+            contact_rows.append((row, no, email))
+
+        imported_employee_nos = {no for _, no, _ in contact_rows}
         if mode == "replace":
             for contact in m.Contact.objects.exclude(
                 employee_no__in=imported_employee_nos
             ):
                 _deactivate_contact(contact)
-        for _, row in df.iterrows():
-            no = _val(row, "工号")
+        for row, no, email in contact_rows:
             name = _val(row, "姓名")
-            if not no:
-                continue
+            duplicate_email = m.Contact.objects.filter(
+                email__iexact=email
+            ).exclude(employee_no=no)
+            if duplicate_email.exists():
+                raise ValueError(f"接口人邮箱 {email} 已被其他工号使用")
             dept = _get_department(
                 _val(row, "一层部门"),
                 _val(row, "二层部门"),
@@ -481,6 +509,7 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
                 employee_no=no,
                 defaults={
                     "name": name,
+                    "email": email,
                     "department": dept,
                     "contact_level": _contact_level(row, dept),
                     "can_delegate": not (

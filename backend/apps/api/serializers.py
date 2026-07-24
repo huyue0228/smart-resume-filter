@@ -5,6 +5,7 @@ from django.utils import timezone
 
 from apps.accounts.contact_users import sync_contact_user
 from apps.accounts.models import User
+from apps.accounts.protected_users import is_protected_admin
 from apps.accounts.permissions import (
     PERMISSION_TREE,
     permission_code,
@@ -136,6 +137,7 @@ class UserSerializer(serializers.ModelSerializer):
     permissions = serializers.SerializerMethodField()
     password = serializers.CharField(write_only=True, required=False, allow_blank=True)
     contact_name = serializers.CharField(source="contact.name", read_only=True, default="")
+    is_protected = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -149,18 +151,34 @@ class UserSerializer(serializers.ModelSerializer):
             "is_active",
             "is_staff",
             "is_superuser",
+            "is_protected",
             "role_ids",
             "roles",
             "permissions",
             "password",
         ]
         read_only_fields = ["is_superuser"]
+        extra_kwargs = {
+            "email": {"required": True, "allow_blank": False},
+        }
 
     def get_roles(self, obj):
         return user_role_names(obj)
 
     def get_permissions(self, obj):
         return sorted(user_permission_codes(obj))
+
+    def get_is_protected(self, obj):
+        return is_protected_admin(obj)
+
+    def validate_email(self, value):
+        email = str(value or "").strip().casefold()
+        duplicate = User.objects.filter(email__iexact=email)
+        if self.instance is not None:
+            duplicate = duplicate.exclude(pk=self.instance.pk)
+        if duplicate.exists():
+            raise serializers.ValidationError("该邮箱已被其他账号使用")
+        return email
 
     def create(self, validated_data):
         groups = validated_data.pop("groups", [])
@@ -723,6 +741,7 @@ class ContactSerializer(serializers.ModelSerializer):
             "id",
             "name",
             "employee_no",
+            "email",
             "department",
             "department_name",
             "department_level",
@@ -732,8 +751,22 @@ class ContactSerializer(serializers.ModelSerializer):
             "can_delegate",
             "is_active",
         ]
+        extra_kwargs = {
+            "email": {"required": True, "allow_blank": False},
+        }
 
     def validate(self, attrs):
+        email = str(attrs.get("email", getattr(self.instance, "email", "")) or "")
+        email = email.strip().casefold()
+        if not email:
+            raise serializers.ValidationError({"email": "请输入邮箱"})
+        duplicate_email = m.Contact.objects.filter(email__iexact=email)
+        if self.instance is not None:
+            duplicate_email = duplicate_email.exclude(pk=self.instance.pk)
+        if duplicate_email.exists():
+            raise serializers.ValidationError({"email": "该邮箱已被其他接口人使用"})
+        attrs["email"] = email
+
         department = attrs.get("department")
         if department is None and self.instance is not None:
             department = self.instance.department
@@ -760,7 +793,8 @@ class ContactSerializer(serializers.ModelSerializer):
         try:
             sync_contact_user(contact)
         except ValueError as exc:
-            raise serializers.ValidationError({"employee_no": str(exc)}) from exc
+            field = "email" if "邮箱" in str(exc) else "employee_no"
+            raise serializers.ValidationError({field: str(exc)}) from exc
         return contact
 
     @transaction.atomic
@@ -769,7 +803,8 @@ class ContactSerializer(serializers.ModelSerializer):
         try:
             sync_contact_user(contact)
         except ValueError as exc:
-            raise serializers.ValidationError({"employee_no": str(exc)}) from exc
+            field = "email" if "邮箱" in str(exc) else "employee_no"
+            raise serializers.ValidationError({field: str(exc)}) from exc
         return contact
 
 

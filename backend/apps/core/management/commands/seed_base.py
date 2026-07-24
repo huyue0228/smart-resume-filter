@@ -323,18 +323,19 @@ class Command(BaseCommand):
         )
 
         contacts = {
-            "L2001": ("技术二级接口人A", tech_l2, m.Contact.LEVEL_SECONDARY),
-            "L2002": ("产品二级接口人B", product_l2, m.Contact.LEVEL_SECONDARY),
-            "T3001": ("技术三级接口人A", tech_l3, m.Contact.LEVEL_TERTIARY),
-            "T3002": ("算法三级接口人B", algo_l3, m.Contact.LEVEL_TERTIARY),
-            "T3003": ("产品三级接口人C", product_l3, m.Contact.LEVEL_TERTIARY),
+            "L2001": ("技术二级接口人A", "l2001@example.com", tech_l2, m.Contact.LEVEL_SECONDARY),
+            "L2002": ("产品二级接口人B", "l2002@example.com", product_l2, m.Contact.LEVEL_SECONDARY),
+            "T3001": ("技术三级接口人A", "t3001@example.com", tech_l3, m.Contact.LEVEL_TERTIARY),
+            "T3002": ("算法三级接口人B", "t3002@example.com", algo_l3, m.Contact.LEVEL_TERTIARY),
+            "T3003": ("产品三级接口人C", "t3003@example.com", product_l3, m.Contact.LEVEL_TERTIARY),
         }
         contact_objects = {}
-        for employee_no, (name, department, level) in contacts.items():
+        for employee_no, (name, email, department, level) in contacts.items():
             contact, _ = m.Contact.objects.update_or_create(
                 employee_no=employee_no,
                 defaults={
                     "name": name,
+                    "email": email,
                     "department": department,
                     "contact_level": level,
                     "is_active": True,
@@ -355,6 +356,7 @@ class Command(BaseCommand):
             user, created = User.objects.update_or_create(
                 username=username,
                 defaults={
+                    "email": contact.email if contact else f"{username}@example.com",
                     "role": role,
                     "contact": contact,
                     "is_active": True,

@@ -27,6 +27,7 @@ vi.mock('@ant-design/pro-components', () => ({
           onClick={() => onFinish({
             name: '新增接口人',
             employee_no: 'E1001',
+            email: 'E1001@EXAMPLE.COM',
             department: 12,
             can_delegate: true,
             is_active: true,
@@ -98,6 +99,7 @@ vi.mock('../components/SmartDataTable', () => ({
           id: 7,
           name: '原接口人',
           employee_no: 'E0007',
+          email: 'e0007@example.com',
           department: 11,
           can_delegate: true,
           is_active: true,
@@ -166,6 +168,7 @@ describe('DepartmentsPage', () => {
     await waitFor(() => expect(mocks.createContact).toHaveBeenCalledWith({
       name: '新增接口人',
       employee_no: 'E1001',
+      email: 'e1001@example.com',
       department: 12,
       contact_level: 'tertiary',
       can_delegate: false,
@@ -185,6 +188,7 @@ describe('DepartmentsPage', () => {
     await waitFor(() => expect(mocks.updateContact).toHaveBeenCalledWith(7, {
       name: '新增接口人',
       employee_no: 'E1001',
+      email: 'e1001@example.com',
       department: 12,
       contact_level: 'tertiary',
       can_delegate: false,

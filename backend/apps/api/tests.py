@@ -21,6 +21,10 @@ from rest_framework.test import APIClient
 
 from apps.accounts.models import User
 from apps.accounts.permissions import ensure_rbac_defaults, permission_codename
+from apps.accounts.protected_users import (
+    PROTECTED_ADMIN_EMAIL,
+    PROTECTED_ADMIN_USERNAME,
+)
 from apps.core import models as m
 from apps.pipeline import ai_config
 from apps.pipeline.ai.service import AIServiceError
@@ -572,7 +576,10 @@ class RbacApiTests(TestCase):
         ensure_rbac_defaults()
         self.client = APIClient()
         self.hr = User.objects.create_user(
-            username="hr", password="pass", role=User.ROLE_HR
+            username="hr",
+            email="hr@example.com",
+            password="pass",
+            role=User.ROLE_HR,
         )
         self.hr.groups.add(Group.objects.get(name="HR"))
         self.admin = User.objects.create_user(
@@ -656,6 +663,7 @@ class RbacApiTests(TestCase):
             contact=contact,
         )
 
+    @override_settings(W3_OAUTH2_LOCAL_LOGIN_ENABLED=True)
     def test_login_returns_token_and_me_returns_permissions(self):
         response = self.client.post(
             "/api/auth/login/", {"username": "hr", "password": "pass"}, format="json"
@@ -1034,7 +1042,13 @@ class RbacApiTests(TestCase):
         self.client.force_authenticate(self.admin)
 
         user_response = self.client.get(
-            "/api/users/", {"username": "hr", "roles": "HR", "is_active": "true"}
+            "/api/users/",
+            {
+                "username": "hr",
+                "email": "hr@",
+                "roles": "HR",
+                "is_active": "true",
+            },
         )
         role_response = self.client.get("/api/roles/", {"name": "管理"})
 
@@ -3043,6 +3057,7 @@ class ListFilteringPaginationApiTests(TestCase):
         m.Contact.objects.create(
             name="王五",
             employee_no="E1001",
+            email="wangwu@example.com",
             department=department,
             contact_level=m.Contact.LEVEL_SECONDARY,
             can_delegate=True,
@@ -3051,6 +3066,7 @@ class ListFilteringPaginationApiTests(TestCase):
         m.Contact.objects.create(
             name="赵六",
             employee_no="E2001",
+            email="zhaoliu@example.com",
             department=m.Department.objects.create(name="产品二部", level=2, entity="YLS"),
             contact_level=m.Contact.LEVEL_TERTIARY,
             can_delegate=False,
@@ -3063,6 +3079,7 @@ class ListFilteringPaginationApiTests(TestCase):
                 "department_level": 2,
                 "can_delegate": "true",
                 "entity": "GW",
+                "email": "wangwu@",
             },
         )
 
@@ -4452,6 +4469,7 @@ class ImportApiTests(TestCase):
             [
                 {
                     "工号": "NEW001",
+                    "邮箱": "new001@example.com",
                     "姓名": "新接口人",
                     "一层部门": "技术中心",
                     "二层部门": "后端组",
@@ -4504,6 +4522,7 @@ class ImportApiTests(TestCase):
             [
                 {
                     "工号": "NEW002",
+                    "邮箱": "new002@example.com",
                     "姓名": "新接口人",
                     "一层部门": "技术中心",
                     "二层部门": "后端组",
@@ -4578,6 +4597,61 @@ class MasterDataCrudApiTests(TestCase):
         self.admin.groups.add(Group.objects.get(name="管理员"))
         self.client.force_authenticate(self.admin)
 
+    def test_user_management_requires_unique_email(self):
+        missing = self.client.post(
+            "/api/users/",
+            {"username": "NO-MAIL", "password": "pass"},
+            format="json",
+        )
+        created = self.client.post(
+            "/api/users/",
+            {
+                "username": "MAIL001",
+                "email": "MAIL001@EXAMPLE.COM",
+                "password": "pass",
+            },
+            format="json",
+        )
+        duplicate = self.client.post(
+            "/api/users/",
+            {
+                "username": "MAIL002",
+                "email": "mail001@example.com",
+                "password": "pass",
+            },
+            format="json",
+        )
+
+        self.assertEqual(missing.status_code, 400)
+        self.assertIn("email", missing.data)
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(created.data["email"], "mail001@example.com")
+        self.assertEqual(duplicate.status_code, 400)
+        self.assertIn("email", duplicate.data)
+
+    def test_contact_cannot_claim_protected_administrator_identity(self):
+        department = m.Department.objects.create(name="受保护账号测试部门", level=2)
+
+        response = self.client.post(
+            "/api/contacts/",
+            {
+                "name": "伪造接口人",
+                "employee_no": PROTECTED_ADMIN_USERNAME,
+                "email": PROTECTED_ADMIN_EMAIL,
+                "department": department.id,
+                "is_active": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(
+            m.Contact.objects.filter(employee_no=PROTECTED_ADMIN_USERNAME).exists()
+        )
+        protected_admin = User.objects.get(username=PROTECTED_ADMIN_USERNAME)
+        self.assertIsNone(protected_admin.contact_id)
+        self.assertTrue(protected_admin.is_superuser)
+
     def test_create_and_update_school_keeps_platform_in_sync_with_tag(self):
         first_tag = m.SchoolTag.objects.create(code="FIRST", name="第一标签")
         second_tag = m.SchoolTag.objects.create(code="SECOND", name="第二标签")
@@ -4630,6 +4704,7 @@ class MasterDataCrudApiTests(TestCase):
             {
                 "name": "新接口人",
                 "employee_no": "NEW100",
+                "email": "new100@example.com",
                 "department": tertiary.id,
                 "contact_level": m.Contact.LEVEL_SECONDARY,
                 "can_delegate": True,
@@ -4640,10 +4715,12 @@ class MasterDataCrudApiTests(TestCase):
 
         self.assertEqual(create_response.status_code, 201)
         contact = m.Contact.objects.get(employee_no="NEW100")
+        self.assertEqual(contact.email, "new100@example.com")
         self.assertEqual(contact.contact_level, m.Contact.LEVEL_TERTIARY)
         self.assertFalse(contact.can_delegate)
         user = User.objects.get(username="NEW100")
         self.assertEqual(user.contact_id, contact.id)
+        self.assertEqual(user.email, "new100@example.com")
         self.assertEqual(user.role, User.ROLE_TERTIARY_CONTACT)
         self.assertTrue(user.check_password("pass1234"))
         self.assertIn("三级接口人", user.groups.values_list("name", flat=True))
@@ -4658,6 +4735,7 @@ class MasterDataCrudApiTests(TestCase):
             {
                 "name": "修改后接口人",
                 "employee_no": "NEW101",
+                "email": "new101@example.com",
                 "department": secondary.id,
                 "can_delegate": True,
                 "is_active": False,
@@ -4669,9 +4747,11 @@ class MasterDataCrudApiTests(TestCase):
         contact.refresh_from_db()
         user.refresh_from_db()
         self.assertEqual(contact.employee_no, "NEW101")
+        self.assertEqual(contact.email, "new101@example.com")
         self.assertEqual(contact.contact_level, m.Contact.LEVEL_SECONDARY)
         self.assertTrue(contact.can_delegate)
         self.assertEqual(user.username, "NEW101")
+        self.assertEqual(user.email, "new101@example.com")
         self.assertEqual(user.role, User.ROLE_SECONDARY_CONTACT)
         self.assertFalse(user.is_active)
         self.assertTrue(user.check_password("custom-password"))
@@ -4690,6 +4770,25 @@ class MasterDataCrudApiTests(TestCase):
         user.refresh_from_db()
         self.assertTrue(contact.is_active)
         self.assertTrue(user.is_active)
+
+    def test_create_contact_requires_email(self):
+        department = m.Department.objects.create(name="缺邮箱部门", level=2)
+
+        response = self.client.post(
+            "/api/contacts/",
+            {
+                "name": "缺邮箱接口人",
+                "employee_no": "NOEMAIL001",
+                "department": department.id,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("email", response.data)
+        self.assertFalse(
+            m.Contact.objects.filter(employee_no="NOEMAIL001").exists()
+        )
 
     def test_view_only_user_cannot_create_school_or_contact(self):
         viewer = User.objects.create_user(username="master-data-viewer", password="pass")
@@ -4895,6 +4994,39 @@ class UserDeleteApiTests(TestCase):
         self.assertFalse(User.objects.filter(id=user.id).exists())
         self.assertFalse(Token.objects.filter(key=token.key).exists())
 
+    def test_protected_administrator_cannot_be_edited_disabled_or_deleted(self):
+        protected_admin = User.objects.get(username=PROTECTED_ADMIN_USERNAME)
+
+        update_response = self.client.patch(
+            f"/api/users/{protected_admin.id}/",
+            {
+                "username": "changed",
+                "email": "changed@example.com",
+                "is_active": False,
+            },
+            format="json",
+        )
+        delete_response = self.client.delete(f"/api/users/{protected_admin.id}/")
+
+        self.assertEqual(update_response.status_code, 403)
+        self.assertEqual(delete_response.status_code, 403)
+        protected_admin.refresh_from_db()
+        self.assertEqual(protected_admin.username, PROTECTED_ADMIN_USERNAME)
+        self.assertEqual(protected_admin.email, PROTECTED_ADMIN_EMAIL)
+        self.assertTrue(protected_admin.is_active)
+        self.assertTrue(protected_admin.is_staff)
+        self.assertTrue(protected_admin.is_superuser)
+        self.assertFalse(protected_admin.has_usable_password())
+        self.assertEqual(
+            list(protected_admin.groups.values_list("name", flat=True)),
+            ["管理员"],
+        )
+
+        detail_response = self.client.get(f"/api/users/{protected_admin.id}/")
+        self.assertEqual(detail_response.status_code, 200)
+        self.assertTrue(detail_response.data["is_protected"])
+
+    @override_settings(W3_OAUTH2_LOCAL_LOGIN_ENABLED=True)
     def test_deleted_user_cannot_login(self):
         user = User.objects.create_user(
             username="E9002", password="pass1234", role=User.ROLE_SECONDARY_CONTACT

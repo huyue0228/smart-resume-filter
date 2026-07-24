@@ -19,6 +19,7 @@ ENV_FILE="${ENV_FILE:-.env}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}"
 
 [[ -f "$ENV_FILE" ]] || { echo "缺少 ${ENV_FILE}。"; exit 1; }
+ENV_FILE="$ENV_FILE" bash "$SKILL_DIR/scripts/validate-w3-env.sh"
 
 compose() {
   docker compose --project-name "$PROJECT_NAME" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"

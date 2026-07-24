@@ -554,6 +554,7 @@ class ResumeImportDesignContractTests(TestCase):
             [
                 {
                     "工号": "NEW001",
+                    "邮箱": "new001@example.com",
                     "姓名": "新接口人",
                     "一层部门": "技术中心",
                     "二层部门": "后端组",
@@ -573,11 +574,12 @@ class ResumeImportDesignContractTests(TestCase):
         self.assertFalse(old_user.is_active)
         self.assertTrue(m.Contact.objects.get(employee_no="NEW001").is_active)
 
-    def test_contact_import_creates_contact_user_with_employee_no_login(self):
+    def test_contact_import_creates_contact_user_with_employee_no_and_email(self):
         contacts = _excel_file(
             [
                 {
                     "工号": "L9001",
+                    "邮箱": "l9001@example.com",
                     "姓名": "二级接口人",
                     "一层部门": "技术中心",
                     "二层部门": "平台组",
@@ -585,6 +587,7 @@ class ResumeImportDesignContractTests(TestCase):
                 },
                 {
                     "工号": "T9001",
+                    "邮箱": "t9001@example.com",
                     "姓名": "三级接口人",
                     "一层部门": "技术中心",
                     "二层部门": "平台组",
@@ -601,7 +604,10 @@ class ResumeImportDesignContractTests(TestCase):
         tertiary_contact = m.Contact.objects.get(employee_no="T9001")
         secondary_user = User.objects.get(username="L9001")
         tertiary_user = User.objects.get(username="T9001")
+        self.assertEqual(secondary_contact.email, "l9001@example.com")
+        self.assertEqual(tertiary_contact.email, "t9001@example.com")
         self.assertEqual(secondary_user.contact, secondary_contact)
+        self.assertEqual(secondary_user.email, "l9001@example.com")
         self.assertEqual(secondary_user.role, User.ROLE_SECONDARY_CONTACT)
         self.assertTrue(secondary_user.check_password("pass1234"))
         self.assertIn(
@@ -609,6 +615,7 @@ class ResumeImportDesignContractTests(TestCase):
             list(secondary_user.groups.values_list("name", flat=True)),
         )
         self.assertEqual(tertiary_user.contact, tertiary_contact)
+        self.assertEqual(tertiary_user.email, "t9001@example.com")
         self.assertEqual(tertiary_user.role, User.ROLE_TERTIARY_CONTACT)
         self.assertTrue(tertiary_user.check_password("pass1234"))
         self.assertIn(
@@ -617,6 +624,60 @@ class ResumeImportDesignContractTests(TestCase):
         )
         self.assertTrue(Group.objects.filter(name="二级接口人").exists())
         self.assertTrue(Group.objects.filter(name="三级接口人").exists())
+
+    def test_contact_import_requires_email_and_rolls_back_replace(self):
+        department = m.Department.objects.create(name="保留部门", level=2)
+        old_contact = m.Contact.objects.create(
+            name="保留接口人",
+            employee_no="KEEP001",
+            email="keep001@example.com",
+            department=department,
+            is_active=True,
+        )
+        contacts = _excel_file(
+            [
+                {
+                    "工号": "NEW-NO-EMAIL",
+                    "姓名": "缺邮箱接口人",
+                    "一层部门": "技术中心",
+                    "二层部门": "平台组",
+                }
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "第 2 行缺少邮箱"):
+            import_files({"contacts": contacts}, mode="replace")
+
+        old_contact.refresh_from_db()
+        self.assertTrue(old_contact.is_active)
+        self.assertFalse(
+            m.Contact.objects.filter(employee_no="NEW-NO-EMAIL").exists()
+        )
+
+    def test_contact_import_rejects_email_owned_by_another_account(self):
+        User.objects.create_user(
+            username="EMAIL-OWNER",
+            email="owned@example.com",
+            password="pass",
+        )
+        contacts = _excel_file(
+            [
+                {
+                    "工号": "OTHER-EMPLOYEE",
+                    "邮箱": "OWNED@EXAMPLE.COM",
+                    "姓名": "邮箱冲突接口人",
+                    "一层部门": "技术中心",
+                    "二层部门": "平台组",
+                }
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "邮箱已被其他账号使用"):
+            import_files({"contacts": contacts}, mode="incremental")
+
+        self.assertFalse(
+            m.Contact.objects.filter(employee_no="OTHER-EMPLOYEE").exists()
+        )
 
     def test_contact_import_keeps_existing_user_password(self):
         existing_user = User.objects.create_user(
@@ -628,6 +689,7 @@ class ResumeImportDesignContractTests(TestCase):
             [
                 {
                     "工号": "L9002",
+                    "邮箱": "l9002@example.com",
                     "姓名": "已有用户接口人",
                     "一层部门": "技术中心",
                     "二层部门": "平台组",
@@ -656,6 +718,7 @@ class ResumeImportDesignContractTests(TestCase):
             [
                 {
                     "工号": "T9003",
+                    "邮箱": "t9003@example.com",
                     "姓名": "改为三级接口人",
                     "一层部门": "技术中心",
                     "二层部门": "平台组",
