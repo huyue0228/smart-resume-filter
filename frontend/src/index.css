@@ -31,6 +31,42 @@ body {
     'Microsoft YaHei', sans-serif;
 }
 
+.login-shell {
+  display: grid;
+  min-height: 100%;
+  place-items: center;
+  padding: 24px;
+  background:
+    radial-gradient(circle at top, rgba(79, 70, 229, 0.12), transparent 34%),
+    var(--srf-bg);
+}
+
+.login-redirect-card {
+  display: flex;
+  box-sizing: border-box;
+  width: min(420px, 100%);
+  min-height: 280px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 22px;
+  padding: 42px;
+  border: 1px solid var(--srf-border);
+  border-radius: var(--srf-card-radius);
+  background: var(--srf-surface);
+  box-shadow: var(--srf-shadow-md);
+  text-align: center;
+}
+
+.login-redirect-card .ant-alert,
+.login-redirect-card .ant-btn {
+  width: 100%;
+}
+
+.login-redirect-card .ant-typography {
+  margin: 0;
+}
+
 .srf-app-layout,
 .srf-app-layout .ant-layout,
 .srf-app-layout .ant-pro-layout-container {

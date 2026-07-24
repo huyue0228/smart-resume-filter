@@ -34,6 +34,7 @@ class Contact(models.Model):
     name_pinyin = models.CharField(max_length=128, blank=True)
     name_pinyin_initials = models.CharField(max_length=32, blank=True)
     employee_no = models.CharField(max_length=32, unique=True, help_text="工号")
+    email = models.EmailField(blank=True, default="", help_text="公司邮箱")
     department = models.ForeignKey(
         Department, null=True, blank=True, on_delete=models.SET_NULL, related_name="contacts"
     )
@@ -46,13 +47,14 @@ class Contact(models.Model):
     def save(self, *args, **kwargs):
         from .name_pinyin import name_to_pinyin
 
+        self.email = str(self.email or "").strip().casefold()
         self.name_pinyin, self.name_pinyin_initials = name_to_pinyin(self.name)
         update_fields = kwargs.get("update_fields")
-        if update_fields is not None and "name" in update_fields:
-            kwargs["update_fields"] = set(update_fields) | {
-                "name_pinyin",
-                "name_pinyin_initials",
-            }
+        if update_fields is not None:
+            update_fields = set(update_fields)
+            if "name" in update_fields:
+                update_fields |= {"name_pinyin", "name_pinyin_initials"}
+            kwargs["update_fields"] = update_fields
         super().save(*args, **kwargs)
 
     class Meta:

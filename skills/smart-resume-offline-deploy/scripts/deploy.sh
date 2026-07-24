@@ -52,6 +52,16 @@ env_value() {
   sed -n "s/^${key}=//p" "$ENV_FILE" | tail -n 1
 }
 
+env_is_true() {
+  local value
+  value="$(env_value "$1")"
+  value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
+  case "$value" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 is_placeholder_value() {
   local value="$1"
   [[ -z "$value" || "$value" == change-me* || "$value" == auto-generate* ]]
@@ -184,7 +194,10 @@ if [[ ! -f "$ENV_FILE" ]]; then
   chmod 600 "$ENV_FILE"
   initialize_secret_values
   echo "已创建 ${ENV_FILE}。静态运行参数已预置，三项密钥已自动生成。"
-  echo "请只确认 DJANGO_ALLOWED_HOSTS，并确保 BACKUP_TARGET_PATH 对应的外置/异机存储已挂载，然后重新执行本脚本。"
+  echo "请确认 DJANGO_ALLOWED_HOSTS、生产域名 DNS/证书/HTTPS 反向代理，并确保 BACKUP_TARGET_PATH 对应的外置/异机存储已挂载。"
+  echo "前端仅支持 W3 登录。请补齐 OAuth2 必填项并设置 W3_OAUTH2_ENABLED=True；下次执行会在 Docker 变更前校验且不显示密钥。"
+  echo "OAuth2 必填键：CLIENT_ID、AUTHORIZE_URL、TOKEN_URL、USERINFO_URL、REDIRECT_URI、EMPLOYEE_NO_FIELD、EMAIL_FIELD、CLIENT_AUTH_METHOD、TIMEOUT_SECONDS、TRANSACTION_TTL_SECONDS（均使用 W3_OAUTH2_ 前缀）。"
+  echo "CLIENT_AUTH_METHOD 为 client_secret_basic/client_secret_post 时还必须填写 W3_OAUTH2_CLIENT_SECRET；SCOPE 按 W3 要求填写。"
   exit 0
 fi
 
@@ -195,6 +208,7 @@ require_value DJANGO_ALLOWED_HOSTS
 require_value POSTGRES_PASSWORD
 require_value RESTIC_PASSWORD
 validate_backup_target
+ENV_FILE="$ENV_FILE" bash "$SKILL_DIR/scripts/validate-w3-env.sh"
 
 case "$DEPLOY_MODE" in
   auto)
@@ -248,7 +262,11 @@ echo "- 部署模式：${DEPLOY_MODE}"
 [[ "$DEPLOY_MODE" == "source" ]] && echo "- 从当前源码构建项目镜像"
 echo "- 使用环境文件：${ENV_FILE}（不会显示其中的密钥）"
 echo "- 镜像、端口、并发、OCR、数据库标识、备份周期和保留策略已使用预设值"
-echo "- 现场仅需确认允许访问的 IP/域名与外置/异机备份挂载路径"
+if env_is_true W3_OAUTH2_ENABLED; then
+  echo "- W3 OAuth2：登录必填配置和精确回调地址已校验；请确认 W3 平台登记值一致"
+else
+  echo "- W3 OAuth2：未启用，部署前置校验不应允许继续"
+fi
 echo "- 仅首次部署会写入基础权限和预置数据；升级不会重置管理员配置"
 
 choose "部署前检查" "已完成环境和 .env 检查，继续部署" "先修改 .env，暂不部署" "取消"
@@ -289,4 +307,5 @@ bash "$SKILL_DIR/scripts/verify.sh"
 
 FRONTEND_BIND="$(env_value FRONTEND_BIND)"
 FRONTEND_PORT="$(env_value FRONTEND_PORT)"
-echo "部署完成。前端地址为：http://服务器IP:${FRONTEND_PORT:-5173}（绑定地址：${FRONTEND_BIND:-0.0.0.0}）"
+echo "容器前端入口：http://服务器地址:${FRONTEND_PORT:-5173}（绑定地址：${FRONTEND_BIND:-0.0.0.0}）"
+echo "生产访问必须通过已配置的 HTTPS 域名反向代理；仅访问上述 HTTP 端口不视为生产验收完成。"

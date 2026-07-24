@@ -96,6 +96,7 @@ export default function DepartmentsPage() {
     const body = {
       name: values.name?.trim(),
       employee_no: values.employee_no?.trim(),
+      email: values.email?.trim().toLowerCase(),
       department: values.department,
       contact_level: isTertiary ? 'tertiary' : 'secondary',
       can_delegate: isTertiary ? false : Boolean(values.can_delegate),
@@ -126,6 +127,13 @@ export default function DepartmentsPage() {
       dataIndex: 'employee_no',
       width: 140,
       filter: { type: 'text', param: 'employee_no', placeholder: '筛选工号' },
+    },
+    {
+      title: '邮箱',
+      dataIndex: 'email',
+      width: 220,
+      ellipsis: true,
+      filter: { type: 'text', param: 'email', placeholder: '筛选邮箱' },
     },
     {
       title: '所属部门',
@@ -278,6 +286,14 @@ export default function DepartmentsPage() {
             name="employee_no"
             label="工号"
             rules={[{ required: true, whitespace: true, message: '请输入工号' }]}
+          />
+          <ProFormText
+            name="email"
+            label="邮箱"
+            rules={[
+              { required: true, whitespace: true, message: '请输入邮箱' },
+              { type: 'email', message: '请输入有效邮箱' },
+            ]}
           />
           <ProFormSelect
             name="department"

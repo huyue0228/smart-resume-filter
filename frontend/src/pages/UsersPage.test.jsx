@@ -10,6 +10,15 @@ const roleRecord = vi.hoisted(() => ({
   permissions: ['resume.view'],
 }))
 
+const protectedUserRecord = vi.hoisted(() => ({
+  id: 12358,
+  username: '012358',
+  email: 'huyue2@ueascend.com',
+  is_active: true,
+  is_protected: true,
+  roles: ['管理员'],
+}))
+
 const apiMocks = vi.hoisted(() => ({
   createRole: vi.fn(),
   createUser: vi.fn(),
@@ -69,7 +78,15 @@ vi.mock('antd', async () => {
 
 vi.mock('../components/SmartDataTable', () => ({
   default: ({ tableId, columns }) => {
-    if (tableId !== 'roles') return <div data-testid={`table-${tableId}`} />
+    if (tableId === 'users') {
+      const actionColumn = columns.find((column) => column.title === '操作')
+      return (
+        <div data-testid="table-users">
+          <span>{protectedUserRecord.username}</span>
+          {actionColumn.render(null, protectedUserRecord)}
+        </div>
+      )
+    }
     const actionColumn = columns.find((column) => column.title === '操作')
     return (
       <div data-testid="table-roles">
@@ -139,5 +156,15 @@ describe('UsersPage role permissions', () => {
     })).toBeNull())
     expect(fetchRoles).toHaveBeenCalledTimes(2)
     expect(fetchPermissionTree).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not expose mutation actions for the protected administrator', async () => {
+    render(<UsersPage />)
+
+    expect(await screen.findByText('012358')).toBeTruthy()
+    expect(screen.getByText('内置保护')).toBeTruthy()
+    expect(screen.queryByText('编辑')).toBeNull()
+    expect(screen.queryByText('停用')).toBeNull()
+    expect(screen.queryByText('删除')).toBeNull()
   })
 })

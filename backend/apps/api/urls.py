@@ -29,6 +29,10 @@ router.register("configs", views.ConfigViewSet, basename="config")
 urlpatterns = [
     path("auth/login/", views.AuthLoginView.as_view()),
     path("auth/logout/", views.AuthLogoutView.as_view()),
+    path("auth/w3/status/", views.W3OAuth2StatusView.as_view()),
+    path("auth/w3/start/", views.W3OAuth2StartView.as_view()),
+    path("auth/w3/callback/", views.W3OAuth2CallbackView.as_view()),
+    path("auth/w3/complete/", views.W3OAuth2CompleteView.as_view()),
     path("me/", views.MeView.as_view()),
     path("allocation-mode/", views.AllocationModeView.as_view()),
     path("permissions/", views.PermissionTreeView.as_view()),

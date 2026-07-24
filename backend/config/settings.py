@@ -130,6 +130,36 @@ REST_FRAMEWORK = {
 # CORS：demo 允许全部来源（前端 dev server 调用）
 CORS_ALLOW_ALL_ORIGINS = True
 
+# W3 OAuth2：默认关闭，接入时通过服务端环境变量启用。访问令牌不会下发到前端。
+W3_OAUTH2_ENABLED = env_bool("W3_OAUTH2_ENABLED", False)
+W3_OAUTH2_LOCAL_LOGIN_ENABLED = env_bool("W3_OAUTH2_LOCAL_LOGIN_ENABLED", False)
+W3_OAUTH2_CLIENT_ID = os.environ.get("W3_OAUTH2_CLIENT_ID", "")
+W3_OAUTH2_CLIENT_SECRET = os.environ.get("W3_OAUTH2_CLIENT_SECRET", "")
+W3_OAUTH2_AUTHORIZE_URL = os.environ.get("W3_OAUTH2_AUTHORIZE_URL", "")
+W3_OAUTH2_TOKEN_URL = os.environ.get("W3_OAUTH2_TOKEN_URL", "")
+W3_OAUTH2_USERINFO_URL = os.environ.get("W3_OAUTH2_USERINFO_URL", "")
+W3_OAUTH2_REDIRECT_URI = os.environ.get("W3_OAUTH2_REDIRECT_URI", "")
+W3_OAUTH2_FRONTEND_CALLBACK_URL = os.environ.get(
+    "W3_OAUTH2_FRONTEND_CALLBACK_URL", "/login"
+)
+W3_OAUTH2_SCOPE = os.environ.get("W3_OAUTH2_SCOPE", "")
+W3_OAUTH2_EMPLOYEE_NO_FIELD = os.environ.get(
+    "W3_OAUTH2_EMPLOYEE_NO_FIELD", "employeeNumber"
+)
+W3_OAUTH2_EMAIL_FIELD = os.environ.get("W3_OAUTH2_EMAIL_FIELD", "email")
+W3_OAUTH2_CLIENT_AUTH_METHOD = os.environ.get(
+    "W3_OAUTH2_CLIENT_AUTH_METHOD", "client_secret_basic"
+)
+W3_OAUTH2_USE_PKCE = env_bool("W3_OAUTH2_USE_PKCE", True)
+W3_OAUTH2_TIMEOUT_SECONDS = float(os.environ.get("W3_OAUTH2_TIMEOUT_SECONDS", "10"))
+W3_OAUTH2_TRANSACTION_TTL_SECONDS = int(
+    os.environ.get("W3_OAUTH2_TRANSACTION_TTL_SECONDS", "300")
+)
+# OAuth2 state/PKCE 和一次性登录凭据存于服务端 Session；正式启用时 Cookie 仅走 HTTPS。
+SESSION_COOKIE_SECURE = W3_OAUTH2_ENABLED and not DEBUG
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = "Lax"
+
 # Celery：demo 默认 eager（同步执行，不需要 Redis/worker）
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://localhost:6379/1")

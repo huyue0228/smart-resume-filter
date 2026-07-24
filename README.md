@@ -1,10 +1,10 @@
 # 简历宝
 
-“简历宝”是面向校园招聘的智能简历筛选平台。候选人采用 Rule-first 主流程：「Step1 查重与志愿排序 → Step2 院校分类及学历/院校准入 → Step3 Rule 前置检查 → Step4 AI 深度筛选（仅 AI 模式）」。岗位需求、部门和接口人是独立维护的基础数据。系统按正式项目方式建设：后端启用登录与 RBAC 权限校验，前端菜单和按钮由后端权限码驱动；AI Agent 与专项强制分流已接入，W3 认证和 WeLink 真实下发仍待外部接口确认。
+“简历宝”是面向校园招聘的智能简历筛选平台。候选人采用 Rule-first 主流程：「Step1 查重与志愿排序 → Step2 院校分类及学历/院校准入 → Step3 Rule 前置检查 → Step4 AI 深度筛选（仅 AI 模式）」。岗位需求、部门和接口人是独立维护的基础数据。系统按正式项目方式建设：后端启用登录与 RBAC 权限校验，前端菜单和按钮由后端权限码驱动；AI Agent 与专项强制分流已接入，W3 OAuth2 认证适配层已就绪，真实 W3 参数和 WeLink 下发仍待外部联调。
 
 设计文档以 [`docs/需求描述.md`](docs/需求描述.md)、[`docs/后端设计.md`](docs/后端设计.md)、[`docs/数据库设计.md`](docs/数据库设计.md)、[`docs/前端设计.md`](docs/前端设计.md) 为准。
 
-当前实现已包含：候选人聚合简历库、招聘分析看板、精确处理结果/原因筛选、可拖拽列宽、PDF 预览和筛选导出、Token 登录、RBAC、加密增量备份与隔离恢复演练，以及 Rule-first 流程、真实 PDF/OCR 解析、OpenAI 结构化输出、后台智能路由审计和 HR 处置闭环。
+当前实现已包含：候选人聚合简历库、招聘分析看板、精确处理结果/原因筛选、可拖拽列宽、PDF 预览和筛选导出、W3 OAuth2 登录与项目 Token 会话、RBAC、加密增量备份与隔离恢复演练，以及 Rule-first 流程、真实 PDF/OCR 解析、OpenAI 结构化输出、后台智能路由审计和 HR 处置闭环。
 
 > 上生产前仍需完成真实数据隐私评审、模型评测、容量压测和外部系统联调；本轮不包含 worker heartbeat 超时恢复、Prometheus/集中日志/告警、3 万条压测、CI 或浏览器 E2E。
 
@@ -73,7 +73,7 @@ npm run dev
 - Celery workers：复用 backend 镜像；普通 worker 消费 `default` 队列，threads AI worker 消费 `ai` 队列。
 - Nginx frontend 镜像：先用 Node 构建 React，再用 Nginx 托管静态资源并反代 `/api` 到 backend。
 
-当前 `docker-compose.yml` 适合内网试运行、验收和单机部署。正式公网生产建议在前面再加 HTTPS/WAF 或企业统一网关；项目内置的 frontend 容器已经使用 Nginx 托管前端静态资源。
+当前 `docker-compose.yml` 适合内网试运行、验收和单机部署。W3 生产回调要求 HTTPS 域名，因此正式部署必须在 frontend 前配置 HTTPS 反向代理、WAF 或企业统一网关；外层入口统一转发到 frontend，由项目内置 Nginx 托管静态资源并继续转发 `/api`。
 
 compose 内的 frontend 容器通过 Nginx `proxy_pass http://backend:8000` 访问后端；本地非 Docker 开发时 Vite 仍默认代理到 `http://localhost:8000`。
 
@@ -91,7 +91,7 @@ git --version
 
 - Docker Engine 24+。
 - Docker Compose v2。
-- Linux 服务器开放前端端口 `5173`，如需直接访问后端 API，再开放 `8000`。
+- 同机反向代理只向客户端开放 `80/443`，frontend `5173` 绑定回环地址；异机企业网关仅通过受控内网访问 frontend `5173`。backend `8000` 不对客户端或外层网关开放。
 - 至少 2 CPU / 4GB 内存；真实 AI 任务或大批量简历处理建议 4 CPU / 8GB 以上。
 
 ### 2. 拉取代码
@@ -121,10 +121,12 @@ bash skills/smart-resume-offline-deploy/scripts/deploy.sh
 
 镜像版本、端口、Gunicorn/worker/OCR 参数、数据库名与用户、备份周期及保留策略均已预先写入模板。现场只需确认：
 
-- `DJANGO_ALLOWED_HOSTS`：填服务器 IP 或域名，多个值用英文逗号分隔。
+- `DJANGO_ALLOWED_HOSTS`：生产环境填写反向代理对外域名，多个值用英文逗号分隔。
 - `BACKUP_TARGET_PATH`：默认约定为 `/mnt/smart-resume-filter-backups`。先把异机共享目录或外置磁盘挂载到这里；现场挂载点不同才修改该值。脚本会拒绝不存在、不可写或非绝对路径。
 
 确认后再次运行同一命令即可部署。`DJANGO_SECRET_KEY`、`POSTGRES_PASSWORD` 和 `RESTIC_PASSWORD` 由脚本从 `/dev/urandom` 自动生成且不回显。检测到旧容器或旧数据卷时，脚本绝不重新生成密钥；升级或灾后重建必须恢复原 `.env`，否则数据库可能无法连接，既有 AI 连接密文也可能无法解密。
+
+系统前端只提供 W3 登录，因此 W3 OAuth2 是可用部署的必要条件。模板中的 `W3_OAUTH2_ENABLED=False` 只是首次生成 `.env` 的安全占位；正式部署前必须改为 `True`，填写 client id、授权/Token/UserInfo HTTPS 地址、工号和邮箱字段路径、客户端认证方式、超时、事务有效期，并把 `W3_OAUTH2_REDIRECT_URI` 设置为 W3 平台登记的精确地址，例如 `https://你的域名/api/auth/w3/callback/`。当前 W3 UserInfo 的工号和邮箱字段分别为顶层 `employeeNumber`、`email`，模板已预填；`tenantId`、`uuid`、`globalUserID` 不参与账号匹配。机密客户端还必须填写 client secret，scope 按 W3 要求填写。部署脚本会在任何 Docker 变更前校验，W3 关闭或配置不完整都会停止且不显示密钥。`W3_OAUTH2_LOCAL_LOGIN_ENABLED` 默认并保持为 `False`；本地密码 API 仅作为显式开启的应急能力，前端不会展示密码表单。
 
 源码部署到 ARM 服务器时才需要把 `DOCKER_PLATFORM` 改为 `linux/arm64`；离线发布包已经固定为 `linux/amd64`，`APP_VERSION` 也由发布脚本写入，不在部署现场决定。
 
@@ -160,13 +162,13 @@ gunicorn config.wsgi:application --bind 0.0.0.0:8000
 
 ### 5. 访问系统
 
-浏览器打开：
+本地或隔离内网试运行且未配置反向代理时，才可临时访问：
 
 ```text
 http://服务器IP:5173/
 ```
 
-如果部署了域名和反向代理，则访问你的域名。frontend 容器会把 `/api` 反代到 backend，不需要在浏览器里直接调用 `8000`。
+生产环境只通过 `https://生产域名/` 访问。外层反向代理把所有路径统一转发到 frontend 暴露端口，frontend 容器再把 `/api` 转发到 backend；不要让浏览器或外层网关绕过 frontend 直接调用 `5173` 或 `8000`。同机反代建议把 `FRONTEND_BIND` 设置为 `127.0.0.1`，异机企业网关应通过受控内网和防火墙访问 frontend。
 
 本地预置账号默认密码均为 `pass1234`：
 
@@ -198,7 +200,7 @@ docker compose exec backend python manage.py load_sample
 - 简历库按候选人聚合展示，一名候选人一行；详情抽屉可查看全部投递、分配尝试、反馈和 PDF 预览。
 - 简历库、岗位、院校、接口人等主要表格支持表头筛选和列宽拖拽；筛选在后端执行，分页接口支持 `page_size`，单页最大 500。
 - 简历库可以按当前筛选条件导出候选人简历，也可以在候选人详情中操作分配尝试。仅命中一个可用文件且无缺失清单时返回原文件，多文件或存在缺失时返回 zip，并在页面提示导出成功数量和缺失数量。
-- 部门接口人导入会按工号自动创建或更新登录账号，新账号默认密码 `pass1234`；清空重导时，本次文件中不存在的旧接口人及绑定账号会同步停用。
+- 部门接口人导入要求“工号 + 邮箱”，并自动创建或更新同工号、同邮箱的登录账号；新账号默认密码 `pass1234`。清空重导时，本次文件中不存在的旧接口人及绑定账号会同步停用。
 
 ### 8. 常用运维命令
 
@@ -371,8 +373,8 @@ docker compose logs --tail=200 ai-worker
 - `DJANGO_DEBUG=False`。
 - `DJANGO_ALLOWED_HOSTS` 只填写实际 IP/域名，避免长期使用 `*`。
 - PostgreSQL `5432` 和 Redis `6379` 不暴露到公网；如无外部访问需求，只允许内网或安全组限制。
-- 管理员首次登录后修改默认密码。
-- 真实 W3 认证接入前，本地 Token 登录只用于内网试运行。
+- W3 启用前核对授权、Token、UserInfo 地址均为 HTTPS，`redirect_uri` 与平台登记值完全一致，并保持本地密码登录关闭。
+- 内置受保护管理员使用工号 `012358`、邮箱 `huyue2@ueascend.com` 进行 W3 双字段映射；该账号无本地可用密码且不可通过用户管理编辑、停用或删除。
 
 ### 12. 常见问题
 
@@ -391,7 +393,7 @@ docker compose logs --tail=200 frontend
 docker compose logs --tail=200 backend
 ```
 
-当前前端容器使用 Nginx 托管静态资源，`/api` 会反代到 backend。确认 `backend` 服务健康，并且浏览器访问的是 `FRONTEND_PORT`。
+当前前端容器使用 Nginx 托管静态资源，`/api` 会反代到 backend。确认 `backend` 服务健康；内网试运行时检查 `FRONTEND_PORT`，生产环境则从 HTTPS 域名和外层反向代理入口排查。
 
 数据库密码改了但服务起不来：
 
@@ -422,11 +424,11 @@ docker compose up -d
 | `T3002` | 三级接口人 | 查看转派给自己的分配并反馈 |
 | `T3003` | 三级接口人 | 查看转派给自己的分配并反馈 |
 
-这些账号用于正式权限链路的本地测试。W3 认证接入后，应按工号映射到系统 `User.username`、RBAC 角色和接口人 `Contact`。
+这些账号用于正式权限链路的本地测试。W3 登录按 UserInfo 顶层 `employeeNumber` 与 `email` 同时匹配已有且启用的 `User.username + User.email`，不会自动创建账号，并继续复用 RBAC 角色和接口人 `Contact`。
 
 ## 权限与配置
 
-系统默认启用 Token 登录。前端登录后调用 `/api/me/` 获取用户、角色、权限码、绑定接口人和数据范围。
+系统前端只提供 W3 OAuth2 登录，本地密码 API 默认关闭。W3 登录时，服务端完成授权码和 UserInfo 交换，再通过浏览器 Session 一次性交付项目 Token；前端随后调用 `/api/me/` 获取用户、角色、权限码、绑定接口人和数据范围。
 
 权限边界：
 
@@ -463,10 +465,14 @@ docker compose up -d
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/api/auth/login/` | 本地账号登录，返回 Token 与当前用户权限 |
+| POST | `/api/auth/login/` | 默认关闭的应急本地账号登录；前端不提供入口 |
 | POST | `/api/auth/logout/` | 退出登录并删除 Token |
+| GET | `/api/auth/w3/status/` | 返回 W3 是否可用和授权入口，不返回密钥或提供方地址 |
+| GET | `/api/auth/w3/start/` | 生成 state/PKCE 并跳转 W3 授权地址 |
+| GET | `/api/auth/w3/callback/` | 固定 OAuth2 回调；服务端换取身份并按工号、邮箱共同映射账号 |
+| POST | `/api/auth/w3/complete/` | 同一浏览器 Session 一次性领取项目 Token 和当前用户 |
 | GET | `/api/me/` | 当前用户、角色、权限码、接口人绑定和数据范围 |
-| GET/POST/PATCH | `/api/users/` | 用户管理 |
+| GET/POST/PATCH | `/api/users/` | 用户管理；内置受保护管理员只读且不可删除 |
 | GET/POST/PATCH | `/api/roles/` | 角色管理与角色权限绑定 |
 | GET | `/api/permissions/` | 后端预置权限树 |
 | GET | `/api/configs/`、`/api/configs/{key}/` | 查询白名单内的非敏感配置项 |
@@ -516,7 +522,7 @@ npm run build
 
 ## 生产与外部系统预留
 
-- W3 认证：当前未实现；待接口方案确认后，应新增仅管理员可维护的认证适配层，按工号映射到 `User.username`，并继续复用既有 RBAC 角色和 `Contact` 绑定。
+- W3 认证：非 OIDC 的 OAuth2 Authorization Code 适配层已经实现，默认使用 state 和 PKCE S256，按 UserInfo 顶层 `employeeNumber` 与 `email` 提取工号和邮箱，并同时匹配已有 `User.username + User.email`；字段仍允许通过环境变量覆盖为点路径。`tenantId`、`uuid`、`globalUserID` 当前不参与匹配或落库。仍需公司提供真实端点、客户端凭据、scope、客户端认证方式和生产 `redirect_uri` 后完成联调。
 - WeLink：当前下发流程已保留状态和消息 ID 字段，`welink_enabled` 控制是否启用真实外部下发；开关位于「数据管理 → 部门接口人」页面。真实接口确认后在服务层替换发送实现。
 - 数据库：本地默认 SQLite；生产环境通过 `POSTGRES_DB`、`POSTGRES_USER`、`POSTGRES_PASSWORD`、`POSTGRES_HOST`、`POSTGRES_PORT` 切换 PostgreSQL。
 - Celery：本地默认 `CELERY_TASK_ALWAYS_EAGER=True`；生产环境应配置 Redis broker/backend，并同时启动 `default` worker 与 threads `ai` worker。

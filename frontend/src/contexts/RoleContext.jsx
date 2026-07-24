@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
-import { fetchMe, login as loginApi, logout as logoutApi } from '../api/services'
+import {
+  completeW3OAuth2Login as completeW3OAuth2LoginApi,
+  fetchMe,
+  logout as logoutApi,
+} from '../api/services'
 import { RoleContext } from './roleState'
 
 export function RoleProvider({ children }) {
@@ -32,12 +36,16 @@ export function RoleProvider({ children }) {
     })
   }, [token])
 
-  const login = async (values) => {
-    const { data } = await loginApi(values)
+  const applyLogin = (data) => {
     localStorage.setItem('srf_token', data.token)
     setToken(data.token)
     setUser(data.user)
     return data.user
+  }
+
+  const completeW3OAuth2Login = async () => {
+    const { data } = await completeW3OAuth2LoginApi()
+    return applyLogin(data)
   }
 
   const logout = async () => {
@@ -69,7 +77,7 @@ export function RoleProvider({ children }) {
         permissions: user?.permissions || [],
         contact: user?.contact || null,
         isAuthenticated: Boolean(token && user),
-        login,
+        completeW3OAuth2Login,
         logout,
         refreshMe,
         hasPermission,
