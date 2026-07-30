@@ -44,7 +44,8 @@ from apps.ingestion.sources import (
     RESUME_SUBDIR,
     import_files,
 )
-from apps.pipeline import ai_config, cancellation, runner
+from apps.pipeline import ai_config, cancellation, prompt_management, runner
+from apps.pipeline.ai import prompt_harness
 from apps.pipeline.tasks import (
     execute_runs_sequence_task,
     submit_school_province_enrichment,
@@ -53,6 +54,7 @@ from apps.pipeline.services import allocate as allocate_service
 from apps.pipeline.ai import service as ai_service
 
 from . import serializers
+from .pagination import StandardResultsSetPagination
 from .resume_export import (
     CandidateExportRecord,
     ExportFieldError,
@@ -2264,3 +2266,179 @@ class AIConnectionModelsView(APIView):
         except (RuntimeError, ValueError) as exc:
             return Response({"models": [], "code": "ai_not_configured", "detail": str(exc)})
         return Response({"models": models})
+
+
+def _prompt_conflict_response(exc):
+    return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+
+
+def _prompt_validation_response(exc):
+    return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AIPromptManagementView(APIView):
+    permission_classes = [HasPermissionCode]
+    permission_code = "settings.manage_ai_connection"
+
+    def get(self, request):
+        try:
+            return Response(prompt_management.prompt_management_payload())
+        except m.AIPromptVersion.DoesNotExist:
+            return Response(
+                {"detail": "Prompt 版本尚未完成初始化"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+
+class AIPromptDraftView(APIView):
+    permission_classes = [HasPermissionCode]
+    permission_code = "settings.manage_ai_connection"
+
+    def patch(self, request):
+        try:
+            draft = prompt_management.save_draft(
+                modules=request.data.get("modules"),
+                lock_version=request.data.get("lock_version"),
+                user=request.user,
+            )
+        except prompt_management.PromptConflictError as exc:
+            return _prompt_conflict_response(exc)
+        except (prompt_harness.PromptValidationError, ValueError) as exc:
+            return _prompt_validation_response(exc)
+        return Response(prompt_management.serialize_prompt(draft))
+
+
+class AIPromptDraftResetView(APIView):
+    permission_classes = [HasPermissionCode]
+    permission_code = "settings.manage_ai_connection"
+
+    def post(self, request):
+        try:
+            draft = prompt_management.reset_draft(
+                source=request.data.get("source"),
+                lock_version=request.data.get("lock_version"),
+                user=request.user,
+            )
+        except prompt_management.PromptConflictError as exc:
+            return _prompt_conflict_response(exc)
+        except (prompt_harness.PromptValidationError, ValueError) as exc:
+            return _prompt_validation_response(exc)
+        return Response(prompt_management.serialize_prompt(draft))
+
+
+class AIPromptDraftTestView(APIView):
+    permission_classes = [HasPermissionCode]
+    permission_code = "settings.manage_ai_connection"
+
+    def post(self, request):
+        try:
+            draft = prompt_management.test_saved_draft(user=request.user)
+        except prompt_management.PromptConflictError as exc:
+            return _prompt_conflict_response(exc)
+        except prompt_management.PromptTestError as exc:
+            return Response(
+                {"ok": False, "code": exc.code, "detail": exc.message},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except (prompt_management.PromptStateError, ValueError) as exc:
+            return _prompt_validation_response(exc)
+        return Response(
+            {
+                "ok": True,
+                "detail": "Prompt 草稿真实模型测试通过",
+                "draft": prompt_management.serialize_prompt(draft),
+            }
+        )
+
+
+class AIPromptDraftPublishView(APIView):
+    permission_classes = [HasPermissionCode]
+    permission_code = "settings.manage_ai_connection"
+
+    def post(self, request):
+        try:
+            active, draft = prompt_management.publish_draft(
+                lock_version=request.data.get("lock_version"),
+                user=request.user,
+            )
+        except prompt_management.PromptConflictError as exc:
+            return _prompt_conflict_response(exc)
+        except (
+            prompt_harness.PromptValidationError,
+            prompt_management.PromptStateError,
+            ValueError,
+        ) as exc:
+            return _prompt_validation_response(exc)
+        return Response(
+            {
+                "detail": "Prompt 已发布，只影响新提交的 AI 任务",
+                "active": prompt_management.serialize_prompt(active),
+                "draft": prompt_management.serialize_prompt(draft),
+            }
+        )
+
+
+class AIPromptVersionListView(APIView):
+    permission_classes = [HasPermissionCode]
+    permission_code = "settings.manage_ai_connection"
+
+    def get(self, request):
+        queryset = (
+            m.AIPromptVersion.objects.exclude(status=m.AIPromptVersion.STATUS_DRAFT)
+            .select_related("restored_from")
+            .order_by("-release_sequence", "-published_at", "-id")
+        )
+        paginator = StandardResultsSetPagination()
+        page = paginator.paginate_queryset(queryset, request, view=self)
+        return paginator.get_paginated_response(
+            [
+                prompt_management.serialize_prompt(item, include_modules=False)
+                for item in page
+            ]
+        )
+
+
+class AIPromptVersionDetailView(APIView):
+    permission_classes = [HasPermissionCode]
+    permission_code = "settings.manage_ai_connection"
+
+    def get(self, request, version):
+        try:
+            record = m.AIPromptVersion.objects.select_related(
+                "restored_from"
+            ).get(
+                version=version,
+                status__in=[
+                    m.AIPromptVersion.STATUS_ACTIVE,
+                    m.AIPromptVersion.STATUS_ARCHIVED,
+                ],
+            )
+        except m.AIPromptVersion.DoesNotExist:
+            return Response(
+                {"detail": "Prompt 历史版本不存在"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return Response(prompt_management.serialize_prompt(record))
+
+
+class AIPromptVersionRestoreView(APIView):
+    permission_classes = [HasPermissionCode]
+    permission_code = "settings.manage_ai_connection"
+
+    def post(self, request, version):
+        try:
+            draft = prompt_management.restore_version_to_draft(
+                version=version,
+                lock_version=request.data.get("lock_version"),
+                user=request.user,
+            )
+        except m.AIPromptVersion.DoesNotExist:
+            return Response(
+                {"detail": "Prompt 历史版本不存在"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except prompt_management.PromptConflictError as exc:
+            return _prompt_conflict_response(exc)
+        except (prompt_harness.PromptValidationError, ValueError) as exc:
+            return _prompt_validation_response(exc)
+        return Response(prompt_management.serialize_prompt(draft))

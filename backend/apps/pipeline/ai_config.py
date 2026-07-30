@@ -248,6 +248,10 @@ def invalidate_ai_connection_test():
     m.Config.objects.filter(
         key__in=[AI_CONNECTION_TEST_FINGERPRINT_KEY, AI_CONNECTION_TESTED_AT_KEY]
     ).delete()
+    # 模型连接失效后不能沿用旧连接下的 Prompt 测试结论。
+    from apps.pipeline import prompt_management
+
+    prompt_management.clear_shared_draft_test()
 
 
 def mark_ai_connection_tested():
@@ -278,6 +282,11 @@ def is_ai_connection_tested():
         return stored == _connection_fingerprint()
     except (RuntimeError, ValueError):
         return False
+
+
+def current_ai_connection_fingerprint():
+    """供后端发布校验使用；不得通过 API、日志或异常返回。"""
+    return _connection_fingerprint()
 
 
 def available_allocation_modes():
@@ -314,7 +323,7 @@ def is_ai_available():
     return is_ai_connection_tested()
 
 
-def get_ai_model_config():
+def get_ai_model_config(*, prompt_version=None):
     api_style = _connection_value("api_style")
     model_name = _connection_value("model_name")
     base_url = _connection_value("base_url")
@@ -324,10 +333,14 @@ def get_ai_model_config():
         raise ValueError("AI 模型连接的 api_style 必须是 responses 或 chat_json")
     validate_ai_base_url(base_url)
     saved_api_key = _connection_value("api_key")
+    if prompt_version is None:
+        from apps.pipeline.ai import prompt_harness
+
+        prompt_version = prompt_harness.get_active_prompt_version()
     return AIModelConfig(
         api_style=api_style,
         model_name=model_name,
-        prompt_version="resume-screening-v2",
+        prompt_version=prompt_version,
         decision_version="decision-v1",
         profile_version="profile-v1",
         parser_version="pypdf-ocr-v2",

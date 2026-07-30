@@ -61,6 +61,41 @@ export function fetchAIConnectionSettings() {
 export function updateAIConnectionSetting(key, value) {
   return client.patch(`/ai-connection/settings/${key}/`, { value })
 }
+export function fetchAIPrompts() {
+  return client.get('/ai-prompts/')
+}
+export function saveAIPromptDraft(modules, lockVersion) {
+  return client.patch('/ai-prompts/draft/', {
+    modules,
+    lock_version: lockVersion,
+  })
+}
+export function resetAIPromptDraft(source, lockVersion) {
+  return client.post('/ai-prompts/draft/reset/', {
+    source,
+    lock_version: lockVersion,
+  })
+}
+export function testAIPromptDraft() {
+  return client.post('/ai-prompts/draft/test/')
+}
+export function publishAIPromptDraft(lockVersion) {
+  return client.post('/ai-prompts/draft/publish/', {
+    lock_version: lockVersion,
+  })
+}
+export function fetchAIPromptVersions(params) {
+  return client.get('/ai-prompts/versions/', { params })
+}
+export function fetchAIPromptVersion(version) {
+  return client.get(`/ai-prompts/versions/${encodeURIComponent(version)}/`)
+}
+export function restoreAIPromptVersion(version, lockVersion) {
+  return client.post(
+    `/ai-prompts/versions/${encodeURIComponent(version)}/restore/`,
+    { lock_version: lockVersion },
+  )
+}
 export function fetchAllocationMode() {
   return client.get('/allocation-mode/')
 }

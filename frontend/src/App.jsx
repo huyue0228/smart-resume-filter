@@ -10,6 +10,7 @@ import SchoolsPage from './pages/SchoolsPage'
 import DepartmentsPage from './pages/DepartmentsPage'
 import ConfigPage from './pages/ConfigPage'
 import AIConnectionPage from './pages/AIConnectionPage'
+import PromptManagementPage from './pages/PromptManagementPage'
 import UsersPage from './pages/UsersPage'
 import AnalyticsPage from './pages/AnalyticsPage'
 import ProcessingTasksPage from './pages/ProcessingTasksPage'
@@ -68,6 +69,10 @@ function AppRoutes() {
         <Route
           path="/ai-connection"
           element={guarded('/ai-connection', <AIConnectionPage />)}
+        />
+        <Route
+          path="/prompt-management"
+          element={guarded('/prompt-management', <PromptManagementPage />)}
         />
         <Route
           path="/users"

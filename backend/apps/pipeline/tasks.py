@@ -14,7 +14,7 @@ from django.utils import timezone
 from apps.core import models as m
 
 from . import ai_config, runner
-from .ai import school_province
+from .ai import prompt_harness, school_province
 from .services import allocate
 
 
@@ -36,7 +36,7 @@ def execute_runs_sequence_task(run_ids):
     acks_late=True,
     reject_on_worker_lost=True,
 )
-def enrich_school_provinces_task(school_ids):
+def enrich_school_provinces_task(school_ids, prompt_version=None):
     """分批补全仍为空的院校省份；失败只写日志，不影响已经完成的导入。"""
     school_ids = sorted(
         {int(item) for item in school_ids if str(item).isdigit() and int(item) > 0}
@@ -52,8 +52,12 @@ def enrich_school_provinces_task(school_ids):
     for offset in range(0, len(schools), school_province.MAX_SCHOOLS_PER_REQUEST):
         batch = schools[offset : offset + school_province.MAX_SCHOOLS_PER_REQUEST]
         try:
+            prompt_kwargs = (
+                {"prompt_version": prompt_version} if prompt_version else {}
+            )
             provinces = school_province.infer_school_provinces(
-                [school.name for school in batch]
+                [school.name for school in batch],
+                **prompt_kwargs,
             )
         except Exception as exc:  # noqa: BLE001 - 不记录模型原文或连接详情
             failed_batches += 1
@@ -79,23 +83,28 @@ def enrich_school_provinces_task(school_ids):
     }
 
 
-def _run_local_school_province_enrichment(school_ids):
+def _run_local_school_province_enrichment(school_ids, prompt_version):
     close_old_connections()
     try:
-        return enrich_school_provinces_task.run(school_ids)
+        return enrich_school_provinces_task.run(school_ids, prompt_version)
     finally:
         close_old_connections()
 
 
 def submit_school_province_enrichment(school_ids):
     """生产投递 Celery；本地 eager 仍放入后台线程，避免阻塞导入响应。"""
+    prompt_version = prompt_harness.get_active_prompt_version()
     if settings.CELERY_TASK_ALWAYS_EAGER:
         _LOCAL_ENRICHMENT_EXECUTOR.submit(
             _run_local_school_province_enrichment,
             list(school_ids),
+            prompt_version,
         )
         return {"backend": "local_thread", "task_id": ""}
-    task = enrich_school_provinces_task.apply_async(args=[list(school_ids)], queue="ai")
+    task = enrich_school_provinces_task.apply_async(
+        args=[list(school_ids), prompt_version],
+        queue="ai",
+    )
     return {"backend": "celery", "task_id": getattr(task, "id", "") or ""}
 
 

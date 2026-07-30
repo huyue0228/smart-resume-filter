@@ -726,7 +726,7 @@ def validate_agent_decision_retry(decision):
 
 def _create_agent_decision(workflow, resume, result):
     runtime_config = ai_config.get_ai_runtime_config()
-    model_config = ai_config.get_ai_model_config()
+    versions = _ai_audit_versions(getattr(workflow, "_processing_run", None))
     proposed = result.output.decision.recommendation
     confidence = result.confidence
     if proposed == m.AgentDispatchDecision.RECOMMEND_DISPATCH and confidence >= runtime_config.dispatch_threshold:
@@ -766,17 +766,27 @@ def _create_agent_decision(workflow, resume, result):
         ai_specialist_evidence=list(
             getattr(output, "ai_specialist_evidence", []) or []
         ),
-        model_name=model_config.model_name,
-        prompt_version=model_config.prompt_version,
-        decision_version=model_config.decision_version,
+        model_name=getattr(result, "model_name", versions["model_name"]),
+        prompt_version=getattr(
+            result, "prompt_version", versions["prompt_version"]
+        ),
+        decision_version=getattr(
+            result, "decision_version", versions["decision_version"]
+        ),
     )
 
 
-def _ai_audit_versions():
+def _ai_audit_versions(processing_run=None):
     """AI 未配置时仍可记录失败决策，但不构造或回退任何模型连接。"""
+    if processing_run is not None:
+        return {
+            "model_name": processing_run.model_name,
+            "prompt_version": processing_run.prompt_version,
+            "decision_version": processing_run.decision_version,
+        }
     try:
         config = ai_config.get_ai_model_config()
-    except ValueError:
+    except (RuntimeError, ValueError):
         return {
             "model_name": "",
             "prompt_version": "resume-screening-v2",
@@ -817,7 +827,7 @@ def _create_agent_failure_decision(
         risk_flags=[error_code],
         error_code=error_code,
         error_message=error_message,
-        **_ai_audit_versions(),
+        **_ai_audit_versions(getattr(workflow, "_processing_run", None)),
     )
 
 
@@ -1225,6 +1235,7 @@ def process_ai_scope_item(run_id, scope_item_id):
                 force=force_ai,
                 processing_run_id=run_id,
                 cancelled=cancelled,
+                prompt_version=run.prompt_version,
             )
         except ai_service.AIServiceError as exc:
             ai_error = exc

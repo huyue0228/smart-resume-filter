@@ -862,6 +862,99 @@ class AgentDispatchDecision(models.Model):
         ]
 
 
+class AIPromptVersion(models.Model):
+    """管理员共享维护、测试并发布的 AI Prompt 整套版本。"""
+
+    STATUS_DRAFT = "draft"
+    STATUS_ACTIVE = "active"
+    STATUS_ARCHIVED = "archived"
+    STATUS_CHOICES = [
+        (STATUS_DRAFT, "共享草稿"),
+        (STATUS_ACTIVE, "激活"),
+        (STATUS_ARCHIVED, "已归档"),
+    ]
+
+    version = models.CharField(max_length=32, unique=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES)
+    release_sequence = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        unique=True,
+    )
+    modules = models.JSONField(default=dict)
+    content_hash = models.CharField(max_length=64, db_index=True)
+    lock_version = models.PositiveIntegerField(default=0)
+
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="ai_prompt_versions_created",
+    )
+    created_by_username_snapshot = models.CharField(max_length=150, blank=True)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="ai_prompt_versions_updated",
+    )
+    updated_by_username_snapshot = models.CharField(max_length=150, blank=True)
+    tested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="ai_prompt_versions_tested",
+    )
+    tested_by_username_snapshot = models.CharField(max_length=150, blank=True)
+    tested_at = models.DateTimeField(null=True, blank=True)
+    test_content_hash = models.CharField(max_length=64, blank=True)
+    test_model_name = models.CharField(max_length=64, blank=True)
+    # 只在后端比较，不通过 API 或日志暴露。
+    test_connection_fingerprint = models.CharField(max_length=64, blank=True)
+    test_summary = models.JSONField(default=dict, blank=True)
+
+    published_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="ai_prompt_versions_published",
+    )
+    published_by_username_snapshot = models.CharField(max_length=150, blank=True)
+    published_at = models.DateTimeField(null=True, blank=True)
+    restored_from = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="restored_drafts",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-release_sequence", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["status"],
+                condition=models.Q(status="draft"),
+                name="core_single_ai_prompt_draft",
+            ),
+            models.UniqueConstraint(
+                fields=["status"],
+                condition=models.Q(status="active"),
+                name="core_single_ai_prompt_active",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["status", "created_at"]),
+            models.Index(fields=["published_at"]),
+        ]
+
+
 class ProcessingRun(models.Model):
     """流水线处理任务记录（Celery 跟踪）。"""
 
