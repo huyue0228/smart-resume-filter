@@ -230,14 +230,19 @@ def test_model_connection():
         if model_config.api_style == "chat_json":
             client.chat.completions.create(
                 model=model_config.model_name,
-                messages=[{"role": "user", "content": "Reply with OK."}],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt_harness.MODEL_CONNECTION_TEST_PROMPT,
+                    }
+                ],
                 max_tokens=4,
                 stream=False,
             )
         else:
             client.responses.create(
                 model=model_config.model_name,
-                input="Reply with OK.",
+                input=prompt_harness.MODEL_CONNECTION_TEST_PROMPT,
                 max_output_tokens=4,
                 store=False,
             )

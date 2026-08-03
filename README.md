@@ -352,7 +352,7 @@ docker compose up -d
 
 模型连接和运行参数均由 `settings.manage_ai_connection` 保护；管理员角色默认拥有该权限，也可在「用户权限」按角色授予。模型连接页配置共享内网 Base URL、API 风格和可选 API Key，通过 `GET /models` 获取模型 ID，同时允许直接输入模型 ID，并执行一次最小真实模型测试，不展示服务商/Profile。API Key 非空时仅可写入；服务端用 Django `SECRET_KEY` 派生的 Fernet 密钥加密存储，GET、前端状态和测试结果都不会返回明文或密文。未获授权的 HR 和接口人不可见、不可调用相关配置、模型发现和测试接口。系统不再提供全局 AI 分配开关；当前完整连接配置测试有效时，上传和处理简历才可选择 AI。
 
-「系统设置 → Prompt 管理」（`/prompt-management`）复用同一 `settings.manage_ai_connection` 权限，管理员以整套方式维护五个固定业务模块：筛选角色与任务目标、学历/院校/志愿/当前岗位等业务边界、专业/项目/实习/技能/岗位职责评价口径、AI 专项人才识别口径，以及院校省份/校区/分校判断口径。后端始终按固定顺序组装，并追加不可编辑的最小安全底座、动态 JSON 数据、省份白名单和 Pydantic JSON Schema/结构化输出协议；简历、岗位职责和院校名称中的指令一律按不可信数据处理，不能改变任务、固定岗位或输出协议。管理员不能编辑模板变量、载荷字段或 Schema。
+「系统设置 → Prompt 管理」（`/prompt-management`）复用同一 `settings.manage_ai_connection` 权限，授权管理员可以查看系统使用的全部 Prompt 文本，并以整套方式编辑五个固定业务模块：筛选角色与任务目标、学历/院校/志愿/当前岗位等业务边界、专业/项目/实习/技能/岗位职责评价口径、AI 专项人才识别口径，以及院校省份/校区/分校判断口径。后端始终按固定顺序组装，并追加不可编辑但全文可见的最小安全底座、省份白名单、动态 JSON 字段载荷模板、结构化输出协议和完整 Pydantic JSON Schema；简历、岗位职责和院校名称中的指令一律按不可信数据处理，不能改变任务、固定岗位或输出协议。管理员不能编辑模板变量、载荷字段或 Schema。页面以当前五个编辑器中的内容实时组装并展示简历筛选和院校省份补全的完整 System Prompt；动态载荷只展示字段完整的占位 JSON，不读取或展示任何真实简历、岗位、候选人或院校数据。模型连接测试探针 `Reply with OK.` 也全文只读可见，但继续由代码固定，不进入五模块、Prompt 版本、草稿真实测试或发布生命周期。
 
 Prompt 采用“共享草稿 → 真实模型测试 → 原子发布 → 历史恢复”流程。五个模块均必填，保存时移除 NUL 和首尾空白，单模块最多 8,000 字符、整套最多 24,000 字符，未知或缺失模块会被拒绝；保存、重置、发布和历史恢复携带 `lock_version`，并发覆盖返回 409。真实测试使用内置脱敏简历和院校样例，分别走当前 `responses` 或 `chat_json` 正式调用路径，只保存模型名、时间和脱敏摘要，不保存原始模型响应，也不返回内部连接指纹。草稿或模型连接变化会使 Prompt 测试失效；只有草稿内容哈希、当前连接指纹和成功测试仍一致时才能发布。迁移初始化激活版本 `resume-screening-v2` 和一份相同的未测试草稿，后续激活版本命名为 `prompt-vNNNNNN-<hash8>`；发布时旧激活版本归档并自动创建同内容的新草稿，历史恢复只复制到草稿，仍需重新测试和发布。
 
@@ -454,7 +454,7 @@ docker compose up -d
 
 拥有 `settings.manage_ai_connection` 的角色可在「系统设置 → AI 模型连接」配置共享内网 Base URL、API 风格和可选 API Key，通过 `GET /models` 选择或直接输入模型 ID，并执行最小真实模型测试；同页还集中维护 AI 运行参数和“AI 专项”路由。管理员角色默认拥有该权限，HR/接口人未被授权时不可访问。页面不展示服务商/Profile；专项内部命中证据和审计字段仍不对外展示。Key 非空时仅允许写入、不会被读取接口返回，服务端以由 Django `SECRET_KEY` 派生的 Fernet 密文存储。运行时只读取该数据库配置。日常修改连接请使用授权角色的配置页，避免在 shell、文档或工单中传播 API Key。当前完整连接配置测试成功后，上传和“处理简历”弹窗才会开放 AI 模式；保存连接或清除 Key 后测试状态失效，只能选择 Rule，直至重新测试成功。
 
-同一权限还控制独立「Prompt 管理」页面、菜单、路由和全部 `/api/ai-prompts/` 接口。页面展示激活版本、共享草稿、测试模型/时间、五个独立编辑器和字符计数，支持保存、真实测试、发布、恢复激活值/系统默认值、只读组装顺序预览、历史分页、模块级差异和恢复到草稿；有未保存内容、未测试或测试已失效时不能发布。发布确认明确提示“只影响新提交的 AI 任务”，不会改变模型连接测试状态。
+同一权限还控制独立「Prompt 管理」页面、菜单、路由和全部 `/api/ai-prompts/` 接口。页面展示激活版本、共享草稿、测试模型/时间、五个独立编辑器和字符计数，支持保存、真实测试、发布、恢复激活值/系统默认值、全部 Prompt 全文只读预览、历史分页、模块级差异和恢复到草稿；完整 System Prompt 随当前编辑器内容实时更新，固定区段、完整 Schema、字段完整的动态载荷占位模板和 `Reply with OK.` 连接探针只读展示。有未保存内容、未测试或测试已失效时不能发布。发布确认明确提示“只影响新提交的 AI 任务”，不会改变模型连接测试状态。
 
 ## 主要流程
 
@@ -495,7 +495,7 @@ docker compose up -d
 | GET | `/api/analytics/recruitment-overview/` | 需要 `analytics.view`；按导入 cohort 返回招聘总览、转化、耗时、趋势和分布，默认最近 30 天，缓存 5 分钟 |
 | GET | `/api/allocation-mode/` | 具有 `pipeline.run` 或 `resume.import` 权限时返回 `default_mode`、`available_modes` 和 `ai_ready`，不泄露模型连接信息 |
 | GET/PATCH | `/api/ai-connection/settings/`、`/api/ai-connection/settings/{key}/` | 具有 `settings.manage_ai_connection` 权限时读取/更新 AI 运行参数和“AI 专项”配置；页面按 `runtime / special_route` 分页签展示 |
-| GET | `/api/ai-prompts/` | 具有 `settings.manage_ai_connection` 权限时读取五模块定义、限制、系统默认值、只读组装预览、激活版本和共享草稿 |
+| GET | `/api/ai-prompts/` | 具有 `settings.manage_ai_connection` 权限时读取五模块定义、限制、系统默认值、激活版本、共享草稿，以及 `full_prompt_preview` 全文可见性数据；后者提供固定安全底座、省份白名单、结构化输出协议、完整 JSON Schema 和字段完整的动态载荷占位模板，并通过 `connection_test.fixed_user_prompt.content` 返回代码固定的 `Reply with OK.` 连接探针，不包含真实业务数据 |
 | PATCH | `/api/ai-prompts/draft/` | 携带完整五模块集合和 `lock_version` 保存共享草稿；校验失败返回 400，并发冲突返回 409 |
 | POST | `/api/ai-prompts/draft/reset/` | 携带 `source=active|default` 和 `lock_version`，将共享草稿恢复为激活版本或系统默认值 |
 | POST | `/api/ai-prompts/draft/test/` | 对已保存共享草稿执行简历筛选和院校省份两条真实模型测试 |

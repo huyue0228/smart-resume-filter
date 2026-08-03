@@ -39,6 +39,31 @@ function apiErrorDetail(error, fallback) {
   return error?.response?.data?.detail || error?.response?.data?.code || fallback
 }
 
+function assembleSystemPrompt(preview, modules) {
+  return [
+    ...preview.editable_module_order.map((key) => modules[key] || ''),
+    ...preview.fixed_system_sections.map((section) => section.content),
+  ].join('\n\n')
+}
+
+function previewUserPrompt(preview) {
+  return preview.user_payload_template || preview.fixed_user_prompt
+}
+
+const promptPreviewStyle = {
+  margin: '8px 0 0',
+  padding: 12,
+  maxHeight: 520,
+  overflow: 'auto',
+  whiteSpace: 'pre-wrap',
+  overflowWrap: 'anywhere',
+  border: '1px solid #e5e7eb',
+  borderRadius: 6,
+  background: '#f8fafc',
+  fontSize: 12,
+  lineHeight: 1.6,
+}
+
 export default function PromptManagementPage() {
   const [data, setData] = useState(null)
   const [modules, setModules] = useState({})
@@ -397,34 +422,53 @@ export default function PromptManagementPage() {
           </Space>
         </Card>
 
-        <Card title="最终组装顺序（只读）">
+        <Card title="全部 Prompt（只读预览）">
           <Alert
             type="warning"
             showIcon
-            message="预览仅展示模块和固定区段顺序，不展示任何真实简历或岗位数据。"
+            message="五个业务模块可编辑，其余 Prompt 全文只读可见。"
+            description="下方展示当前编辑器内容、完整安全底座、省份白名单、动态 JSON 字段模板、结构化输出协议、JSON Schema 和模型连接测试探针。动态载荷只展示占位值，不展示任何真实简历、岗位或院校数据。"
             style={{ marginBottom: 16 }}
           />
           <Row gutter={[16, 16]}>
-            {Object.entries(data.assembly_preview).map(([key, preview]) => (
+            {Object.entries(data.full_prompt_preview).map(([key, preview]) => (
               <Col xs={24} lg={12} key={key}>
                 <Card
                   size="small"
-                  title={key === 'resume_screening' ? '简历筛选' : '院校省份补全'}
+                  title={preview.title}
                 >
-                  <Typography.Text strong>可编辑模块顺序</Typography.Text>
-                  <ol>
-                    {preview.editable_module_order.map((moduleKey) => (
-                      <li key={moduleKey}>
-                        {data.module_definitions.find((item) => item.key === moduleKey)?.label}
-                      </li>
-                    ))}
-                  </ol>
-                  <Typography.Text strong>固定追加区段</Typography.Text>
-                  <ol>
-                    {preview.fixed_sections.map((section) => (
-                      <li key={section}>{section}</li>
-                    ))}
-                  </ol>
+                  <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                    {(preview.editable_module_order.length > 0
+                      || preview.fixed_system_sections.length > 0) && (
+                      <div>
+                        <Typography.Text strong>System 消息（完整组装）</Typography.Text>
+                        <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                          可编辑模块按固定顺序组装，并追加：
+                          {preview.fixed_system_sections.map((section) => section.label).join('、')}
+                        </Typography.Paragraph>
+                        <pre
+                          aria-label={`${preview.title}完整 System Prompt`}
+                          style={promptPreviewStyle}
+                        >
+                          {assembleSystemPrompt(preview, modules)}
+                        </pre>
+                      </div>
+                    )}
+                    {previewUserPrompt(preview) && (
+                      <div>
+                        <Typography.Text strong>{previewUserPrompt(preview).label}</Typography.Text>
+                        <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                          {previewUserPrompt(preview).description}
+                        </Typography.Paragraph>
+                        <pre
+                          aria-label={`${preview.title}${preview.fixed_user_prompt ? '固定' : '动态'} User Prompt`}
+                          style={promptPreviewStyle}
+                        >
+                          {previewUserPrompt(preview).content}
+                        </pre>
+                      </div>
+                    )}
+                  </Space>
                 </Card>
               </Col>
             ))}

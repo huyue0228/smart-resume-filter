@@ -85,6 +85,45 @@ class PromptManagementApiTests(TestCase):
             [item["key"] for item in payload["module_definitions"]],
             list(prompt_harness.MODULE_KEYS),
         )
+        preview = payload["full_prompt_preview"]
+        screening_preview = preview["resume_screening"]
+        school_preview = preview["school_province"]
+        connection_preview = preview["connection_test"]
+        self.assertEqual(
+            screening_preview["editable_module_order"],
+            list(prompt_harness.SCREENING_MODULE_KEYS),
+        )
+        self.assertIn(
+            prompt_harness.SCREENING_SECURITY_BASE,
+            str(screening_preview["fixed_system_sections"]),
+        )
+        self.assertIn(
+            '"current_job"',
+            screening_preview["user_payload_template"]["content"],
+        )
+        self.assertIn(
+            '"ResumeScreeningOutput"',
+            str(screening_preview["fixed_system_sections"]),
+        )
+        self.assertIn(
+            prompt_harness.SCHOOL_SECURITY_BASE,
+            str(school_preview["fixed_system_sections"]),
+        )
+        self.assertIn(
+            "province 只能填写下列标准简称之一",
+            str(school_preview["fixed_system_sections"]),
+        )
+        self.assertIn(
+            '"schools"',
+            school_preview["user_payload_template"]["content"],
+        )
+        self.assertEqual(connection_preview["editable_module_order"], [])
+        self.assertEqual(connection_preview["fixed_system_sections"], [])
+        self.assertEqual(
+            connection_preview["fixed_user_prompt"]["content"],
+            prompt_harness.MODEL_CONNECTION_TEST_PROMPT,
+        )
+        self.assertNotIn("真实简历", str(preview))
         self.assertNotIn("connection_fingerprint", str(payload))
 
     def test_all_prompt_endpoints_require_ai_connection_permission(self):
