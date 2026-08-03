@@ -460,45 +460,6 @@ class AIResumeScreeningServiceTests(TestCase):
         httpx_client.assert_called_once_with(verify=False)
         self.assertIs(openai_client.call_args.kwargs["http_client"], http_client)
 
-    def test_connection_test_uses_visible_fixed_probe_for_responses(self):
-        create = Mock(return_value=SimpleNamespace())
-        client = SimpleNamespace(responses=SimpleNamespace(create=create))
-
-        with patch.object(service, "_get_openai_client", return_value=client):
-            service.test_model_connection()
-
-        self.assertEqual(
-            create.call_args.kwargs["input"],
-            service.prompt_harness.MODEL_CONNECTION_TEST_PROMPT,
-        )
-
-    def test_connection_test_uses_visible_fixed_probe_for_chat_json(self):
-        ai_config.save_ai_connection_config(
-            {
-                "api_style": "chat_json",
-                "model_name": "deepseek-v4-pro",
-                "base_url": "https://api.deepseek.com",
-                "api_key": "test-key",
-            }
-        )
-        create = Mock(return_value=SimpleNamespace())
-        client = SimpleNamespace(
-            chat=SimpleNamespace(completions=SimpleNamespace(create=create))
-        )
-
-        with patch.object(service, "_get_openai_client", return_value=client):
-            service.test_model_connection()
-
-        self.assertEqual(
-            create.call_args.kwargs["messages"],
-            [
-                {
-                    "role": "user",
-                    "content": service.prompt_harness.MODEL_CONNECTION_TEST_PROMPT,
-                }
-            ],
-        )
-
     def test_openai_client_is_reused_for_same_worker_connection(self):
         http_client = Mock()
         create = Mock(return_value=SimpleNamespace())

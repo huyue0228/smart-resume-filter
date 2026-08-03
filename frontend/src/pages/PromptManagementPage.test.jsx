@@ -89,65 +89,6 @@ function managementPayload(overrides = {}) {
         fixed_sections: ['最小安全底座', '省份白名单'],
       },
     },
-    full_prompt_preview: {
-      resume_screening: {
-        title: '简历筛选',
-        editable_module_order: moduleDefinitions.slice(0, 4).map(({ key }) => key),
-        fixed_system_sections: [
-          {
-            key: 'screening_security_base',
-            label: '最小安全底座（只读）',
-            content: '简历筛选固定安全底座全文',
-          },
-          {
-            key: 'resume_schema',
-            label: '结构化输出协议与完整 JSON Schema（只读）',
-            content: '结构化输出协议：ResumeScreeningOutput 完整 JSON Schema',
-          },
-        ],
-        user_payload_template: {
-          label: '动态 JSON 数据载荷模板（只读）',
-          description: '运行时替换动态值。',
-          content: '{"current_job":"<动态岗位>","resume_text":"<动态简历正文>"}',
-        },
-      },
-      school_province: {
-        title: '院校省份补全',
-        editable_module_order: ['school_province_inference'],
-        fixed_system_sections: [
-          {
-            key: 'school_security_base',
-            label: '最小安全底座（只读）',
-            content: '院校固定安全底座全文',
-          },
-          {
-            key: 'province_whitelist',
-            label: '省份白名单（只读）',
-            content: '省份白名单：北京、上海',
-          },
-          {
-            key: 'school_schema',
-            label: '结构化输出协议与完整 JSON Schema（只读）',
-            content: '结构化输出协议：SchoolProvinceOutput 完整 JSON Schema',
-          },
-        ],
-        user_payload_template: {
-          label: '动态 JSON 数据载荷模板（只读）',
-          description: '运行时替换动态院校名称。',
-          content: '{"schools":[{"name":"<动态院校名称>"}]}',
-        },
-      },
-      connection_test: {
-        title: '模型连接测试',
-        editable_module_order: [],
-        fixed_system_sections: [],
-        fixed_user_prompt: {
-          label: '连接测试 User 消息（只读）',
-          description: '代码固定的最小连接探针。',
-          content: 'Reply with OK.',
-        },
-      },
-    },
     active: promptRecord({
       version: 'resume-screening-v2',
       status: 'active',
@@ -252,33 +193,6 @@ describe('PromptManagementPage', () => {
     }))
     await waitFor(() => expect(publishAIPromptDraft).toHaveBeenCalledWith(2))
     expect(await screen.findByText('prompt-v000001-12345678')).toBeTruthy()
-  })
-
-  it('shows every editable and fixed Prompt section with redacted payload templates', async () => {
-    const user = userEvent.setup()
-    render(<PromptManagementPage />)
-
-    const screeningPrompt = await screen.findByLabelText('简历筛选完整 System Prompt')
-    expect(screeningPrompt.textContent).toContain('筛选角色与任务目标默认内容')
-    expect(screeningPrompt.textContent).toContain('简历筛选固定安全底座全文')
-    expect(screeningPrompt.textContent).toContain('ResumeScreeningOutput 完整 JSON Schema')
-    expect(screen.getByLabelText('简历筛选动态 User Prompt').textContent).toContain(
-      '<动态简历正文>',
-    )
-    expect(screen.getByLabelText('院校省份补全完整 System Prompt').textContent).toContain(
-      '省份白名单：北京、上海',
-    )
-    expect(screen.getByLabelText('院校省份补全动态 User Prompt').textContent).toContain(
-      '<动态院校名称>',
-    )
-    expect(screen.getByLabelText('模型连接测试固定 User Prompt').textContent).toBe(
-      'Reply with OK.',
-    )
-
-    const roleEditor = screen.getByRole('textbox', { name: '筛选角色与任务目标' })
-    await user.clear(roleEditor)
-    await user.type(roleEditor, '实时预览的新角色目标')
-    expect(screeningPrompt.textContent).toContain('实时预览的新角色目标')
   })
 
   it('reloads the shared draft after an optimistic lock conflict', async () => {

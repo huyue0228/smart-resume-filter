@@ -125,7 +125,6 @@ def prompt_management_payload():
         },
         "default_modules": prompt_harness.default_modules(),
         "assembly_preview": prompt_harness.assembly_preview(),
-        "full_prompt_preview": prompt_harness.full_prompt_preview(),
         "active": serialize_prompt(active),
         "draft": serialize_prompt(draft),
     }
