@@ -3,6 +3,7 @@ import {
   completeW3OAuth2Login as completeW3OAuth2LoginApi,
   fetchMe,
   logout as logoutApi,
+  validateDevToken,
 } from '../api/services'
 import { RoleContext } from './roleState'
 
@@ -48,6 +49,12 @@ export function RoleProvider({ children }) {
     return applyLogin(data)
   }
 
+  const loginWithDevToken = async (rawToken) => {
+    const devToken = String(rawToken || '').trim()
+    const { data: userData } = await validateDevToken(devToken)
+    return applyLogin({ token: devToken, user: userData })
+  }
+
   const logout = async () => {
     try {
       await logoutApi()
@@ -78,6 +85,7 @@ export function RoleProvider({ children }) {
         contact: user?.contact || null,
         isAuthenticated: Boolean(token && user),
         completeW3OAuth2Login,
+        loginWithDevToken,
         logout,
         refreshMe,
         hasPermission,

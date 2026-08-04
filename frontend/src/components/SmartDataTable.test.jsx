@@ -35,6 +35,73 @@ describe('SmartDataTable', () => {
     }))
   })
 
+  it('offers 500 rows per page and submits page_size=500', async () => {
+    const request = vi.fn().mockResolvedValue({ data: { results: rows, count: 600 } })
+    const { container } = render(
+      <SmartDataTable
+        tableId="page-size-500"
+        rowKey="id"
+        columns={[{ title: '姓名', dataIndex: 'name' }]}
+        request={request}
+      />,
+    )
+
+    await waitFor(() => expect(request).toHaveBeenCalledWith({ page: 1, page_size: 10 }))
+    await userEvent.click(
+      container.querySelector('.ant-pagination-options-size-changer .ant-select-selector'),
+    )
+    await userEvent.click(await screen.findByText(/500\s*(\/\s*page|条\s*\/\s*页)/i))
+
+    await waitFor(() => expect(request).toHaveBeenLastCalledWith({
+      page: 1,
+      page_size: 500,
+    }))
+  })
+
+  it('applies and resets a date range filter with separate server params', async () => {
+    const request = vi.fn().mockResolvedValue({ data: { results: rows, count: 1 } })
+    const { container } = render(
+      <SmartDataTable
+        tableId="date-range-request"
+        rowKey="id"
+        columns={[{
+          title: '投递时间',
+          dataIndex: 'current_apply_date',
+          filter: {
+            type: 'dateRange',
+            params: ['current_apply_date_from', 'current_apply_date_to'],
+            placeholders: ['投递开始日期', '投递结束日期'],
+          },
+        }]}
+        request={request}
+      />,
+    )
+
+    await waitFor(() => expect(request).toHaveBeenCalledWith({ page: 1, page_size: 10 }))
+    await userEvent.click(container.querySelector('.ant-table-filter-trigger'))
+    fireEvent.change(screen.getByLabelText('投递开始日期'), {
+      target: { value: '2026-07-01' },
+    })
+    fireEvent.change(screen.getByLabelText('投递结束日期'), {
+      target: { value: '2026-07-31' },
+    })
+    await userEvent.click(screen.getByRole('button', { name: /确认/ }))
+
+    await waitFor(() => expect(request).toHaveBeenLastCalledWith({
+      page: 1,
+      page_size: 10,
+      current_apply_date_from: '2026-07-01',
+      current_apply_date_to: '2026-07-31',
+    }))
+
+    await userEvent.click(container.querySelector('.ant-table-filter-trigger'))
+    await userEvent.click(screen.getByRole('button', { name: /重\s*置/ }))
+    await waitFor(() => expect(request).toHaveBeenLastCalledWith({
+      page: 1,
+      page_size: 10,
+    }))
+  })
+
   it('fixes pagination to the visible table width and scrolls only the table body', async () => {
     const request = vi.fn().mockResolvedValue({ data: { results: rows, count: 20 } })
     const rectSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
@@ -115,7 +182,8 @@ describe('SmartDataTable', () => {
         pagination={{
           className: 'custom-pagination',
           defaultPageSize: 20,
-          showSizeChanger: false,
+          pageSizeOptions: [20, 200],
+          showSizeChanger: true,
         }}
         rowKey="id"
         columns={[{ title: '姓名', dataIndex: 'name' }]}
@@ -127,6 +195,12 @@ describe('SmartDataTable', () => {
     const pagination = container.querySelector('.srf-table-pagination-sticky')
     expect(pagination).toBeTruthy()
     expect(pagination.classList.contains('custom-pagination')).toBe(true)
+    await userEvent.click(
+      container.querySelector('.ant-pagination-options-size-changer .ant-select-selector'),
+    )
+    expect(screen.queryByText(/500\s*(\/\s*page|条\s*\/\s*页)/i)).toBeNull()
+    await userEvent.click(await screen.findByText(/200\s*(\/\s*page|条\s*\/\s*页)/i))
+    await waitFor(() => expect(request).toHaveBeenLastCalledWith({ page: 1, page_size: 200 }))
   })
 
   it('reloads the first page when stable external parameters change', async () => {

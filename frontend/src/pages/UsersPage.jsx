@@ -346,12 +346,6 @@ export default function UsersPage() {
             { type: 'email', message: '请输入有效邮箱' },
           ]}
         />
-        <ProFormText.Password
-          name="password"
-          label={userModal.record ? '重置密码' : '密码'}
-          placeholder={userModal.record ? '留空则不修改' : '请输入初始密码'}
-          rules={userModal.record ? [] : [{ required: true }]}
-        />
         <ProFormSelect
           name="role"
           label="角色类型"

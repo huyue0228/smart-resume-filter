@@ -1,5 +1,8 @@
 """Derived system resume status for candidate list and scoped reprocessing."""
 
+from datetime import date
+import re
+
 from django.db.models import Q
 
 from apps.core import candidate_summary
@@ -196,7 +199,7 @@ def filter_queryset_by_processing_result(qs, params):
     ).distinct()
 
 
-def apply_candidate_filters(qs, params):
+def apply_candidate_filters(qs, params, *, current_resume_resolver=None):
     search = _value(params, "search")
     if search:
         normalized_search = search.strip().lower()
@@ -252,6 +255,11 @@ def apply_candidate_filters(qs, params):
             lambda candidate: apply_id.lower()
             in candidate_summary.current_apply_id(candidate).lower(),
         )
+    qs = filter_queryset_by_current_apply_date(
+        qs,
+        params,
+        resume_resolver=current_resume_resolver,
+    )
     current_entity_values = _list_value(params, "current_entity_in")
     if current_entity_values:
         qs = _filter_by_candidate_summary_values(
@@ -366,6 +374,50 @@ def apply_candidate_filters(qs, params):
     )
     qs = filter_queryset_by_system_status(qs, system_statuses)
     return filter_queryset_by_processing_result(qs, params).distinct()
+
+
+def filter_queryset_by_current_apply_date(qs, params, *, resume_resolver=None):
+    start_date, end_date = parse_current_apply_date_range(params)
+    if not start_date and not end_date:
+        return qs
+
+    def matches(candidate):
+        if resume_resolver:
+            resume = resume_resolver(candidate)
+            apply_date = resume.apply_date if resume else None
+        else:
+            apply_date = candidate_summary.current_apply_date(candidate)
+        if not apply_date:
+            return False
+        if start_date and apply_date < start_date:
+            return False
+        if end_date and apply_date > end_date:
+            return False
+        return True
+
+    return _filter_by_candidate_summary(qs, matches)
+
+
+def parse_current_apply_date_range(params):
+    raw_start = _value(params, "current_apply_date_from")
+    raw_end = _value(params, "current_apply_date_to")
+
+    def parse(raw_value, parameter):
+        if raw_value in (None, ""):
+            return None
+        value = str(raw_value).strip()
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            raise ValueError(f"{parameter} 日期格式必须为 YYYY-MM-DD")
+        try:
+            return date.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError(f"{parameter} 日期格式必须为 YYYY-MM-DD") from exc
+
+    start_date = parse(raw_start, "current_apply_date_from")
+    end_date = parse(raw_end, "current_apply_date_to")
+    if start_date and end_date and start_date > end_date:
+        raise ValueError("投递时间开始日期不能晚于结束日期")
+    return start_date, end_date
 
 
 def candidate_filter_options(qs):

@@ -97,12 +97,13 @@ Use focused verification for the files changed:
 - Main API code is under `backend/apps/api/`.
 - Standard pagination lives in `backend/apps/api/pagination.py`; list APIs support `page_size` with a max of 500.
 - Routes use DRF `DefaultRouter` for resumes, candidates, jobs, schools, departments, contacts, workflow attempts, agent decisions, and runs.
-- Explicit endpoints include `auth/login/`, `auth/logout/`, `me/`, `permissions/`, `import/`, `import/undo/`, and `pipeline/run/`.
+- Explicit endpoints include `auth/logout/`, `auth/w3/status/`, `auth/w3/start/`, `auth/w3/callback/`, `auth/w3/complete/`, `me/`, `permissions/`, `import/`, `import/undo/`, and `pipeline/run/`.
 - `AssignmentAttemptViewSet` has a `dispatch_welink` method with `url_path="dispatch"`. Do not rename it to `dispatch`, because that would override DRF ViewSet dispatch.
 - Resume export and preview helpers return Django `HttpResponse`, not DRF `Response`. Keep zip headers such as `X-Export-Count` / `X-Export-Missing` and preview header `X-Resume-Filename` stable for the frontend.
 - Candidate export, resume direct preview, assignment-attempt scoped preview, and visible-column list filters are covered in `backend/apps/api/tests.py`; keep those tests aligned when changing table columns or query params.
-- API defaults to authenticated access. Local formal development uses DRF Token login seeded by `seed_base`; W3 authentication is a future adapter around the same `User`/RBAC/`Contact` mapping.
-- Contact imports automatically create/update interface-user accounts with `username = Contact.employee_no`, default password `pass1234` for new users, and the matching second/third-level contact role. W3 login will also map by employee number.
+- API defaults to authenticated access. Production login is W3 OAuth2 only; W3 completion returns the existing DRF Token session. `/api/auth/login/` and `/admin/` are intentionally absent and both return 404. When `DEBUG=True` and W3 is not ready, use `python manage.py issue_dev_token --username <employee_no>` and let the login page validate that Token through `/api/me/` before storing it.
+- `User` retains Django's `AbstractUser.password` column for framework compatibility, but every account must have an unusable password. User APIs reject any `password` field, contact imports and `seed_base` must call `set_unusable_password()`, and no UI or documentation should reintroduce default-password, initial-password, or reset-password flows.
+- Contact imports automatically create/update interface-user accounts with `username = Contact.employee_no`, an unusable password, and the matching second/third-level contact role. W3 maps by employee number plus email.
 
 ## Frontend Notes
 

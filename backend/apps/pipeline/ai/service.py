@@ -24,6 +24,7 @@ from django.utils import timezone
 from pydantic import ValidationError
 
 from apps.core import models as m
+from apps.core.departments import secondary_department
 from apps.ingestion.sources import RESUME_SUBDIR
 from apps.pipeline import ai_config
 
@@ -650,9 +651,7 @@ def screen_resume(
     # 生产链路由 Step3 显式传入冻结引用；保留确定性推导仅供内部调用与旧测试兼容，
     # 但这些引用不会进入模型提示词，也不会由模型选择。
     if department is None:
-        department = job.department
-        if department and department.level == 3:
-            department = department.parent
+        department = secondary_department(job.department)
     if contact is None and department:
         contact = m.Contact.objects.filter(
             department=department,

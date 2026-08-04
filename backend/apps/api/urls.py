@@ -27,7 +27,6 @@ router.register("roles", views.RoleViewSet, basename="role")
 router.register("configs", views.ConfigViewSet, basename="config")
 
 urlpatterns = [
-    path("auth/login/", views.AuthLoginView.as_view()),
     path("auth/logout/", views.AuthLogoutView.as_view()),
     path("auth/w3/status/", views.W3OAuth2StatusView.as_view()),
     path("auth/w3/start/", views.W3OAuth2StartView.as_view()),

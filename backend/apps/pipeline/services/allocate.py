@@ -10,6 +10,7 @@ from django.utils import timezone
 
 from apps.core import models as m
 from apps.core import system_status
+from apps.core.departments import secondary_department as _secondary_department
 from apps.pipeline import ai_config
 from apps.pipeline.ai import service as ai_service
 
@@ -298,16 +299,6 @@ def _reopen_workflow(workflow, mode):
 def _next_attempt_no(workflow):
     max_no = workflow.attempts.aggregate(max_no=Max("attempt_no"))["max_no"] or 0
     return max_no + 1
-
-
-def _secondary_department(department):
-    if not department:
-        return None
-    if department.level == 2:
-        return department
-    if department.level == 3:
-        return department.parent
-    return None
 
 
 def _first_secondary_contact(department):

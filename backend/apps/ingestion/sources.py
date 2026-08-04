@@ -18,6 +18,7 @@ from apps.accounts.models import User
 from apps.accounts.protected_users import PROTECTED_ADMIN_USERNAME
 from apps.accounts.permissions import ensure_rbac_defaults
 from apps.core import models as m
+from apps.core.departments import resolve_department_hierarchy
 
 from .identity import identity_hash, normalize_phone
 
@@ -234,23 +235,40 @@ def _normalized_job_key_part(value):
     return "".join(str(value or "").casefold().split())
 
 
-def _secondary_department_name(department):
-    if not department:
-        return ""
-    if department.level == 2:
-        return department.name
-    if department.level == 3 and department.parent:
-        return department.parent.name
-    return ""
+def _job_row_department_names(row):
+    return (
+        _val(row, "一层部门") or _val(row, "一级部门"),
+        _val(row, "二层部门") or _val(row, "二级部门"),
+        _val(row, "三级部门"),
+    )
 
 
-def _job_business_key(entity, department_name, public_name, position_name, category):
-    """岗位唯一业务键：主体、二级部门、对外名称、内部名称、岗位类别。"""
+def _job_model_department_names(job):
+    hierarchy = resolve_department_hierarchy(job.department)
+    return (
+        hierarchy.primary.name if hierarchy.primary else "",
+        hierarchy.secondary.name if hierarchy.secondary else "",
+        hierarchy.tertiary.name if hierarchy.tertiary else "",
+    )
+
+
+def _job_business_key(
+    entity,
+    primary_department_name,
+    secondary_department_name,
+    tertiary_department_name,
+    public_name,
+    position_name,
+    category,
+):
+    """岗位完整业务键，所有部分统一去空白并忽略大小写。"""
     return tuple(
         _normalized_job_key_part(value)
         for value in (
             entity,
-            department_name,
+            primary_department_name,
+            secondary_department_name,
+            tertiary_department_name,
             public_name,
             position_name,
             category,
@@ -259,9 +277,12 @@ def _job_business_key(entity, department_name, public_name, position_name, categ
 
 
 def _job_row_business_key(row):
+    primary, secondary, tertiary = _job_row_department_names(row)
     return _job_business_key(
         _val(row, "主体") or _val(row, "招聘主体"),
-        _val(row, "二层部门") or _val(row, "二级部门"),
+        primary,
+        secondary,
+        tertiary,
         _val(row, "对外发布名称"),
         _val(row, "职位名称"),
         _val(row, "岗位类别"),
@@ -269,9 +290,50 @@ def _job_row_business_key(row):
 
 
 def _job_model_business_key(job):
+    primary, secondary, tertiary = _job_model_department_names(job)
     return _job_business_key(
         job.entity,
-        _secondary_department_name(job.department),
+        primary,
+        secondary,
+        tertiary,
+        job.public_name,
+        job.position_name,
+        job.category,
+    )
+
+
+def _job_legacy_business_key(
+    entity, secondary_department_name, public_name, position_name, category
+):
+    """旧岗位键，用于把历史聚合岗位安全迁移到唯一完整路径。"""
+    return tuple(
+        _normalized_job_key_part(value)
+        for value in (
+            entity,
+            secondary_department_name,
+            public_name,
+            position_name,
+            category,
+        )
+    )
+
+
+def _job_row_legacy_business_key(row):
+    _primary, secondary, _tertiary = _job_row_department_names(row)
+    return _job_legacy_business_key(
+        _val(row, "主体") or _val(row, "招聘主体"),
+        secondary,
+        _val(row, "对外发布名称"),
+        _val(row, "职位名称"),
+        _val(row, "岗位类别"),
+    )
+
+
+def _job_model_legacy_business_key(job):
+    _primary, secondary, _tertiary = _job_model_department_names(job)
+    return _job_legacy_business_key(
+        job.entity,
+        secondary,
         job.public_name,
         job.position_name,
         job.category,
@@ -290,9 +352,12 @@ def _assert_unique_job_rows(job_rows):
 
 def _existing_jobs_by_business_key():
     jobs_by_key = {}
+    jobs_by_legacy_key = {}
     duplicate_ids = []
     jobs = list(
-        m.Job.objects.select_related("department", "department__parent").order_by("id")
+        m.Job.objects.select_related(
+            "department", "department__parent", "department__parent__parent"
+        ).order_by("id")
     )
     for job in jobs:
         key = _job_model_business_key(job)
@@ -300,23 +365,93 @@ def _existing_jobs_by_business_key():
             duplicate_ids.extend([jobs_by_key[key].id, job.id])
         else:
             jobs_by_key[key] = job
+        jobs_by_legacy_key.setdefault(
+            _job_model_legacy_business_key(job), []
+        ).append(job)
     if duplicate_ids:
         ids = "、".join(str(job_id) for job_id in sorted(set(duplicate_ids)))
         raise ValueError(f"数据库岗位存在重复业务键，岗位 ID：{ids}")
-    return jobs_by_key
+    return jobs_by_key, jobs_by_legacy_key
+
+
+def _legacy_job_matches_path(job, item):
+    existing_primary, _existing_secondary, existing_tertiary = (
+        _job_model_department_names(job)
+    )
+    primary, _secondary, tertiary = item["department_names"]
+    primary_matches = not existing_primary or (
+        _normalized_job_key_part(existing_primary)
+        == _normalized_job_key_part(primary)
+    )
+    tertiary_matches = not existing_tertiary or (
+        _normalized_job_key_part(existing_tertiary)
+        == _normalized_job_key_part(tertiary)
+    )
+    becomes_more_complete = (
+        (not existing_primary and bool(primary))
+        or (not existing_tertiary and bool(tertiary))
+    )
+    return primary_matches and tertiary_matches and becomes_more_complete
+
+
+def _prepare_legacy_job_migrations(job_rows, jobs_by_key, jobs_by_legacy_key):
+    """决定唯一补齐与一拆多，返回完整键到可原位更新岗位的映射。"""
+    imported_keys = {item["business_key"] for item in job_rows}
+    rows_by_legacy_key = {}
+    for item in job_rows:
+        rows_by_legacy_key.setdefault(item["legacy_business_key"], []).append(item)
+
+    reusable_jobs = {}
+    for legacy_key, items in rows_by_legacy_key.items():
+        unmatched_items = [
+            item for item in items if item["business_key"] not in jobs_by_key
+        ]
+        candidates = [
+            job
+            for job in jobs_by_legacy_key.get(legacy_key, [])
+            if _job_model_business_key(job) not in imported_keys
+        ]
+        if len(items) == 1 and items[0]["business_key"] in jobs_by_key:
+            for job in candidates:
+                if _legacy_job_matches_path(job, items[0]) and job.is_active:
+                    job.is_active = False
+                    job.save(update_fields=["is_active"])
+            continue
+        if len(unmatched_items) == 1:
+            matching = [
+                job
+                for job in candidates
+                if _legacy_job_matches_path(job, unmatched_items[0])
+            ]
+            if len(matching) == 1:
+                reusable_jobs[unmatched_items[0]["business_key"]] = matching[0]
+            continue
+
+        if len(items) > 1:
+            for job in candidates:
+                if any(_legacy_job_matches_path(job, item) for item in items):
+                    if job.is_active:
+                        job.is_active = False
+                        job.save(update_fields=["is_active"])
+    return reusable_jobs
 
 
 def _sync_jobs(job_rows, *, mode):
     """按业务键幂等更新岗位；replace 额外停用文件外岗位。"""
-    jobs_by_key = _existing_jobs_by_business_key()
+    jobs_by_key, jobs_by_legacy_key = _existing_jobs_by_business_key()
+    reusable_jobs = _prepare_legacy_job_migrations(
+        job_rows, jobs_by_key, jobs_by_legacy_key
+    )
     imported_job_ids = set()
     for item in job_rows:
         row = item["row"]
         entity = _val(row, "主体") or _val(row, "招聘主体")
+        primary, secondary, tertiary = item["department_names"]
         department = _get_department(
-            _val(row, "一层部门"),
-            _val(row, "二层部门") or _val(row, "二级部门"),
+            primary,
+            secondary,
             entity,
+            tertiary,
         )
         values = {
             "entity": entity,
@@ -332,7 +467,9 @@ def _sync_jobs(job_rows, *, mode):
             "headcount": _to_int(_val(row, "需求数量")),
             "is_active": True,
         }
-        job = jobs_by_key.get(item["business_key"])
+        job = jobs_by_key.get(item["business_key"]) or reusable_jobs.get(
+            item["business_key"]
+        )
         if job:
             for field, value in values.items():
                 setattr(job, field, value)
@@ -395,10 +532,17 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
             public_name = _val(row, "对外发布名称")
             if not (position or public_name):
                 continue
+            department_names = _job_row_department_names(row)
+            if department_names[2] and not department_names[1]:
+                raise ValueError(
+                    f"岗位文件第 {excel_row} 行三级部门缺少有效二级父部门"
+                )
             item = {
                 "excel_row": excel_row,
                 "row": row,
                 "business_key": _job_row_business_key(row),
+                "legacy_business_key": _job_row_legacy_business_key(row),
+                "department_names": department_names,
             }
             candidate_job_rows.append(item)
             if not _val(row, "工作职责"):

@@ -13,7 +13,6 @@ from apps.accounts.permissions import ensure_rbac_defaults
 
 OAUTH2_SETTINGS = {
     "W3_OAUTH2_ENABLED": True,
-    "W3_OAUTH2_LOCAL_LOGIN_ENABLED": True,
     "W3_OAUTH2_CLIENT_ID": "resume-client",
     "W3_OAUTH2_CLIENT_SECRET": "client-secret",
     "W3_OAUTH2_AUTHORIZE_URL": "https://w3.example.com/oauth2/authorize",
@@ -59,22 +58,30 @@ class W3OAuth2ApiTests(TestCase):
             {
                 "enabled": True,
                 "ready": True,
-                "local_login_enabled": True,
+                "debug_token_login_enabled": False,
                 "start_url": "/api/auth/w3/start/",
             },
         )
         self.assertNotIn("client_id", response.data)
         self.assertEqual(response["Cache-Control"], "no-store")
 
-    @override_settings(W3_OAUTH2_ENABLED=False)
+    @override_settings(DEBUG=True, W3_OAUTH2_ENABLED=False)
     def test_disabled_status_and_start_do_not_begin_authorization(self):
         status_response = self.client.get("/api/auth/w3/status/")
         start_response = self.client.get("/api/auth/w3/start/")
 
         self.assertFalse(status_response.data["enabled"])
         self.assertFalse(status_response.data["ready"])
+        self.assertTrue(status_response.data["debug_token_login_enabled"])
         self.assertIsNone(status_response.data["start_url"])
         self.assertEqual(start_response.status_code, 503)
+
+    @override_settings(DEBUG=False, W3_OAUTH2_ENABLED=False)
+    def test_production_status_never_enables_debug_token_login(self):
+        response = self.client.get("/api/auth/w3/status/")
+
+        self.assertFalse(response.data["ready"])
+        self.assertFalse(response.data["debug_token_login_enabled"])
 
     @override_settings(W3_OAUTH2_AUTHORIZE_URL="")
     def test_incomplete_configuration_is_not_reported_as_ready(self):
@@ -165,8 +172,16 @@ class W3OAuth2ApiTests(TestCase):
             "https://resume.example.com/api/auth/w3/callback/",
         )
         self.assertEqual(
-            userinfo_get.call_args.kwargs["headers"]["Authorization"],
-            "Bearer provider-access-token",
+            userinfo_get.call_args.kwargs["params"],
+            {
+                "access_token": "provider-access-token",
+                "scope": "profile employee_no email",
+                "client_id": "resume-client",
+            },
+        )
+        self.assertEqual(
+            userinfo_get.call_args.kwargs["headers"],
+            {"Accept": "application/json"},
         )
 
         complete = self.client.post("/api/auth/w3/complete/", {}, format="json")
@@ -294,16 +309,16 @@ class W3OAuth2ApiTests(TestCase):
 
         self.assertEqual(response.url, "/login?oauth2_error=email_missing")
 
-    @override_settings(W3_OAUTH2_LOCAL_LOGIN_ENABLED=False)
-    def test_local_password_login_can_be_disabled(self):
+    def test_local_password_login_and_django_admin_routes_are_removed(self):
         response = self.client.post(
             "/api/auth/login/",
             {"username": "E10001", "password": "local-pass"},
             format="json",
         )
+        admin_response = self.client.get("/admin/")
 
-        self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.data["detail"], "本地密码登录已禁用，请使用 W3 登录")
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(admin_response.status_code, 404)
 
     @staticmethod
     def _json_response(payload):

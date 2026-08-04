@@ -42,8 +42,8 @@ expect_failure "W3 未启用" "$disabled_env" "W3_OAUTH2_ENABLED=True"
 
 valid_env="${TEST_ROOT}/valid.env"
 write_env "$valid_env" \
+  "DJANGO_DEBUG=False" \
   "W3_OAUTH2_ENABLED=True" \
-  "W3_OAUTH2_LOCAL_LOGIN_ENABLED=False" \
   "W3_OAUTH2_CLIENT_ID=client-id" \
   "W3_OAUTH2_CLIENT_SECRET=client-secret" \
   "W3_OAUTH2_AUTHORIZE_URL=https://w3.example.com/oauth/authorize" \
@@ -83,8 +83,12 @@ sed '/W3_OAUTH2_CLIENT_SECRET=/d; s/client_secret_basic/none/' "$valid_env" > "$
 expect_success "公开客户端不要求密钥" "$no_secret_env"
 
 defaulted_env="${TEST_ROOT}/defaulted.env"
-sed '/W3_OAUTH2_FRONTEND_CALLBACK_URL=/d; /W3_OAUTH2_USE_PKCE=/d; /W3_OAUTH2_LOCAL_LOGIN_ENABLED=/d' "$valid_env" > "$defaulted_env"
+sed '/W3_OAUTH2_FRONTEND_CALLBACK_URL=/d; /W3_OAUTH2_USE_PKCE=/d; /DJANGO_DEBUG=/d' "$valid_env" > "$defaulted_env"
 expect_success "安全默认项可省略" "$defaulted_env"
+
+debug_env="${TEST_ROOT}/debug.env"
+sed 's/DJANGO_DEBUG=False/DJANGO_DEBUG=True/' "$valid_env" > "$debug_env"
+expect_failure "生产环境禁止 DEBUG" "$debug_env" "DJANGO_DEBUG=False"
 
 missing_email_env="${TEST_ROOT}/missing-email.env"
 sed 's/W3_OAUTH2_EMAIL_FIELD=.*/W3_OAUTH2_EMAIL_FIELD=/' "$valid_env" > "$missing_email_env"

@@ -21,7 +21,7 @@ def _contact_user_role(contact):
 
 @transaction.atomic
 def sync_contact_user(contact):
-    """按接口人工号和邮箱同步登录账号，同时保留已有密码和非接口人角色。"""
+    """按接口人工号和邮箱同步登录账号，并保持密码不可用。"""
 
     if not contact.email:
         raise ValueError("接口人邮箱不能为空")
@@ -57,11 +57,8 @@ def sync_contact_user(contact):
     user.role = role
     user.contact = contact
     user.is_active = contact.is_active
+    user.set_unusable_password()
     user.save()
-
-    if created or not user.has_usable_password():
-        user.set_password("pass1234")
-        user.save(update_fields=["password"])
 
     contact_groups = Group.objects.filter(name__in=CONTACT_GROUP_NAMES)
     user.groups.remove(*contact_groups.exclude(name=group_name))

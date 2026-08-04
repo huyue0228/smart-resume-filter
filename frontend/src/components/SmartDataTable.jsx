@@ -31,6 +31,7 @@ const EMPTY_STICKY_PAGINATION_METRICS = {
   width: 0,
 }
 const STICKY_PAGINATION_CLASS = 'srf-table-pagination-sticky'
+const DEFAULT_SERVER_PAGE_SIZE_OPTIONS = [10, 20, 50, 100, 500]
 const INTERACTIVE_SELECTOR = [
   'a',
   'button',
@@ -132,6 +133,54 @@ function SelectFilterDropdown({ multiple, options, selectedKeys, onApply }) {
   )
 }
 
+function DateRangeFilterDropdown({ selectedKeys, onApply, placeholders }) {
+  const [draft, setDraft] = useState([
+    selectedKeys[0] || '',
+    selectedKeys[1] || '',
+  ])
+
+  useEffect(() => {
+    setDraft([selectedKeys[0] || '', selectedKeys[1] || ''])
+  }, [selectedKeys])
+
+  const apply = () => onApply(draft.some(Boolean) ? draft : [])
+  const [fromPlaceholder = '开始日期', toPlaceholder = '结束日期'] = placeholders || []
+
+  return (
+    <div className="srf-table-filter" onKeyDown={(event) => event.stopPropagation()}>
+      <Input
+        addonBefore="从"
+        aria-label={fromPlaceholder}
+        placeholder={fromPlaceholder}
+        type="date"
+        value={draft[0]}
+        onChange={(event) => setDraft((current) => [event.target.value, current[1]])}
+      />
+      <Input
+        addonBefore="至"
+        aria-label={toPlaceholder}
+        placeholder={toPlaceholder}
+        type="date"
+        value={draft[1]}
+        onChange={(event) => setDraft((current) => [current[0], event.target.value])}
+      />
+      <Space>
+        <Button
+          icon={<FilterOutlined />}
+          size="small"
+          type="primary"
+          onClick={apply}
+        >
+          确认
+        </Button>
+        <Button size="small" onClick={() => { setDraft(['', '']); onApply([]) }}>
+          重置
+        </Button>
+      </Space>
+    </div>
+  )
+}
+
 function loadPersisted(key) {
   try {
     return JSON.parse(localStorage.getItem(key) || '{}')
@@ -214,8 +263,15 @@ const SmartDataTable = forwardRef(function SmartDataTable(
   const hasDataRequest = Boolean(dataRequest)
 
   const resolvedPagination = useMemo(() => {
-    if (pagination !== undefined) return pagination
-    return hasDataRequest ? { defaultPageSize: 10, showSizeChanger: true } : false
+    if (!hasDataRequest) return pagination === undefined ? false : pagination
+    if (pagination === false) return false
+    const defaults = {
+      defaultPageSize: 10,
+      showSizeChanger: true,
+      pageSizeOptions: DEFAULT_SERVER_PAGE_SIZE_OPTIONS,
+    }
+    if (pagination === undefined || pagination === true) return defaults
+    return { ...defaults, ...pagination }
   }, [hasDataRequest, pagination])
   const stickyPaginationEnabled = Boolean(
     stickyPagination && resolvedPagination && resolvedPagination !== false,
@@ -378,7 +434,7 @@ const SmartDataTable = forwardRef(function SmartDataTable(
 
   const updateFilter = useCallback((key, values, confirm) => {
     const next = { ...filtersRef.current }
-    if (values?.length) next[key] = values
+    if (values?.some(Boolean)) next[key] = values
     else delete next[key]
     filtersRef.current = next
     setFilters(next)
@@ -411,27 +467,41 @@ const SmartDataTable = forwardRef(function SmartDataTable(
       if (!filter) return next
       const selectedKeys = filters[key] || []
       const apply = (values, confirm) => updateFilter(key, values, confirm)
-      return {
-        ...next,
-        filteredValue: selectedKeys.length ? selectedKeys : null,
-        filterMultiple: Boolean(filter.multiple),
-        filterIcon: (filtered) => filter.type === 'select'
-          ? <FilterOutlined style={{ color: filtered ? '#1677ff' : undefined }} />
-          : <SearchOutlined style={{ color: filtered ? '#1677ff' : undefined }} />,
-        filterDropdown: ({ confirm }) => filter.type === 'select' ? (
+      let filterDropdown
+      if (filter.type === 'select') {
+        filterDropdown = ({ confirm }) => (
           <SelectFilterDropdown
             multiple={filter.multiple}
             options={optionValues(filter.options, filterOptions)}
             selectedKeys={selectedKeys}
             onApply={(values) => apply(values, confirm)}
           />
-        ) : (
+        )
+      } else if (filter.type === 'dateRange') {
+        filterDropdown = ({ confirm }) => (
+          <DateRangeFilterDropdown
+            placeholders={filter.placeholders}
+            selectedKeys={selectedKeys}
+            onApply={(values) => apply(values, confirm)}
+          />
+        )
+      } else {
+        filterDropdown = ({ confirm }) => (
           <TextFilterDropdown
             placeholder={filter.placeholder}
             selectedKeys={selectedKeys}
             onApply={(values) => apply(values, confirm)}
           />
-        ),
+        )
+      }
+      return {
+        ...next,
+        filteredValue: selectedKeys.some(Boolean) ? selectedKeys : null,
+        filterMultiple: Boolean(filter.multiple),
+        filterIcon: (filtered) => filter.type !== 'text'
+          ? <FilterOutlined style={{ color: filtered ? '#1677ff' : undefined }} />
+          : <SearchOutlined style={{ color: filtered ? '#1677ff' : undefined }} />,
+        filterDropdown,
       }
     }),
     [baseColumns, widths, filters, filterOptions, storageKey, updateFilter],

@@ -8,7 +8,6 @@ from datetime import date, datetime, time as datetime_time, timedelta
 from urllib.parse import quote
 
 from django.conf import settings
-from django.contrib.auth import authenticate
 from django.contrib.auth.models import Group
 from django.db import transaction
 from django.db.models import Count, Prefetch
@@ -38,6 +37,7 @@ from apps.accounts.permissions import (
 )
 from apps.core import models as m
 from apps.core import candidate_summary, system_status
+from apps.core.departments import resolve_department_hierarchy
 from apps.core.name_pinyin import name_to_pinyin
 from apps.ingestion import snapshot
 from apps.ingestion.sources import (
@@ -54,6 +54,7 @@ from apps.pipeline.services import allocate as allocate_service
 from apps.pipeline.ai import service as ai_service
 
 from . import serializers
+from .job_export import build_job_export_workbook
 from .pagination import StandardResultsSetPagination
 from .resume_export import (
     CandidateExportRecord,
@@ -274,31 +275,6 @@ class PermissionedReadOnlyModelViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [HasPermissionCode]
 
 
-class AuthLoginView(APIView):
-    permission_classes = [AllowAny]
-
-    def post(self, request):
-        if not oauth2.get_config().local_login_enabled:
-            return Response(
-                {"detail": "本地密码登录已禁用，请使用 W3 登录"},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-        username = request.data.get("username", "")
-        password = request.data.get("password", "")
-        user = authenticate(request, username=username, password=password)
-        if not user or not user.is_active:
-            return Response(
-                {"detail": "用户名或密码错误"}, status=status.HTTP_400_BAD_REQUEST
-            )
-        token, _ = Token.objects.get_or_create(user=user)
-        return Response(
-            {
-                "token": token.key,
-                "user": serializers.CurrentUserSerializer(user).data,
-            }
-        )
-
-
 def _oauth2_redirect(url):
     response = HttpResponseRedirect(url)
     response["Cache-Control"] = "no-store"
@@ -322,7 +298,7 @@ class W3OAuth2StatusView(APIView):
             {
                 "enabled": config.enabled,
                 "ready": ready,
-                "local_login_enabled": config.local_login_enabled,
+                "debug_token_login_enabled": settings.DEBUG and not ready,
                 "start_url": "/api/auth/w3/start/" if ready else None,
             }
         )
@@ -849,8 +825,23 @@ class CandidateViewSet(PermissionedModelViewSet):
 
     def get_queryset(self):
         qs = self._scope_queryset(self._base_queryset())
+        permissions = user_permission_codes(self.request.user)
+        current_resume_resolver = None
+        if "resume.view" not in permissions:
+            def current_resume_resolver(candidate):
+                attempt = serializers.visible_candidate_attempt(
+                    candidate,
+                    self.request.user,
+                    permissions=permissions,
+                )
+                return attempt.resume if attempt else None
+
         try:
-            qs = system_status.apply_candidate_filters(qs, self.request.query_params)
+            qs = system_status.apply_candidate_filters(
+                qs,
+                self.request.query_params,
+                current_resume_resolver=current_resume_resolver,
+            )
         except ValueError as exc:
             from rest_framework.exceptions import ValidationError
 
@@ -1143,10 +1134,20 @@ class JobViewSet(PermissionedModelViewSet):
         "partial_update": "job.manage",
         "destroy": "job.manage",
         "filter_options": "job.view",
+        "export_jobs": "job.view",
     }
 
     def get_queryset(self):
-        qs = m.Job.objects.select_related("department").all().order_by("id")
+        qs = (
+            m.Job.objects.select_related(
+                "department",
+                "department__parent",
+                "department__parent__parent",
+            )
+            .prefetch_related("majors")
+            .all()
+            .order_by("id")
+        )
         p = self.request.query_params
         is_active = bool_query_value(p.get("is_active"))
         if is_active is None:
@@ -1178,11 +1179,79 @@ class JobViewSet(PermissionedModelViewSet):
             qs = qs.filter(job_family__in=job_family_values)
         elif p.get("job_family"):
             qs = qs.filter(job_family__icontains=p["job_family"])
-        department_values = _query_list_values(p, "department_name_in")
-        if department_values:
-            qs = qs.filter(department__name__in=department_values)
-        elif p.get("department_name"):
-            qs = qs.filter(department__name__icontains=p["department_name"])
+        primary_department_values = _query_list_values(
+            p, "primary_department_name_in"
+        )
+        if primary_department_values:
+            qs = qs.filter(
+                Q(
+                    department__level=2,
+                    department__parent__level=1,
+                    department__parent__name__in=primary_department_values,
+                )
+                | Q(
+                    department__level=3,
+                    department__parent__level=2,
+                    department__parent__parent__level=1,
+                    department__parent__parent__name__in=primary_department_values,
+                )
+            )
+        elif p.get("primary_department_name"):
+            value = p["primary_department_name"]
+            qs = qs.filter(
+                Q(
+                    department__level=2,
+                    department__parent__level=1,
+                    department__parent__name__icontains=value,
+                )
+                | Q(
+                    department__level=3,
+                    department__parent__level=2,
+                    department__parent__parent__level=1,
+                    department__parent__parent__name__icontains=value,
+                )
+            )
+        secondary_department_values = _query_list_values(
+            p, "secondary_department_name_in"
+        ) or _query_list_values(p, "department_name_in")
+        if secondary_department_values:
+            qs = qs.filter(
+                Q(
+                    department__level=2,
+                    department__name__in=secondary_department_values,
+                )
+                | Q(
+                    department__level=3,
+                    department__parent__level=2,
+                    department__parent__name__in=secondary_department_values,
+                )
+            )
+        elif p.get("secondary_department_name") or p.get("department_name"):
+            value = p.get("secondary_department_name") or p["department_name"]
+            qs = qs.filter(
+                Q(
+                    department__level=2,
+                    department__name__icontains=value,
+                )
+                | Q(
+                    department__level=3,
+                    department__parent__level=2,
+                    department__parent__name__icontains=value,
+                )
+            )
+        tertiary_department_values = _query_list_values(
+            p, "tertiary_department_name_in"
+        )
+        if tertiary_department_values:
+            qs = qs.filter(
+                department__level=3,
+                department__name__in=tertiary_department_values,
+            )
+        elif p.get("tertiary_department_name"):
+            qs = qs.filter(
+                department__level=3,
+                department__name__icontains=p["tertiary_department_name"],
+            )
         location_values = _query_list_values(p, "location_in")
         if location_values:
             qs = qs.filter(location__in=location_values)
@@ -1205,7 +1274,13 @@ class JobViewSet(PermissionedModelViewSet):
     @action(detail=False, methods=["get"], url_path="filter-options")
     def filter_options(self, request):
         """返回岗位要求表头选择器候选值及拼音搜索文本。"""
-        jobs = m.Job.objects.filter(is_active=True).select_related("department")
+        jobs = list(
+            m.Job.objects.filter(is_active=True).select_related(
+                "department",
+                "department__parent",
+                "department__parent__parent",
+            )
+        )
 
         def options(values):
             return [
@@ -1219,22 +1294,51 @@ class JobViewSet(PermissionedModelViewSet):
                 )
             ]
 
+        def department_names(level):
+            for job in jobs:
+                hierarchy = resolve_department_hierarchy(job.department)
+                department = getattr(hierarchy, level)
+                yield department.name if department else ""
+
         return Response(
             {
-                "entity": options(jobs.values_list("entity", flat=True)),
-                "public_name": options(jobs.values_list("public_name", flat=True)),
-                "position_name": options(
-                    jobs.values_list("position_name", flat=True)
+                "entity": options(job.entity for job in jobs),
+                "public_name": options(job.public_name for job in jobs),
+                "position_name": options(job.position_name for job in jobs),
+                "category": options(job.category for job in jobs),
+                "job_family": options(job.job_family for job in jobs),
+                "primary_department_name": options(department_names("primary")),
+                "secondary_department_name": options(
+                    department_names("secondary")
                 ),
-                "category": options(jobs.values_list("category", flat=True)),
-                "job_family": options(jobs.values_list("job_family", flat=True)),
-                "department_name": options(
-                    jobs.values_list("department__name", flat=True)
-                ),
-                "location": options(jobs.values_list("location", flat=True)),
-                "education": options(jobs.values_list("education", flat=True)),
+                "tertiary_department_name": options(department_names("tertiary")),
+                "department_name": options(department_names("secondary")),
+                "location": options(job.location for job in jobs),
+                "education": options(job.education for job in jobs),
             }
         )
+
+    @action(detail=False, methods=["get"], url_path="export")
+    def export_jobs(self, request):
+        jobs = list(self.filter_queryset(self.get_queryset()))
+        if not jobs:
+            return Response(
+                {"detail": "当前筛选条件下没有可下载的启用岗位"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        content = build_job_export_workbook(jobs)
+        response = HttpResponse(
+            content,
+            content_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+        )
+        response["Content-Disposition"] = (
+            "attachment; filename=\"jobs.xlsx\"; filename*=UTF-8''"
+            + quote("职位清单.xlsx")
+        )
+        response["X-Export-Count"] = str(len(jobs))
+        return response
 
     def destroy(self, request, *args, **kwargs):
         job = self.get_object()

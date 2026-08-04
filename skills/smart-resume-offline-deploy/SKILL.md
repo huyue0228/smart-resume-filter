@@ -1,9 +1,9 @@
 ---
 name: smart-resume-offline-deploy
-description: 在 Linux 服务器上部署、验证、卸载简历宝。支持当前源码仓库 amd64/arm64 构建部署和 amd64 纯镜像离线包部署，并通过固定编号菜单和二次确认控制 Docker 变更及数据清理。
+description: 在 Linux 服务器上部署、验证、卸载海纳智聘。支持当前源码仓库 amd64/arm64 构建部署和 amd64 纯镜像离线包部署，并通过固定编号菜单和二次确认控制 Docker 变更及数据清理。
 ---
 
-# 简历宝离线部署
+# 海纳智聘离线部署
 
 先阅读本文件，再执行 `scripts/` 下的脚本；不得手工省略确认步骤，也不得在日志、对话或截图中输出 `.env` 内的密钥。脚本可从源码仓库的 `skills/` 目录调用，也可随纯镜像离线包一同调用；未能自动判断根目录时，使用 `DEPLOY_ROOT=/path/to/package` 指定部署根目录。
 
@@ -21,7 +21,7 @@ description: 在 Linux 服务器上部署、验证、卸载简历宝。支持当
 ## 包含内容
 
 - `scripts/deploy.sh`：校验、导入镜像、初始化数据库、启动并验证服务。
-- `scripts/validate-w3-env.sh`：校验 W3 已启用，并检查登录必填配置、HTTPS 端点、字段路径、客户端认证方式和精确回调 URI；任何失败都发生在 Docker 变更前。
+- `scripts/validate-w3-env.sh`：校验生产 `DJANGO_DEBUG=False`、W3 已启用，并检查登录必填配置、HTTPS 端点、字段路径、客户端认证方式和精确回调 URI；任何失败都发生在 Docker 变更前。
 - `scripts/verify.sh`：检查服务状态、Django 配置和 Nginx 配置。
 - `scripts/uninstall.sh`：停止并卸载服务；默认保留数据库和上传文件。
 - `assets/deployment-agent.md`：部署时必须执行的确认与交付口径。
@@ -43,7 +43,7 @@ bash skills/smart-resume-offline-deploy/scripts/deploy.sh
 5. 离线模式要求交付包内的 `docker-compose.yml` 只使用 `image:`，不得保留 `build:`；源码模式使用当前项目的 Compose 构建后端、前端、PostgreSQL、Redis 和备份工具镜像。
 6. 首次部署才会执行 `init` 写入基础权限、账号和预置数据。检测到已有部署时，脚本只更新镜像并启动服务，迁移由 backend 自动完成，不会重置管理员在系统设置中维护的配置。
 7. 部署不决定 AI 功能是否启用、模型连接或 API Key。服务启动后，由拥有权限的管理员在「系统设置 → AI 模型连接」配置并测试；不要在部署对话、脚本参数或日志中提供 API Key。
-8. 前端只提供 W3 登录，因此 W3 OAuth2 是可用部署的必要条件。模板中的 `W3_OAUTH2_ENABLED=False` 只是首次生成 `.env` 时的安全占位；正式部署前必须通过安全渠道补齐配置并改为 `True`。部署脚本会在任何 Docker 变更前执行校验，W3 关闭、缺少必填项、端点非 HTTPS、客户端认证方式无效或回调路径不精确均立即停止。本地密码 API 保持默认关闭且无前端入口，仅允许在明确的应急场景临时开启。
+8. 生产只提供 W3 登录，因此 W3 OAuth2 是可用部署的必要条件。模板中的 `W3_OAUTH2_ENABLED=False` 只是首次生成 `.env` 时的安全占位；正式部署前必须通过安全渠道补齐配置并改为 `True`，同时保持 `DJANGO_DEBUG=False`。部署脚本会在任何 Docker 变更前执行校验，DEBUG 开启、W3 关闭、缺少必填项、端点非 HTTPS、客户端认证方式无效或回调路径不精确均立即停止。本地密码 API 与 Django Admin 路由均已删除；DEBUG 开发令牌不是生产应急入口。
 
 ### 域名与 HTTPS 反向代理
 
@@ -51,7 +51,7 @@ W3 生产回调必须使用完整 HTTPS 域名，因此生产部署默认需要�
 
 ```text
 浏览器 / W3
-  -> https://简历宝域名:443
+  -> https://海纳智聘域名:443
   -> HTTPS 反向代理或企业网关
   -> http://frontend宿主机地址:5173
   -> frontend 容器 Nginx
@@ -105,6 +105,7 @@ server {
 
 正式部署前必须明确填写：
 
+- `DJANGO_DEBUG=False`
 - `W3_OAUTH2_ENABLED=True`
 - `W3_OAUTH2_CLIENT_ID`
 - `W3_OAUTH2_AUTHORIZE_URL`
@@ -119,7 +120,7 @@ server {
 
 当客户端认证方式为 `client_secret_basic` 或 `client_secret_post` 时，`W3_OAUTH2_CLIENT_SECRET` 也必须填写；只有 W3 明确登记为公开客户端且认证方式为 `none` 时才可留空。`W3_OAUTH2_SCOPE` 按 W3 实际要求填写；协议允许为空，但若 W3 要求 scope，则它也是现场必填项。
 
-模板已预填当前 UserInfo 映射 `W3_OAUTH2_EMPLOYEE_NO_FIELD=employeeNumber`、`W3_OAUTH2_EMAIL_FIELD=email`，并提供以下安全默认值，通常不修改：`W3_OAUTH2_LOCAL_LOGIN_ENABLED=False`、`W3_OAUTH2_FRONTEND_CALLBACK_URL=/login`、`W3_OAUTH2_USE_PKCE=True`。`tenantId`、`uuid`、`globalUserID` 当前不参与账号匹配，也不落库。客户端密钥不得出现在对话、日志或截图中。
+模板已预填当前 UserInfo 映射 `W3_OAUTH2_EMPLOYEE_NO_FIELD=employeeNumber`、`W3_OAUTH2_EMAIL_FIELD=email`，并提供以下安全默认值，通常不修改：`W3_OAUTH2_FRONTEND_CALLBACK_URL=/login`、`W3_OAUTH2_USE_PKCE=True`。模板不含本地登录开关；`tenantId`、`uuid`、`globalUserID` 当前不参与账号匹配，也不落库。客户端密钥不得出现在对话、日志或截图中。
 
 检测到已有同项目容器或数据卷时，脚本不会替换缺失/占位的三项密钥。升级或灾后重建必须恢复原 `.env`；擅自生成新值可能导致 PostgreSQL 无法连接，并使既有 AI 连接密文无法解密。
 

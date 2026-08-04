@@ -360,7 +360,9 @@ class ResumeImportDesignContractTests(TestCase):
             [
                 {
                     "主体": "GW",
+                    "一级部门": "技术中心",
                     "二层部门": "平台部",
+                    "三级部门": "研发组",
                     "对外发布名称": "后端开发",
                     "职位名称": "后端工程师",
                     "岗位类别": "技术类",
@@ -368,7 +370,9 @@ class ResumeImportDesignContractTests(TestCase):
                 },
                 {
                     "主体": " gw ",
+                    "一层部门": "技 术中心",
                     "二层部门": "平台 部",
+                    "三级部门": "研 发组",
                     "对外发布名称": "后端开发",
                     "职位名称": "后端工程师",
                     "岗位类别": "技术类",
@@ -384,6 +388,179 @@ class ResumeImportDesignContractTests(TestCase):
         self.assertTrue(existing.is_active)
         self.assertEqual(existing.headcount, 1)
         self.assertEqual(m.Job.objects.count(), 1)
+
+    def test_job_import_business_key_distinguishes_entity_and_each_department_level(self):
+        common = {
+            "对外发布名称": "后端开发",
+            "职位名称": "后端工程师",
+            "岗位类别": "技术类",
+            "工作职责": "负责后端研发。",
+        }
+        jobs = _excel_file(
+            [
+                {
+                    **common,
+                    "招聘主体": "GW",
+                    "一级部门": "技术中心",
+                    "二级部门": "平台部",
+                    "三级部门": "研发一组",
+                },
+                {
+                    **common,
+                    "招聘主体": "YLS",
+                    "一级部门": "技术中心",
+                    "二级部门": "平台部",
+                    "三级部门": "研发一组",
+                },
+                {
+                    **common,
+                    "招聘主体": "GW",
+                    "一级部门": "数据中心",
+                    "二级部门": "平台部",
+                    "三级部门": "研发一组",
+                },
+                {
+                    **common,
+                    "招聘主体": "GW",
+                    "一级部门": "技术中心",
+                    "二级部门": "应用部",
+                    "三级部门": "研发一组",
+                },
+                {
+                    **common,
+                    "招聘主体": "GW",
+                    "一级部门": "技术中心",
+                    "二级部门": "平台部",
+                    "三级部门": "研发二组",
+                },
+            ]
+        )
+
+        counts = import_files({"jobs": jobs}, mode="incremental")
+
+        self.assertEqual(counts["jobs"], 5)
+        self.assertEqual(m.Job.objects.filter(is_active=True).count(), 5)
+
+    def test_job_import_rejects_tertiary_department_without_secondary_parent_by_row(self):
+        jobs = _excel_file(
+            [
+                {
+                    "主体": "GW",
+                    "一层部门": "技术中心",
+                    "三级部门": "研发组",
+                    "对外发布名称": "后端开发",
+                    "职位名称": "后端工程师",
+                    "岗位类别": "技术类",
+                    "工作职责": "负责后端研发。",
+                }
+            ]
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "岗位文件第 2 行三级部门缺少有效二级父部门"
+        ):
+            import_files({"jobs": jobs}, mode="incremental")
+
+        self.assertFalse(m.Job.objects.exists())
+
+    def test_job_import_completes_one_legacy_secondary_job_in_place(self):
+        primary = m.Department.objects.create(name="技术中心", level=1)
+        secondary = m.Department.objects.create(
+            name="平台部", level=2, parent=primary, entity="GW"
+        )
+        existing = m.Job.objects.create(
+            entity="GW",
+            department=secondary,
+            category="技术类",
+            public_name="后端开发",
+            position_name="后端工程师",
+            responsibilities="旧职责",
+            headcount=1,
+        )
+        jobs = _excel_file(
+            [
+                {
+                    "主体": "GW",
+                    "一层部门": "技术中心",
+                    "二层部门": "平台部",
+                    "三级部门": "研发组",
+                    "岗位类别": "技术类",
+                    "对外发布名称": "后端开发",
+                    "职位名称": "后端工程师",
+                    "工作职责": "新职责",
+                    "需求数量": 3,
+                }
+            ]
+        )
+
+        counts = import_files({"jobs": jobs}, mode="incremental")
+
+        existing.refresh_from_db()
+        self.assertEqual(counts["jobs"], 1)
+        self.assertEqual(m.Job.objects.count(), 1)
+        self.assertEqual(existing.department.level, 3)
+        self.assertEqual(existing.department.name, "研发组")
+        self.assertEqual((existing.responsibilities, existing.headcount), ("新职责", 3))
+
+    def test_job_import_splits_legacy_secondary_job_without_breaking_history(self):
+        primary = m.Department.objects.create(name="技术中心", level=1)
+        secondary = m.Department.objects.create(
+            name="平台部", level=2, parent=primary, entity="GW"
+        )
+        existing = m.Job.objects.create(
+            entity="GW",
+            department=secondary,
+            category="技术类",
+            public_name="后端开发",
+            position_name="后端工程师",
+            responsibilities="聚合职责",
+            headcount=9,
+        )
+        run = m.ProcessingRun.objects.create(step="step2", mode="rule")
+        capacity = m.ProcessingRunJobCapacity.objects.create(
+            run=run,
+            job=existing,
+            headcount_snapshot=9,
+            capacity=9,
+            used_count=2,
+        )
+        jobs = _excel_file(
+            [
+                {
+                    "主体": "GW",
+                    "一层部门": "技术中心",
+                    "二层部门": "平台部",
+                    "三级部门": tertiary,
+                    "岗位类别": "技术类",
+                    "对外发布名称": "后端开发",
+                    "职位名称": "后端工程师",
+                    "工作职责": f"{tertiary}职责",
+                    "需求数量": headcount,
+                }
+                for tertiary, headcount in (("研发一组", 4), ("研发二组", 5))
+            ]
+        )
+
+        counts = import_files({"jobs": jobs}, mode="incremental")
+
+        existing.refresh_from_db()
+        capacity.refresh_from_db()
+        self.assertEqual(counts["jobs"], 2)
+        self.assertFalse(existing.is_active)
+        self.assertEqual(existing.headcount, 9)
+        self.assertEqual(capacity.job_id, existing.id)
+        self.assertEqual(
+            (capacity.headcount_snapshot, capacity.capacity, capacity.used_count),
+            (9, 9, 2),
+        )
+        self.assertEqual(
+            list(
+                m.Job.objects.filter(is_active=True)
+                .order_by("department__name")
+                .values_list("department__name", "headcount")
+            ),
+            [("研发一组", 4), ("研发二组", 5)],
+        )
 
     def test_job_import_rejects_duplicate_business_key_in_database(self):
         first = m.Job.objects.create(
@@ -609,7 +786,7 @@ class ResumeImportDesignContractTests(TestCase):
         self.assertEqual(secondary_user.contact, secondary_contact)
         self.assertEqual(secondary_user.email, "l9001@example.com")
         self.assertEqual(secondary_user.role, User.ROLE_SECONDARY_CONTACT)
-        self.assertTrue(secondary_user.check_password("pass1234"))
+        self.assertFalse(secondary_user.has_usable_password())
         self.assertIn(
             "二级接口人",
             list(secondary_user.groups.values_list("name", flat=True)),
@@ -617,7 +794,7 @@ class ResumeImportDesignContractTests(TestCase):
         self.assertEqual(tertiary_user.contact, tertiary_contact)
         self.assertEqual(tertiary_user.email, "t9001@example.com")
         self.assertEqual(tertiary_user.role, User.ROLE_TERTIARY_CONTACT)
-        self.assertTrue(tertiary_user.check_password("pass1234"))
+        self.assertFalse(tertiary_user.has_usable_password())
         self.assertIn(
             "三级接口人",
             list(tertiary_user.groups.values_list("name", flat=True)),
@@ -679,7 +856,7 @@ class ResumeImportDesignContractTests(TestCase):
             m.Contact.objects.filter(employee_no="OTHER-EMPLOYEE").exists()
         )
 
-    def test_contact_import_keeps_existing_user_password(self):
+    def test_contact_import_keeps_existing_user_password_unusable(self):
         existing_user = User.objects.create_user(
             username="L9002",
             password="custom-pass",
@@ -701,7 +878,7 @@ class ResumeImportDesignContractTests(TestCase):
         import_files({"contacts": contacts}, mode="incremental")
 
         existing_user.refresh_from_db()
-        self.assertTrue(existing_user.check_password("custom-pass"))
+        self.assertFalse(existing_user.has_usable_password())
         self.assertEqual(existing_user.contact.employee_no, "L9002")
         self.assertEqual(existing_user.role, User.ROLE_SECONDARY_CONTACT)
 

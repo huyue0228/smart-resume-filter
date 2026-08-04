@@ -850,6 +850,17 @@ export default function ResumesPage() {
       render: (_, record) => record.current_rank || '-',
     },
     {
+      title: '投递时间',
+      dataIndex: 'current_apply_date',
+      width: 120,
+      filter: {
+        type: 'dateRange',
+        params: ['current_apply_date_from', 'current_apply_date_to'],
+        placeholders: ['投递开始日期', '投递结束日期'],
+      },
+      render: (value) => value || '-',
+    },
+    {
       title: '当前应聘ID',
       dataIndex: 'current_apply_id',
       width: 130,

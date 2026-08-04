@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { Alert, Button, Spin, Typography } from 'antd'
+import { Alert, Button, Input, Spin, Typography } from 'antd'
 import { LoginOutlined } from '@ant-design/icons'
 import { APP_NAME } from '../appBrand'
 import { fetchW3OAuth2Status } from '../api/services'
@@ -28,7 +28,7 @@ function redirectBrowserToW3(url) {
 export default function LoginPage({ redirectToW3 = redirectBrowserToW3 }) {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
-  const { completeW3OAuth2Login } = useRole()
+  const { completeW3OAuth2Login, loginWithDevToken } = useRole()
   const oauth2Error = searchParams.get('oauth2_error')
   const oauth2Success = searchParams.get('oauth2') === 'success'
   const [error, setError] = useState(
@@ -37,6 +37,9 @@ export default function LoginPage({ redirectToW3 = redirectBrowserToW3 }) {
       : '',
   )
   const [startUrl, setStartUrl] = useState(null)
+  const [debugTokenLoginEnabled, setDebugTokenLoginEnabled] = useState(false)
+  const [devToken, setDevToken] = useState('')
+  const [devLoginLoading, setDevLoginLoading] = useState(false)
   const [statusAttempt, setStatusAttempt] = useState(0)
   const completingRef = useRef(false)
 
@@ -46,10 +49,16 @@ export default function LoginPage({ redirectToW3 = redirectBrowserToW3 }) {
       .then(({ data }) => {
         if (cancelled) return
         const url = data?.ready ? data.start_url : null
+        const allowDebugToken = Boolean(
+          data?.debug_token_login_enabled && !data?.ready,
+        )
         setStartUrl(url)
+        setDebugTokenLoginEnabled(allowDebugToken)
         if (!oauth2Error && !oauth2Success) {
           if (url) {
             redirectToW3(url)
+          } else if (allowDebugToken) {
+            setError('')
           } else {
             setError('W3 登录尚未正确配置，请联系管理员')
           }
@@ -74,15 +83,64 @@ export default function LoginPage({ redirectToW3 = redirectBrowserToW3 }) {
       .catch((err) => {
         completingRef.current = false
         setError(err?.response?.data?.detail || 'W3 登录凭据领取失败，请重新登录')
-      })
+    })
   }, [completeW3OAuth2Login, navigate, oauth2Success])
+
+  const submitDevToken = async () => {
+    const token = devToken.trim()
+    if (!token) return
+    setDevLoginLoading(true)
+    setError('')
+    try {
+      await loginWithDevToken(token)
+      navigate('/', { replace: true })
+    } catch (err) {
+      setError(err?.response?.data?.detail || '开发令牌无效或账号不可用')
+    } finally {
+      setDevLoginLoading(false)
+    }
+  }
 
   return (
     <div className="login-shell">
       <div className="login-redirect-card">
         <BrandLogo size={52} />
         <Title level={3}>{APP_NAME}</Title>
-        {error ? (
+        {debugTokenLoginEnabled && !oauth2Success ? (
+          <>
+            <Alert
+              type={error ? 'error' : 'info'}
+              showIcon
+              message={error || 'W3 登录尚未就绪，可使用本地开发令牌'}
+            />
+            <Input.Password
+              autoComplete="off"
+              placeholder="开发令牌"
+              value={devToken}
+              onChange={(event) => setDevToken(event.target.value)}
+              onPressEnter={submitDevToken}
+            />
+            <Button
+              block
+              loading={devLoginLoading}
+              disabled={!devToken.trim()}
+              onClick={submitDevToken}
+              size="large"
+              type="primary"
+            >
+              使用开发令牌登录
+            </Button>
+            <Button
+              type="link"
+              onClick={() => {
+                setDebugTokenLoginEnabled(false)
+                setStatusAttempt((value) => value + 1)
+              }}
+            >
+              重新检查 W3 登录
+            </Button>
+          </>
+        ) : error ? (
           <>
             <Alert type="error" showIcon message={error} />
             <Button

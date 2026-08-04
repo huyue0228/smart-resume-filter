@@ -7,6 +7,11 @@ export function fetchW3OAuth2Status() {
 export function completeW3OAuth2Login() {
   return client.post('/auth/w3/complete/')
 }
+export function validateDevToken(token) {
+  return client.get('/me/', {
+    headers: { Authorization: `Token ${token}` },
+  })
+}
 export function logout() {
   return client.post('/auth/logout/')
 }
@@ -209,6 +214,9 @@ export function fetchJobs(params) {
 }
 export function fetchJobFilterOptions() {
   return client.get('/jobs/filter-options/')
+}
+export function exportJobs(params) {
+  return client.get('/jobs/export/', { params, responseType: 'blob' })
 }
 export function createJob(body) {
   return client.post('/jobs/', body)

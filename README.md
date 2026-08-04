@@ -1,6 +1,6 @@
-# 简历宝
+# 海纳智聘
 
-“简历宝”是面向校园招聘的智能简历筛选平台。候选人采用 Rule-first 主流程：「Step1 查重与志愿排序 → Step2 院校分类及学历/院校准入 → Step3 Rule 前置检查 → Step4 AI 深度筛选（仅 AI 模式）」。岗位需求、部门和接口人是独立维护的基础数据。系统按正式项目方式建设：后端启用登录与 RBAC 权限校验，前端菜单和按钮由后端权限码驱动；AI Agent 与专项强制分流已接入，W3 OAuth2 认证适配层已就绪，真实 W3 参数和 WeLink 下发仍待外部联调。
+“海纳智聘”是面向校园招聘的智能简历筛选平台。候选人采用 Rule-first 主流程：「Step1 查重与志愿排序 → Step2 院校分类及学历/院校准入 → Step3 Rule 前置检查 → Step4 AI 深度筛选（仅 AI 模式）」。岗位需求、部门和接口人是独立维护的基础数据。系统按正式项目方式建设：后端启用登录与 RBAC 权限校验，前端菜单和按钮由后端权限码驱动；AI Agent 与专项强制分流已接入，W3 OAuth2 认证适配层已就绪，真实 W3 参数和 WeLink 下发仍待外部联调。
 
 设计文档以 [`docs/需求描述.md`](docs/需求描述.md)、[`docs/后端设计.md`](docs/后端设计.md)、[`docs/数据库设计.md`](docs/数据库设计.md)、[`docs/前端设计.md`](docs/前端设计.md) 为准。
 
@@ -126,7 +126,7 @@ bash skills/smart-resume-offline-deploy/scripts/deploy.sh
 
 确认后再次运行同一命令即可部署。`DJANGO_SECRET_KEY`、`POSTGRES_PASSWORD` 和 `RESTIC_PASSWORD` 由脚本从 `/dev/urandom` 自动生成且不回显。检测到旧容器或旧数据卷时，脚本绝不重新生成密钥；升级或灾后重建必须恢复原 `.env`，否则数据库可能无法连接，既有 AI 连接密文也可能无法解密。
 
-系统前端只提供 W3 登录，因此 W3 OAuth2 是可用部署的必要条件。模板中的 `W3_OAUTH2_ENABLED=False` 只是首次生成 `.env` 的安全占位；正式部署前必须改为 `True`，填写 client id、授权/Token/UserInfo HTTPS 地址、工号和邮箱字段路径、客户端认证方式、超时、事务有效期，并把 `W3_OAUTH2_REDIRECT_URI` 设置为 W3 平台登记的精确地址，例如 `https://你的域名/api/auth/w3/callback/`。当前 W3 UserInfo 的工号和邮箱字段分别为顶层 `employeeNumber`、`email`，模板已预填；`tenantId`、`uuid`、`globalUserID` 不参与账号匹配。机密客户端还必须填写 client secret，scope 按 W3 要求填写。部署脚本会在任何 Docker 变更前校验，W3 关闭或配置不完整都会停止且不显示密钥。`W3_OAUTH2_LOCAL_LOGIN_ENABLED` 默认并保持为 `False`；本地密码 API 仅作为显式开启的应急能力，前端不会展示密码表单。
+系统生产只提供 W3 登录，因此 W3 OAuth2 是可用部署的必要条件。模板中的 `W3_OAUTH2_ENABLED=False` 只是首次生成 `.env` 的安全占位；正式部署前必须改为 `True`，填写 client id、授权/Token/UserInfo HTTPS 地址、工号和邮箱字段路径、客户端认证方式、超时、事务有效期，并把 `W3_OAUTH2_REDIRECT_URI` 设置为 W3 平台登记的精确地址，例如 `https://你的域名/api/auth/w3/callback/`。当前 W3 UserInfo 的工号和邮箱字段分别为顶层 `employeeNumber`、`email`，模板已预填；`tenantId`、`uuid`、`globalUserID` 不参与账号匹配。机密客户端还必须填写 client secret，scope 按 W3 要求填写。部署脚本会在任何 Docker 变更前强制 `DJANGO_DEBUG=False` 并校验 W3，DEBUG 开启、W3 关闭或配置不完整都会停止且不显示密钥。系统不提供本地密码登录，模板也不包含本地登录开关。
 
 源码部署到 ARM 服务器时才需要把 `DOCKER_PLATFORM` 改为 `linux/arm64`；离线发布包已经固定为 `linux/amd64`，`APP_VERSION` 也由发布脚本写入，不在部署现场决定。
 
@@ -170,7 +170,7 @@ http://服务器IP:5173/
 
 生产环境只通过 `https://生产域名/` 访问。外层反向代理把所有路径统一转发到 frontend 暴露端口，frontend 容器再把 `/api` 转发到 backend；不要让浏览器或外层网关绕过 frontend 直接调用 `5173` 或 `8000`。同机反代建议把 `FRONTEND_BIND` 设置为 `127.0.0.1`，异机企业网关应通过受控内网和防火墙访问 frontend。
 
-本地预置账号默认密码均为 `pass1234`：
+初始化会创建以下功能测试账号；所有账号密码均不可用，生产只能通过匹配工号和邮箱的 W3 身份登录：
 
 | 用户名 | 角色 | 用途 |
 | --- | --- | --- |
@@ -200,7 +200,7 @@ docker compose exec backend python manage.py load_sample
 - 简历库按候选人聚合展示，一名候选人一行；详情抽屉可查看全部投递、分配尝试、反馈和 PDF 预览。
 - 简历库、岗位、院校、接口人等主要表格支持表头筛选和列宽拖拽；筛选在后端执行，分页接口支持 `page_size`，单页最大 500。
 - 简历库可以按当前筛选条件导出候选人简历，也可以在候选人详情中操作分配尝试。仅命中一个可用文件且无缺失清单时返回原文件，多文件或存在缺失时返回 zip，并在页面提示导出成功数量和缺失数量。
-- 部门接口人导入要求“工号 + 邮箱”，并自动创建或更新同工号、同邮箱的登录账号；新账号默认密码 `pass1234`。清空重导时，本次文件中不存在的旧接口人及绑定账号会同步停用。
+- 部门接口人导入要求“工号 + 邮箱”，并自动创建或更新同工号、同邮箱的登录账号；每次同步都保持密码不可用。清空重导时，本次文件中不存在的旧接口人及绑定账号会同步停用。
 
 ### 8. 常用运维命令
 
@@ -377,7 +377,7 @@ docker compose logs --tail=200 ai-worker
 - `DJANGO_DEBUG=False`。
 - `DJANGO_ALLOWED_HOSTS` 只填写实际 IP/域名，避免长期使用 `*`。
 - PostgreSQL `5432` 和 Redis `6379` 不暴露到公网；如无外部访问需求，只允许内网或安全组限制。
-- W3 启用前核对授权、Token、UserInfo 地址均为 HTTPS，`redirect_uri` 与平台登记值完全一致，并保持本地密码登录关闭。
+- W3 启用前核对授权、Token、UserInfo 地址均为 HTTPS，`redirect_uri` 与平台登记值完全一致；本地密码登录和 Django Admin 路由均不存在。
 - 内置受保护管理员使用工号 `012358`、邮箱 `huyue2@ueascend.com` 进行 W3 双字段映射；该账号无本地可用密码且不可通过用户管理编辑、停用或删除。
 
 ### 12. 常见问题
@@ -414,9 +414,9 @@ docker compose up -d
 
 首次 `docker compose build` 会安装 Python 和 npm 依赖，慢是正常现象。后续只要依赖文件没有变化，Docker 会复用缓存；如果服务器无法访问 Docker Hub、PyPI 或 npm registry，需要提前在可联网环境构建并导出完整离线镜像包，再在服务器 `docker load`。
 
-## 本地账号
+## 本地开发账号
 
-初始化后可使用以下账号登录，默认密码均为 `pass1234`。
+`seed_base` 初始化以下账号，但不会生成密码；所有账号都保存 Django 不可用密码标记。
 
 | 用户名 | 角色 | 用途 |
 | --- | --- | --- |
@@ -428,11 +428,19 @@ docker compose up -d
 | `T3002` | 三级接口人 | 查看转派给自己的分配并反馈 |
 | `T3003` | 三级接口人 | 查看转派给自己的分配并反馈 |
 
-这些账号用于正式权限链路的本地测试。W3 登录按 UserInfo 顶层 `employeeNumber` 与 `email` 同时匹配已有且启用的 `User.username + User.email`，不会自动创建账号，并继续复用 RBAC 角色和接口人 `Contact`。
+这些账号用于权限链路的本地测试。W3 登录按 UserInfo 顶层 `employeeNumber` 与 `email` 同时匹配已有且启用的 `User.username + User.email`，不会自动创建账号，并继续复用 RBAC 角色和接口人 `Contact`。
+
+仅在本地 `DEBUG=True` 且 W3 未就绪时，可从 `backend/` 为一个既有且启用的账号签发开发令牌：
+
+```bash
+python manage.py issue_dev_token --username admin
+```
+
+命令每次都会废止该账号的旧 Token。把新令牌粘贴到登录页“开发令牌”输入框后，前端先调用 `/api/me/` 验证，成功才保存本地登录态。非 DEBUG、账号不存在或已停用时命令会拒绝执行；开发令牌不是生产应急登录方式。
 
 ## 权限与配置
 
-系统前端只提供 W3 OAuth2 登录，本地密码 API 默认关闭。W3 登录时，服务端完成授权码和 UserInfo 交换，再通过浏览器 Session 一次性交付项目 Token；前端随后调用 `/api/me/` 获取用户、角色、权限码、绑定接口人和数据范围。
+系统生产只提供 W3 OAuth2 登录，本地密码 API 和 Django Admin `/admin/` 路由均已删除，访问 `/api/auth/login/` 或 `/admin/` 都返回 404。W3 登录时，服务端完成授权码和 UserInfo 交换，再通过浏览器 Session 一次性交付项目 DRF Token；前端随后调用 `/api/me/` 获取用户、角色、权限码、绑定接口人和数据范围。用户新增/编辑页面不维护密码，用户 API 收到 `password` 字段时返回 400。
 
 权限边界：
 
@@ -471,14 +479,14 @@ docker compose up -d
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/api/auth/login/` | 默认关闭的应急本地账号登录；前端不提供入口 |
+| POST | `/api/auth/login/` | 已删除；访问返回 404 |
 | POST | `/api/auth/logout/` | 退出登录并删除 Token |
-| GET | `/api/auth/w3/status/` | 返回 W3 是否可用和授权入口，不返回密钥或提供方地址 |
+| GET | `/api/auth/w3/status/` | 返回 W3 是否可用、授权入口和 `debug_token_login_enabled`，不返回密钥或提供方地址 |
 | GET | `/api/auth/w3/start/` | 生成 state/PKCE 并跳转 W3 授权地址 |
 | GET | `/api/auth/w3/callback/` | 固定 OAuth2 回调；服务端换取身份并按工号、邮箱共同映射账号 |
 | POST | `/api/auth/w3/complete/` | 同一浏览器 Session 一次性领取项目 Token 和当前用户 |
 | GET | `/api/me/` | 当前用户、角色、权限码、接口人绑定和数据范围 |
-| GET/POST/PATCH | `/api/users/` | 用户管理；内置受保护管理员只读且不可删除 |
+| GET/POST/PATCH | `/api/users/` | 用户管理；不暴露密码，携带 `password` 返回 400；内置受保护管理员只读且不可删除 |
 | GET/POST/PATCH | `/api/roles/` | 角色管理与角色权限绑定 |
 | GET | `/api/permissions/` | 后端预置权限树 |
 | GET | `/api/configs/`、`/api/configs/{key}/` | 查询白名单内的非敏感配置项 |
