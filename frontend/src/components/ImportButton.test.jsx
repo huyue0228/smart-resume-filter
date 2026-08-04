@@ -4,13 +4,19 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ImportButton from './ImportButton'
 
 const importData = vi.hoisted(() => vi.fn())
+const downloadImportTemplate = vi.hoisted(() => vi.fn())
+const downloadBlobFromResponse = vi.hoisted(() => vi.fn())
 
-vi.mock('../api/services', () => ({ importData }))
+vi.mock('../api/services', () => ({ downloadImportTemplate, importData }))
+vi.mock('../utils/download', () => ({ downloadBlobFromResponse }))
 
 describe('ImportButton processing mode', () => {
   beforeEach(() => {
     importData.mockReset()
     importData.mockResolvedValue({ data: { detail: '导入完成' } })
+    downloadImportTemplate.mockReset()
+    downloadImportTemplate.mockResolvedValue({ data: new ArrayBuffer(8), headers: {} })
+    downloadBlobFromResponse.mockReset()
   })
 
   it('submits the selected AI mode for resume uploads when AI is ready', async () => {
@@ -35,5 +41,26 @@ describe('ImportButton processing mode', () => {
     expect(formData.get('mode')).toBe('incremental')
     expect(formData.get('processing_mode')).toBe('ai')
     expect(formData.get('resume_package').name).toBe('简历包.zip')
+  })
+
+  it('downloads the configured standard template from the import dialog', async () => {
+    const user = userEvent.setup()
+    render(
+      <ImportButton
+        buttonText="导入岗位"
+        fields={[{ key: 'jobs', label: '岗位表', accept: '.xlsx' }]}
+        templateType="jobs"
+        templateFilename="岗位标准模板.xlsx"
+      />,
+    )
+
+    await user.click(screen.getByRole('button', { name: /导入岗位/ }))
+    await user.click(screen.getByRole('button', { name: /下载标准模板/ }))
+
+    await waitFor(() => expect(downloadImportTemplate).toHaveBeenCalledWith('jobs'))
+    expect(downloadBlobFromResponse).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.any(ArrayBuffer) }),
+      '岗位标准模板.xlsx',
+    )
   })
 })

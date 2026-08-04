@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import { Modal, Upload, Radio, Button, Space, Alert, message } from 'antd'
-import { InboxOutlined, ImportOutlined } from '@ant-design/icons'
-import { importData } from '../api/services'
+import { DownloadOutlined, InboxOutlined, ImportOutlined } from '@ant-design/icons'
+import { downloadImportTemplate, importData } from '../api/services'
 import AllocationModeToggle from './AllocationModeToggle'
+import { downloadBlobFromResponse } from '../utils/download'
 
 const { Dragger } = Upload
 
@@ -11,6 +12,7 @@ const { Dragger } = Upload
 //   fields: [{ key, label, accept }]  —— 后端 multipart 字段
 //   buttonText / title
 //   onDone(data) —— 导入成功回调（用于刷新列表）
+//   templateType / templateFilename —— 标准模板类型与下载兜底文件名
 export default function ImportButton({
   fields,
   buttonText = '导入',
@@ -19,12 +21,15 @@ export default function ImportButton({
   selectProcessingMode = false,
   aiReady = false,
   onBeforeOpen,
+  templateType,
+  templateFilename = '标准导入模板.xlsx',
 }) {
   const [open, setOpen] = useState(false)
   const [files, setFiles] = useState({})
   const [mode, setMode] = useState('incremental')
   const [processingMode, setProcessingMode] = useState('rule')
   const [loading, setLoading] = useState(false)
+  const [templateLoading, setTemplateLoading] = useState(false)
   const [result, setResult] = useState('')
 
   const reset = () => {
@@ -66,6 +71,19 @@ export default function ImportButton({
     }
   }
 
+  const handleTemplateDownload = async () => {
+    setTemplateLoading(true)
+    try {
+      const response = await downloadImportTemplate(templateType)
+      downloadBlobFromResponse(response, templateFilename)
+      message.success('标准模板已下载')
+    } catch {
+      // 错误已由 axios 拦截器统一提示
+    } finally {
+      setTemplateLoading(false)
+    }
+  }
+
   return (
     <>
       <Button
@@ -94,6 +112,22 @@ export default function ImportButton({
         destroyOnHidden
       >
         <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          {templateType && (
+            <Alert
+              type="info"
+              showIcon
+              message="请使用系统标准模板填写，导入时会严格校验表头。"
+              action={(
+                <Button
+                  icon={<DownloadOutlined />}
+                  loading={templateLoading}
+                  onClick={handleTemplateDownload}
+                >
+                  下载标准模板
+                </Button>
+              )}
+            />
+          )}
           {fields.map((field) => (
             <div key={field.key}>
               <div style={{ marginBottom: 8, fontWeight: 500 }}>{field.label}</div>

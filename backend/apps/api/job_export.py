@@ -6,24 +6,10 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
 from apps.core.departments import resolve_department_hierarchy
+from apps.ingestion.tabular_imports import get_import_table_schema
 
 
-JOB_EXPORT_HEADERS = [
-    "主体",
-    "一层部门",
-    "二层部门",
-    "三级部门",
-    "岗位类别",
-    "对外发布名称",
-    "是否对外发布",
-    "职位名称",
-    "岗位族",
-    "工作地点",
-    "学历",
-    "工作职责",
-    "需求专业",
-    "需求数量",
-]
+JOB_EXPORT_HEADERS = list(get_import_table_schema("jobs").headers)
 
 
 def safe_excel_value(value):

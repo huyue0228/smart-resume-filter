@@ -1,3 +1,4 @@
+from io import BytesIO
 from unittest.mock import patch
 
 from django.contrib.auth.models import Group
@@ -7,6 +8,7 @@ from rest_framework.test import APIClient
 
 from apps.accounts.models import User
 from apps.accounts.permissions import ensure_rbac_defaults
+from apps.ingestion.tabular_imports import build_import_template_workbook
 
 
 class SchoolImportAIEnrichmentApiTests(TestCase):
@@ -20,12 +22,14 @@ class SchoolImportAIEnrichmentApiTests(TestCase):
         self.client.force_authenticate(self.hr)
 
     def _upload(self):
+        output = BytesIO()
+        build_import_template_workbook("schools").save(output)
         return self.client.post(
             "/api/import/",
             {
                 "schools": SimpleUploadedFile(
                     "院校.xlsx",
-                    b"spreadsheet",
+                    output.getvalue(),
                     content_type=(
                         "application/vnd.openxmlformats-officedocument."
                         "spreadsheetml.sheet"

@@ -21,6 +21,7 @@ from apps.core import models as m
 from apps.core.departments import resolve_department_hierarchy
 
 from .identity import identity_hash, normalize_phone
+from .tabular_imports import validate_table_headers
 
 # 简历文件落盘子目录（相对 MEDIA_ROOT），导出接口复用
 RESUME_SUBDIR = "resumes"
@@ -134,18 +135,22 @@ def _table_format(file_obj):
     raise ValueError("无法识别表格文件格式，请上传 .xlsx、.xls 或 .csv 文件")
 
 
-def _read_excel(file_obj):
+def _read_excel(file_obj, schema_key=None):
     kind, engine, encoding, data = _table_format(file_obj)
     try:
         if kind == "csv":
-            return pd.read_csv(
+            table = pd.read_csv(
                 io.BytesIO(data),
                 dtype=object,
                 encoding=encoding,
                 sep=None,
                 engine="python",
             )
-        return pd.read_excel(io.BytesIO(data), dtype=object, engine=engine)
+        else:
+            table = pd.read_excel(io.BytesIO(data), dtype=object, engine=engine)
+        if schema_key:
+            validate_table_headers(table, schema_key)
+        return table
     except zipfile.BadZipFile as exc:
         raise ValueError("Excel 文件不是有效的 .xlsx 文件，请检查文件内容或另存后重新上传") from exc
     except ImportError as exc:
@@ -237,8 +242,8 @@ def _normalized_job_key_part(value):
 
 def _job_row_department_names(row):
     return (
-        _val(row, "一层部门") or _val(row, "一级部门"),
-        _val(row, "二层部门") or _val(row, "二级部门"),
+        _val(row, "一层部门"),
+        _val(row, "二层部门"),
         _val(row, "三级部门"),
     )
 
@@ -279,7 +284,7 @@ def _job_business_key(
 def _job_row_business_key(row):
     primary, secondary, tertiary = _job_row_department_names(row)
     return _job_business_key(
-        _val(row, "主体") or _val(row, "招聘主体"),
+        _val(row, "招聘主体"),
         primary,
         secondary,
         tertiary,
@@ -321,7 +326,7 @@ def _job_legacy_business_key(
 def _job_row_legacy_business_key(row):
     _primary, secondary, _tertiary = _job_row_department_names(row)
     return _job_legacy_business_key(
-        _val(row, "主体") or _val(row, "招聘主体"),
+        _val(row, "招聘主体"),
         secondary,
         _val(row, "对外发布名称"),
         _val(row, "职位名称"),
@@ -445,7 +450,7 @@ def _sync_jobs(job_rows, *, mode):
     imported_job_ids = set()
     for item in job_rows:
         row = item["row"]
-        entity = _val(row, "主体") or _val(row, "招聘主体")
+        entity = _val(row, "招聘主体")
         primary, secondary, tertiary = item["department_names"]
         department = _get_department(
             primary,
@@ -464,7 +469,7 @@ def _sync_jobs(job_rows, *, mode):
             "location": _val(row, "工作地点"),
             "education": _val(row, "学历"),
             "responsibilities": _val(row, "工作职责"),
-            "headcount": _to_int(_val(row, "需求数量")),
+            "headcount": _to_int(_val(row, "HC")),
             "is_active": True,
         }
         job = jobs_by_key.get(item["business_key"]) or reusable_jobs.get(
@@ -503,6 +508,14 @@ def _gender_code(value):
     return "U"
 
 
+def validate_import_file_headers(files):
+    """在快照或业务写入前校验本次上传的全部表格契约。"""
+    for schema_key in ("resume_list", "jobs", "schools", "contacts"):
+        file_obj = files.get(schema_key)
+        if file_obj:
+            _read_excel(file_obj, schema_key=schema_key)
+
+
 @transaction.atomic
 def import_files(files: dict, mode: str = "incremental") -> dict:
     """导入 4 张表 + 简历包。files 的键：resume_list/jobs/schools/contacts/resume_package。"""
@@ -524,7 +537,7 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
 
     # 岗位文件必须先完成行级校验，避免 replace 模式在全部岗位无效时先清空旧数据。
     if files.get("jobs"):
-        jobs_df = _read_excel(files["jobs"])
+        jobs_df = _read_excel(files["jobs"], schema_key="jobs")
         missing_responsibility_rows = []
         candidate_job_rows = []
         for excel_row, (_, row) in enumerate(jobs_df.iterrows(), start=2):
@@ -575,19 +588,19 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
 
     # 院校清单
     if files.get("schools"):
-        df = _read_excel(files["schools"])
+        df = _read_excel(files["schools"], schema_key="schools")
         for _, row in df.iterrows():
             name = _val(row, "学校")
             if not name:
                 continue
-            tag_text = _val(row, "院校标签") or _val(row, "平台")
+            tag_text = _val(row, "院校标签")
             school_tag = None
             if tag_text:
                 school_tag, _ = m.SchoolTag.objects.update_or_create(
                     code=tag_text,
                     defaults={"name": tag_text, "is_active": True},
                 )
-            province = _val(row, "所在省份") or _val(row, "省份")
+            province = _val(row, "所在省份")
             school_defaults = {
                 "platform": tag_text,
                 "school_tag": school_tag,
@@ -606,14 +619,14 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
     # 部门接口人
     if files.get("contacts"):
         ensure_rbac_defaults()
-        df = _read_excel(files["contacts"])
+        df = _read_excel(files["contacts"], schema_key="contacts")
         contact_rows = []
         email_owners = {}
         for excel_row, (_, row) in enumerate(df.iterrows(), start=2):
             no = _val(row, "工号")
             if not no:
                 continue
-            email = (_val(row, "邮箱") or _val(row, "电子邮箱")).casefold()
+            email = _val(row, "邮箱").casefold()
             if not email:
                 raise ValueError(f"部门接口人第 {excel_row} 行缺少邮箱")
             try:
@@ -646,7 +659,7 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
             dept = _get_department(
                 _val(row, "一层部门"),
                 _val(row, "二层部门"),
-                _val(row, "主体"),
+                "",
                 _val(row, "三级部门"),
             )
             contact, _ = m.Contact.objects.update_or_create(
@@ -674,7 +687,7 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
     # 简历信息列表 → Candidate + Resume
     resume_by_apply = {}
     if files.get("resume_list"):
-        df = _read_excel(files["resume_list"])
+        df = _read_excel(files["resume_list"], schema_key="resume_list")
         education_by_identity = {}
         for _, row in df.iterrows():
             name = _val(row, "姓名")

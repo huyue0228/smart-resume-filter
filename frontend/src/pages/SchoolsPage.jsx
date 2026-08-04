@@ -92,6 +92,8 @@ export default function SchoolsPage() {
               buttonText="导入院校"
               title="导入院校分类"
               fields={IMPORT_FIELDS}
+              templateType="schools"
+              templateFilename="院校分类标准模板.xlsx"
               onDone={() => {
                 actionRef.current?.reload()
                 actionRef.current?.reloadOptions()

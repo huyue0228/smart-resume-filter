@@ -256,6 +256,8 @@ export default function DepartmentsPage() {
               buttonText="导入接口人"
               title="导入部门接口人信息"
               fields={IMPORT_FIELDS}
+              templateType="contacts"
+              templateFilename="部门接口人标准模板.xlsx"
               onDone={() => {
                 actionRef.current?.reload()
                 actionRef.current?.reloadOptions()

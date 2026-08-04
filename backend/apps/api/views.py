@@ -5,6 +5,7 @@ import os
 import re
 import time
 from datetime import date, datetime, time as datetime_time, timedelta
+from io import BytesIO
 from urllib.parse import quote
 
 from django.conf import settings
@@ -43,6 +44,11 @@ from apps.ingestion import snapshot
 from apps.ingestion.sources import (
     RESUME_SUBDIR,
     import_files,
+    validate_import_file_headers,
+)
+from apps.ingestion.tabular_imports import (
+    build_import_template_workbook,
+    get_import_table_schema,
 )
 from apps.pipeline import ai_config, cancellation, prompt_management, runner
 from apps.pipeline.ai import prompt_harness
@@ -502,6 +508,12 @@ class ImportView(APIView):
             return Response(
                 {"detail": "未上传任何文件"}, status=status.HTTP_400_BAD_REQUEST
             )
+        try:
+            validate_import_file_headers(files)
+        except Exception as exc:  # noqa: BLE001
+            return Response(
+                {"detail": f"导入失败: {exc}"}, status=status.HTTP_400_BAD_REQUEST
+            )
         mode = request.data.get("mode", "incremental")
         # 含简历数据的上传：先存撤销快照（上传前状态），再导入
         takes_resume = bool(files.get("resume_list") or files.get("resume_package"))
@@ -590,6 +602,35 @@ class ImportView(APIView):
                 else status.HTTP_200_OK
             ),
         )
+
+
+class ImportTemplateView(APIView):
+    """下载四类表格导入共用的标准模板。"""
+
+    permission_classes = [HasPermissionCode]
+    permission_code = "resume.import"
+
+    def get(self, request, template_type):
+        try:
+            schema = get_import_table_schema(template_type)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_404_NOT_FOUND)
+
+        workbook = build_import_template_workbook(template_type)
+        output = BytesIO()
+        workbook.save(output)
+        response = HttpResponse(
+            output.getvalue(),
+            content_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+        )
+        encoded_name = quote(schema.filename)
+        response["Content-Disposition"] = (
+            f'attachment; filename="import-template.xlsx"; '
+            f"filename*=UTF-8''{encoded_name}"
+        )
+        return response
 
 
 class ImportUndoView(APIView):

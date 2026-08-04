@@ -1067,6 +1067,8 @@ export default function ResumesPage() {
             buttonText="上传简历"
             title="上传简历（简历列表 + 简历包），上传后自动处理"
             fields={RESUME_IMPORT_FIELDS}
+            templateType="resume_list"
+            templateFilename="简历信息列表标准模板.xlsx"
             selectProcessingMode
             aiReady={allocationAvailability.ai_ready}
             onBeforeOpen={refreshAllocationAvailability}

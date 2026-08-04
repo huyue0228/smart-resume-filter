@@ -16,13 +16,37 @@ from apps.ingestion.sources import (
     import_files,
     normalize_highest_education,
 )
+from apps.ingestion.tabular_imports import (
+    get_import_table_schema,
+    validate_table_headers,
+)
+
+
+def _schema_key_for_rows(rows):
+    fields = {field for row in rows for field in row}
+    if "学校" in fields:
+        return "schools"
+    if "工号" in fields or "邮箱" in fields:
+        return "contacts"
+    if fields.intersection({"职位名称", "岗位类别", "工作职责", "HC"}):
+        return "jobs"
+    return "resume_list"
 
 
 def _excel_file(rows):
     buf = BytesIO()
-    pd.DataFrame(rows).to_excel(buf, index=False)
+    schema = get_import_table_schema(_schema_key_for_rows(rows))
+    pd.DataFrame(rows, columns=schema.headers).to_excel(buf, index=False)
     buf.seek(0)
     buf.name = "简历信息列表.xlsx"
+    return buf
+
+
+def _raw_excel_file(rows):
+    buf = BytesIO()
+    pd.DataFrame(rows).to_excel(buf, index=False)
+    buf.seek(0)
+    buf.name = "非标准模板.xlsx"
     return buf
 
 
@@ -170,13 +194,13 @@ class ResumeImportDesignContractTests(TestCase):
         jobs = _excel_file(
             [
                 {
-                    "主体": "GW",
+                    "招聘主体": "GW",
                     "职位名称": "后端工程师",
                     "对外发布名称": "后端开发",
                     "工作职责": "负责服务设计、接口开发和性能优化。",
                 },
                 {
-                    "主体": "GW",
+                    "招聘主体": "GW",
                     "职位名称": "测试工程师",
                     "对外发布名称": "测试开发",
                     "工作职责": "",
@@ -292,7 +316,7 @@ class ResumeImportDesignContractTests(TestCase):
         jobs = _excel_file(
             [
                 {
-                    "主体": "GW",
+                    "招聘主体": "GW",
                     "一层部门": "技术中心",
                     "二层部门": "平台部",
                     "对外发布名称": "后端开发",
@@ -303,11 +327,11 @@ class ResumeImportDesignContractTests(TestCase):
                     "学历": "硕士",
                     "是否对外发布": "是",
                     "工作职责": "负责核心服务建设。",
-                    "需求数量": 7,
+                    "HC": 7,
                     "需求专业": "计算机、软件工程",
                 },
                 {
-                    "主体": "GW",
+                    "招聘主体": "GW",
                     "一层部门": "技术中心",
                     "二层部门": "平台部",
                     "对外发布名称": "算法开发",
@@ -315,7 +339,7 @@ class ResumeImportDesignContractTests(TestCase):
                     "岗位类别": "技术类",
                     "是否对外发布": "是",
                     "工作职责": "负责算法平台建设。",
-                    "需求数量": 2,
+                    "HC": 2,
                     "需求专业": "人工智能",
                 },
             ]
@@ -359,8 +383,8 @@ class ResumeImportDesignContractTests(TestCase):
         jobs = _excel_file(
             [
                 {
-                    "主体": "GW",
-                    "一级部门": "技术中心",
+                    "招聘主体": "GW",
+                    "一层部门": "技术中心",
                     "二层部门": "平台部",
                     "三级部门": "研发组",
                     "对外发布名称": "后端开发",
@@ -369,7 +393,7 @@ class ResumeImportDesignContractTests(TestCase):
                     "工作职责": "职责一",
                 },
                 {
-                    "主体": " gw ",
+                    "招聘主体": " gw ",
                     "一层部门": "技 术中心",
                     "二层部门": "平台 部",
                     "三级部门": "研 发组",
@@ -389,6 +413,41 @@ class ResumeImportDesignContractTests(TestCase):
         self.assertEqual(existing.headcount, 1)
         self.assertEqual(m.Job.objects.count(), 1)
 
+    def test_job_import_rejects_nonstandard_headers_before_business_key_check(self):
+        schema = get_import_table_schema("jobs")
+        row = dict.fromkeys(schema.headers, "")
+        row.update(
+            {
+                "招聘主体": "GW",
+                "二层部门": "平台部",
+                "对外发布名称": "后端开发",
+                "职位名称": "后端工程师",
+                "工作职责": "负责后端研发。",
+                "HC": 2,
+            }
+        )
+        row["主体"] = row.pop("招聘主体")
+        row["二级组织"] = row.pop("二层部门")
+        row["需求数量"] = row.pop("HC")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "缺少字段【招聘主体、二层部门、HC】.*未知字段【主体、二级组织、需求数量】",
+        ):
+            import_files({"jobs": _raw_excel_file([row])}, mode="incremental")
+
+        self.assertFalse(m.Job.objects.exists())
+
+    def test_standard_header_validation_reports_duplicate_fields(self):
+        schema = get_import_table_schema("schools")
+        table = pd.DataFrame(
+            [["北京大学", "重复学校", "重点院校", "北京"]],
+            columns=("学校", "学校", "院校标签", "所在省份"),
+        )
+
+        with self.assertRaisesRegex(ValueError, "重复字段【学校】"):
+            validate_table_headers(table, schema.key)
+
     def test_job_import_business_key_distinguishes_entity_and_each_department_level(self):
         common = {
             "对外发布名称": "后端开发",
@@ -401,36 +460,36 @@ class ResumeImportDesignContractTests(TestCase):
                 {
                     **common,
                     "招聘主体": "GW",
-                    "一级部门": "技术中心",
-                    "二级部门": "平台部",
+                    "一层部门": "技术中心",
+                    "二层部门": "平台部",
                     "三级部门": "研发一组",
                 },
                 {
                     **common,
                     "招聘主体": "YLS",
-                    "一级部门": "技术中心",
-                    "二级部门": "平台部",
+                    "一层部门": "技术中心",
+                    "二层部门": "平台部",
                     "三级部门": "研发一组",
                 },
                 {
                     **common,
                     "招聘主体": "GW",
-                    "一级部门": "数据中心",
-                    "二级部门": "平台部",
+                    "一层部门": "数据中心",
+                    "二层部门": "平台部",
                     "三级部门": "研发一组",
                 },
                 {
                     **common,
                     "招聘主体": "GW",
-                    "一级部门": "技术中心",
-                    "二级部门": "应用部",
+                    "一层部门": "技术中心",
+                    "二层部门": "应用部",
                     "三级部门": "研发一组",
                 },
                 {
                     **common,
                     "招聘主体": "GW",
-                    "一级部门": "技术中心",
-                    "二级部门": "平台部",
+                    "一层部门": "技术中心",
+                    "二层部门": "平台部",
                     "三级部门": "研发二组",
                 },
             ]
@@ -445,7 +504,7 @@ class ResumeImportDesignContractTests(TestCase):
         jobs = _excel_file(
             [
                 {
-                    "主体": "GW",
+                    "招聘主体": "GW",
                     "一层部门": "技术中心",
                     "三级部门": "研发组",
                     "对外发布名称": "后端开发",
@@ -480,7 +539,7 @@ class ResumeImportDesignContractTests(TestCase):
         jobs = _excel_file(
             [
                 {
-                    "主体": "GW",
+                    "招聘主体": "GW",
                     "一层部门": "技术中心",
                     "二层部门": "平台部",
                     "三级部门": "研发组",
@@ -488,7 +547,7 @@ class ResumeImportDesignContractTests(TestCase):
                     "对外发布名称": "后端开发",
                     "职位名称": "后端工程师",
                     "工作职责": "新职责",
-                    "需求数量": 3,
+                    "HC": 3,
                 }
             ]
         )
@@ -527,7 +586,7 @@ class ResumeImportDesignContractTests(TestCase):
         jobs = _excel_file(
             [
                 {
-                    "主体": "GW",
+                    "招聘主体": "GW",
                     "一层部门": "技术中心",
                     "二层部门": "平台部",
                     "三级部门": tertiary,
@@ -535,7 +594,7 @@ class ResumeImportDesignContractTests(TestCase):
                     "对外发布名称": "后端开发",
                     "职位名称": "后端工程师",
                     "工作职责": f"{tertiary}职责",
-                    "需求数量": headcount,
+                    "HC": headcount,
                 }
                 for tertiary, headcount in (("研发一组", 4), ("研发二组", 5))
             ]
@@ -583,7 +642,7 @@ class ResumeImportDesignContractTests(TestCase):
         jobs = _excel_file(
             [
                 {
-                    "主体": "GW",
+                    "招聘主体": "GW",
                     "对外发布名称": "新岗位",
                     "职位名称": "新岗位",
                     "岗位类别": "技术类",
@@ -622,12 +681,12 @@ class ResumeImportDesignContractTests(TestCase):
         jobs = _excel_file(
             [
                 {
-                    "主体": "GW",
+                    "招聘主体": "GW",
                     "对外发布名称": "后端开发",
                     "职位名称": "后端工程师",
                     "岗位类别": "技术类",
                     "工作职责": "新职责",
-                    "需求数量": 9,
+                    "HC": 9,
                     "需求专业": "计算机",
                 }
             ]

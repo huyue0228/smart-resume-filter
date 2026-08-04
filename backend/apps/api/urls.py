@@ -58,6 +58,10 @@ urlpatterns = [
         views.AIPromptVersionRestoreView.as_view(),
     ),
     path("import/", views.ImportView.as_view()),
+    path(
+        "import/templates/<str:template_type>/",
+        views.ImportTemplateView.as_view(),
+    ),
     path("import/undo/", views.ImportUndoView.as_view()),
     path("pipeline/run/", views.PipelineRunView.as_view()),
     path(

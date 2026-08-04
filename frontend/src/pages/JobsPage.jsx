@@ -41,6 +41,7 @@ export default function JobsPage() {
   }, [])
 
   const canManageJobs = hasPermission('job.manage')
+  const canImportJobs = hasPermission('resume.import')
   const departmentOptions = useMemo(() => {
     const departmentsById = new Map(
       departments.map((department) => [department.id, department]),
@@ -230,12 +231,14 @@ export default function JobsPage() {
                 新增岗位
               </Button>
             ),
-            canManageJobs && (
+            canImportJobs && (
               <ImportButton
                 key="import"
                 buttonText="导入岗位"
                 title="导入岗位分类及专业要求"
                 fields={IMPORT_FIELDS}
+                templateType="jobs"
+                templateFilename="岗位标准模板.xlsx"
                 onDone={() => {
                   actionRef.current?.reload()
                   actionRef.current?.reloadOptions()

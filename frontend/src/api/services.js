@@ -164,6 +164,11 @@ export function importData(formData) {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
 }
+export function downloadImportTemplate(templateType) {
+  return client.get(`/import/templates/${templateType}/`, {
+    responseType: 'blob',
+  })
+}
 // 撤销（单级）：GET 查状态，POST 执行
 export function fetchUndoStatus() {
   return client.get('/import/undo/')

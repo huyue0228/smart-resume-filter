@@ -26,6 +26,10 @@ from apps.accounts.protected_users import (
     PROTECTED_ADMIN_USERNAME,
 )
 from apps.core import models as m
+from apps.ingestion.tabular_imports import (
+    build_import_template_workbook,
+    get_import_table_schema,
+)
 from apps.pipeline import ai_config
 from apps.pipeline.ai.service import AIServiceError
 from apps.pipeline.services import classify_school
@@ -40,6 +44,12 @@ def rest_framework_test_settings():
         "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
         "PAGE_SIZE": 20,
     }
+
+
+def standard_import_template_bytes(template_type):
+    output = BytesIO()
+    build_import_template_workbook(template_type).save(output)
+    return output.getvalue()
 
 
 @override_settings(
@@ -3651,7 +3661,7 @@ class JobExportApiTests(TestCase):
         self.assertEqual(
             [cell.value for cell in sheet[1]],
             [
-                "主体",
+                "招聘主体",
                 "一层部门",
                 "二层部门",
                 "三级部门",
@@ -3664,7 +3674,7 @@ class JobExportApiTests(TestCase):
                 "学历",
                 "工作职责",
                 "需求专业",
-                "需求数量",
+                "HC",
             ],
         )
         self.assertEqual(sheet.max_row, 23)
@@ -4739,6 +4749,110 @@ class ImportApiTests(TestCase):
         self.hr.groups.add(Group.objects.get(name="HR"))
         self.client.force_authenticate(self.hr)
 
+    def test_downloads_all_standard_import_templates(self):
+        for template_type in ("resume_list", "jobs", "schools", "contacts"):
+            with self.subTest(template_type=template_type):
+                schema = get_import_table_schema(template_type)
+                response = self.client.get(
+                    f"/api/import/templates/{template_type}/"
+                )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertIn(quote(schema.filename), response["Content-Disposition"])
+                workbook = load_workbook(BytesIO(response.content))
+                sheet = workbook[schema.sheet_name]
+                self.assertEqual(
+                    [cell.value for cell in sheet[1]],
+                    list(schema.headers),
+                )
+                self.assertEqual(sheet.freeze_panes, "A2")
+                self.assertIn("填写说明", workbook.sheetnames)
+
+    def test_unknown_import_template_returns_404(self):
+        response = self.client.get("/api/import/templates/unknown/")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.data["detail"], "未知导入模板类型")
+
+    def test_import_template_requires_import_permission(self):
+        user = User.objects.create_user(
+            username="template-viewer",
+            password="pass",
+            role=User.ROLE_SECONDARY_CONTACT,
+        )
+        self.client.force_authenticate(user)
+
+        response = self.client.get("/api/import/templates/jobs/")
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_job_import_rejects_nonstandard_headers_with_explicit_differences(self):
+        schema = get_import_table_schema("jobs")
+        row = dict.fromkeys(schema.headers, "")
+        row.update(
+            {
+                "招聘主体": "GW",
+                "二层部门": "平台部",
+                "对外发布名称": "后端开发",
+                "职位名称": "后端工程师",
+                "工作职责": "负责后端研发。",
+                "HC": 2,
+            }
+        )
+        row["主体"] = row.pop("招聘主体")
+        row["二级组织"] = row.pop("二层部门")
+        row["需求数量"] = row.pop("HC")
+        output = BytesIO()
+        pd.DataFrame([row]).to_excel(output, index=False)
+
+        response = self.client.post(
+            "/api/import/",
+            {
+                "jobs": SimpleUploadedFile(
+                    "非标准岗位表.xlsx",
+                    output.getvalue(),
+                    content_type=(
+                        "application/vnd.openxmlformats-officedocument."
+                        "spreadsheetml.sheet"
+                    ),
+                )
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("缺少字段【招聘主体、二层部门、HC】", response.data["detail"])
+        self.assertIn("未知字段【主体、二级组织、需求数量】", response.data["detail"])
+        self.assertFalse(m.Job.objects.exists())
+
+    @patch("apps.api.views.snapshot.take_snapshot")
+    def test_resume_header_validation_runs_before_snapshot(self, take_snapshot):
+        output = BytesIO()
+        pd.DataFrame([{"姓名": "张三", "应聘ID": "A1001"}]).to_excel(
+            output,
+            index=False,
+        )
+
+        response = self.client.post(
+            "/api/import/",
+            {
+                "processing_mode": "rule",
+                "resume_list": SimpleUploadedFile(
+                    "非标准简历表.xlsx",
+                    output.getvalue(),
+                    content_type=(
+                        "application/vnd.openxmlformats-officedocument."
+                        "spreadsheetml.sheet"
+                    ),
+                ),
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("简历信息列表表头不符合标准模板", response.data["detail"])
+        take_snapshot.assert_not_called()
+
     @patch("apps.api.views.snapshot.take_snapshot")
     @patch("apps.api.views.import_files")
     def test_resume_upload_requires_processing_mode(
@@ -4798,7 +4912,7 @@ class ImportApiTests(TestCase):
             {
                 "jobs": SimpleUploadedFile(
                     "岗位.xlsx",
-                    b"spreadsheet",
+                    standard_import_template_bytes("jobs"),
                     content_type=(
                         "application/vnd.openxmlformats-officedocument."
                         "spreadsheetml.sheet"
@@ -4912,7 +5026,8 @@ class ImportApiTests(TestCase):
                     "二层部门": "后端组",
                     "接口人层级": "二级接口人",
                 }
-            ]
+            ],
+            columns=get_import_table_schema("contacts").headers,
         ).to_excel(buf, index=False)
         buf.seek(0)
 
@@ -4965,7 +5080,8 @@ class ImportApiTests(TestCase):
                     "二层部门": "后端组",
                     "接口人层级": "二级接口人",
                 }
-            ]
+            ],
+            columns=get_import_table_schema("contacts").headers,
         ).to_excel(buf, index=False)
         buf.seek(0)
 
