@@ -9,6 +9,7 @@ export const ROUTE_PERMISSIONS = {
   '/processing-tasks': ['pipeline.view'],
   '/config': ['settings.manage_config'],
   '/ai-connection': ['settings.manage_ai_connection'],
+  '/prompt-management': ['settings.manage_ai_connection'],
   '/users': ['settings.manage_permissions'],
 }
 
@@ -26,6 +27,7 @@ const AUTHENTICATED_HOME_CANDIDATES = [
   '/departments',
   '/config',
   '/ai-connection',
+  '/prompt-management',
   '/users',
 ]
 

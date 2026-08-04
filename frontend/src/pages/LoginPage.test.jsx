@@ -1,4 +1,5 @@
 import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import LoginPage from './LoginPage'
@@ -6,6 +7,7 @@ import { fetchW3OAuth2Status } from '../api/services'
 
 const roleMocks = vi.hoisted(() => ({
   completeW3OAuth2Login: vi.fn(),
+  loginWithDevToken: vi.fn(),
 }))
 
 vi.mock('../api/services', () => ({
@@ -31,12 +33,14 @@ describe('LoginPage W3 OAuth2', () => {
   beforeEach(() => {
     roleMocks.completeW3OAuth2Login.mockReset()
     roleMocks.completeW3OAuth2Login.mockResolvedValue({ username: 'E10001' })
+    roleMocks.loginWithDevToken.mockReset()
+    roleMocks.loginWithDevToken.mockResolvedValue({ username: 'DEV100' })
     fetchW3OAuth2Status.mockReset()
     fetchW3OAuth2Status.mockResolvedValue({
       data: {
         enabled: true,
         ready: true,
-        local_login_enabled: false,
+        debug_token_login_enabled: false,
         start_url: '/api/auth/w3/start/',
       },
     })
@@ -58,7 +62,7 @@ describe('LoginPage W3 OAuth2', () => {
       data: {
         enabled: true,
         ready: false,
-        local_login_enabled: false,
+        debug_token_login_enabled: false,
         start_url: null,
       },
     })
@@ -92,5 +96,51 @@ describe('LoginPage W3 OAuth2', () => {
     expect(roleMocks.completeW3OAuth2Login).not.toHaveBeenCalled()
     expect(redirectToW3).not.toHaveBeenCalled()
     expect(await screen.findByRole('button', { name: /重新发起 W3 登录/ })).toBeTruthy()
+  })
+
+  it('validates a development token before entering the application', async () => {
+    const user = userEvent.setup()
+    fetchW3OAuth2Status.mockResolvedValue({
+      data: {
+        enabled: false,
+        ready: false,
+        debug_token_login_enabled: true,
+        start_url: null,
+      },
+    })
+
+    renderLogin()
+
+    const input = await screen.findByPlaceholderText('开发令牌')
+    await user.type(input, ' dev-token ')
+    await user.click(screen.getByRole('button', { name: '使用开发令牌登录' }))
+
+    await waitFor(() => {
+      expect(roleMocks.loginWithDevToken).toHaveBeenCalledWith('dev-token')
+    })
+    expect(await screen.findByText('已登录首页')).toBeTruthy()
+  })
+
+  it('keeps the development token out of login state when validation fails', async () => {
+    const user = userEvent.setup()
+    roleMocks.loginWithDevToken.mockRejectedValue({
+      response: { data: { detail: '无效令牌' } },
+    })
+    fetchW3OAuth2Status.mockResolvedValue({
+      data: {
+        enabled: false,
+        ready: false,
+        debug_token_login_enabled: true,
+        start_url: null,
+      },
+    })
+
+    renderLogin()
+
+    await user.type(await screen.findByPlaceholderText('开发令牌'), 'bad-token')
+    await user.click(screen.getByRole('button', { name: '使用开发令牌登录' }))
+
+    expect(await screen.findByText('无效令牌')).toBeTruthy()
+    expect(screen.queryByText('已登录首页')).toBeNull()
   })
 })

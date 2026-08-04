@@ -21,7 +21,13 @@ export function serializeTableFilters(columns, filters) {
   return columns.reduce((params, column, index) => {
     const filter = column.filter
     const values = filters[tableColumnKey(column, index)] || []
-    if (!filter?.param || !values.length) return params
+    if (filter?.type === 'dateRange') {
+      const [fromParam, toParam] = filter.params || []
+      if (fromParam && values[0]) params[fromParam] = values[0]
+      if (toParam && values[1]) params[toParam] = values[1]
+      return params
+    }
+    if (!filter?.param || !values.some(Boolean)) return params
     params[filter.param] = filter.multiple ? values.join(',') : values[0]
     return params
   }, {})
@@ -38,7 +44,7 @@ export function localTextMatches(value, query, pinyin = false) {
 export function filterLocalData(dataSource, columns, filters) {
   const activeColumns = columns
     .map((column, index) => ({ column, key: tableColumnKey(column, index) }))
-    .filter(({ column, key }) => column.filter && filters[key]?.length)
+    .filter(({ column, key }) => column.filter && filters[key]?.some(Boolean))
   if (!activeColumns.length) return dataSource || []
   return (dataSource || []).filter((record) =>
     activeColumns.every(({ column, key }) => {
@@ -49,6 +55,12 @@ export function filterLocalData(dataSource, columns, filters) {
       if (column.filter.type === 'select') {
         const current = String(value ?? '')
         return values.some((item) => current === String(item))
+      }
+      if (column.filter.type === 'dateRange') {
+        const current = String(value ?? '')
+        if (!current) return false
+        const [fromDate, toDate] = values
+        return (!fromDate || current >= fromDate) && (!toDate || current <= toDate)
       }
       return localTextMatches(value, values[0], column.filter.pinyin)
     }),

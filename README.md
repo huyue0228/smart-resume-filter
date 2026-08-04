@@ -1,6 +1,6 @@
-# 简历宝
+# 海纳智聘
 
-“简历宝”是面向校园招聘的智能简历筛选平台。候选人采用 Rule-first 主流程：「Step1 查重与志愿排序 → Step2 院校分类及学历/院校准入 → Step3 Rule 前置检查 → Step4 AI 深度筛选（仅 AI 模式）」。岗位需求、部门和接口人是独立维护的基础数据。系统按正式项目方式建设：后端启用登录与 RBAC 权限校验，前端菜单和按钮由后端权限码驱动；AI Agent 与专项强制分流已接入，W3 OAuth2 认证适配层已就绪，真实 W3 参数和 WeLink 下发仍待外部联调。
+“海纳智聘”是面向校园招聘的智能简历筛选平台。候选人采用 Rule-first 主流程：「Step1 查重与志愿排序 → Step2 院校分类及学历/院校准入 → Step3 Rule 前置检查 → Step4 AI 深度筛选（仅 AI 模式）」。岗位需求、部门和接口人是独立维护的基础数据。系统按正式项目方式建设：后端启用登录与 RBAC 权限校验，前端菜单和按钮由后端权限码驱动；AI Agent 与专项强制分流已接入，W3 OAuth2 认证适配层已就绪，真实 W3 参数和 WeLink 下发仍待外部联调。
 
 设计文档以 [`docs/需求描述.md`](docs/需求描述.md)、[`docs/后端设计.md`](docs/后端设计.md)、[`docs/数据库设计.md`](docs/数据库设计.md)、[`docs/前端设计.md`](docs/前端设计.md) 为准。
 
@@ -126,7 +126,7 @@ bash skills/smart-resume-offline-deploy/scripts/deploy.sh
 
 确认后再次运行同一命令即可部署。`DJANGO_SECRET_KEY`、`POSTGRES_PASSWORD` 和 `RESTIC_PASSWORD` 由脚本从 `/dev/urandom` 自动生成且不回显。检测到旧容器或旧数据卷时，脚本绝不重新生成密钥；升级或灾后重建必须恢复原 `.env`，否则数据库可能无法连接，既有 AI 连接密文也可能无法解密。
 
-系统前端只提供 W3 登录，因此 W3 OAuth2 是可用部署的必要条件。模板中的 `W3_OAUTH2_ENABLED=False` 只是首次生成 `.env` 的安全占位；正式部署前必须改为 `True`，填写 client id、授权/Token/UserInfo HTTPS 地址、工号和邮箱字段路径、客户端认证方式、超时、事务有效期，并把 `W3_OAUTH2_REDIRECT_URI` 设置为 W3 平台登记的精确地址，例如 `https://你的域名/api/auth/w3/callback/`。当前 W3 UserInfo 的工号和邮箱字段分别为顶层 `employeeNumber`、`email`，模板已预填；`tenantId`、`uuid`、`globalUserID` 不参与账号匹配。机密客户端还必须填写 client secret，scope 按 W3 要求填写。部署脚本会在任何 Docker 变更前校验，W3 关闭或配置不完整都会停止且不显示密钥。`W3_OAUTH2_LOCAL_LOGIN_ENABLED` 默认并保持为 `False`；本地密码 API 仅作为显式开启的应急能力，前端不会展示密码表单。
+系统生产只提供 W3 登录，因此 W3 OAuth2 是可用部署的必要条件。模板中的 `W3_OAUTH2_ENABLED=False` 只是首次生成 `.env` 的安全占位；正式部署前必须改为 `True`，填写 client id、授权/Token/UserInfo HTTPS 地址、工号和邮箱字段路径、客户端认证方式、超时、事务有效期，并把 `W3_OAUTH2_REDIRECT_URI` 设置为 W3 平台登记的精确地址，例如 `https://你的域名/api/auth/w3/callback/`。当前 W3 UserInfo 的工号和邮箱字段分别为顶层 `employeeNumber`、`email`，模板已预填；`tenantId`、`uuid`、`globalUserID` 不参与账号匹配。机密客户端还必须填写 client secret，scope 按 W3 要求填写。部署脚本会在任何 Docker 变更前强制 `DJANGO_DEBUG=False` 并校验 W3，DEBUG 开启、W3 关闭或配置不完整都会停止且不显示密钥。系统不提供本地密码登录，模板也不包含本地登录开关。
 
 源码部署到 ARM 服务器时才需要把 `DOCKER_PLATFORM` 改为 `linux/arm64`；离线发布包已经固定为 `linux/amd64`，`APP_VERSION` 也由发布脚本写入，不在部署现场决定。
 
@@ -170,7 +170,7 @@ http://服务器IP:5173/
 
 生产环境只通过 `https://生产域名/` 访问。外层反向代理把所有路径统一转发到 frontend 暴露端口，frontend 容器再把 `/api` 转发到 backend；不要让浏览器或外层网关绕过 frontend 直接调用 `5173` 或 `8000`。同机反代建议把 `FRONTEND_BIND` 设置为 `127.0.0.1`，异机企业网关应通过受控内网和防火墙访问 frontend。
 
-本地预置账号默认密码均为 `pass1234`：
+初始化会创建以下功能测试账号；所有账号密码均不可用，生产只能通过匹配工号和邮箱的 W3 身份登录：
 
 | 用户名 | 角色 | 用途 |
 | --- | --- | --- |
@@ -200,7 +200,7 @@ docker compose exec backend python manage.py load_sample
 - 简历库按候选人聚合展示，一名候选人一行；详情抽屉可查看全部投递、分配尝试、反馈和 PDF 预览。
 - 简历库、岗位、院校、接口人等主要表格支持表头筛选和列宽拖拽；筛选在后端执行，分页接口支持 `page_size`，单页最大 500。
 - 简历库可以按当前筛选条件导出候选人简历，也可以在候选人详情中操作分配尝试。仅命中一个可用文件且无缺失清单时返回原文件，多文件或存在缺失时返回 zip，并在页面提示导出成功数量和缺失数量。
-- 部门接口人导入要求“工号 + 邮箱”，并自动创建或更新同工号、同邮箱的登录账号；新账号默认密码 `pass1234`。清空重导时，本次文件中不存在的旧接口人及绑定账号会同步停用。
+- 部门接口人导入要求“工号 + 邮箱”，并自动创建或更新同工号、同邮箱的登录账号；每次同步都保持密码不可用。清空重导时，本次文件中不存在的旧接口人及绑定账号会同步停用。
 
 ### 8. 常用运维命令
 
@@ -352,6 +352,10 @@ docker compose up -d
 
 模型连接和运行参数均由 `settings.manage_ai_connection` 保护；管理员角色默认拥有该权限，也可在「用户权限」按角色授予。模型连接页配置共享内网 Base URL、API 风格和可选 API Key，通过 `GET /models` 获取模型 ID，同时允许直接输入模型 ID，并执行一次最小真实模型测试，不展示服务商/Profile。API Key 非空时仅可写入；服务端用 Django `SECRET_KEY` 派生的 Fernet 密钥加密存储，GET、前端状态和测试结果都不会返回明文或密文。未获授权的 HR 和接口人不可见、不可调用相关配置、模型发现和测试接口。系统不再提供全局 AI 分配开关；当前完整连接配置测试有效时，上传和处理简历才可选择 AI。
 
+「系统设置 → Prompt 管理」（`/prompt-management`）复用同一 `settings.manage_ai_connection` 权限，管理员以整套方式维护五个固定业务模块：筛选角色与任务目标、学历/院校/志愿/当前岗位等业务边界、专业/项目/实习/技能/岗位职责评价口径、AI 专项人才识别口径，以及院校省份/校区/分校判断口径。后端始终按固定顺序组装，并追加不可编辑的最小安全底座、动态 JSON 数据、省份白名单和 Pydantic JSON Schema/结构化输出协议；简历、岗位职责和院校名称中的指令一律按不可信数据处理，不能改变任务、固定岗位或输出协议。管理员不能编辑模板变量、载荷字段或 Schema。
+
+Prompt 采用“共享草稿 → 真实模型测试 → 原子发布 → 历史恢复”流程。五个模块均必填，保存时移除 NUL 和首尾空白，单模块最多 8,000 字符、整套最多 24,000 字符，未知或缺失模块会被拒绝；保存、重置、发布和历史恢复携带 `lock_version`，并发覆盖返回 409。真实测试使用内置脱敏简历和院校样例，分别走当前 `responses` 或 `chat_json` 正式调用路径，只保存模型名、时间和脱敏摘要，不保存原始模型响应，也不返回内部连接指纹。草稿或模型连接变化会使 Prompt 测试失效；只有草稿内容哈希、当前连接指纹和成功测试仍一致时才能发布。迁移初始化激活版本 `resume-screening-v2` 和一份相同的未测试草稿，后续激活版本命名为 `prompt-vNNNNNN-<hash8>`；发布时旧激活版本归档并自动创建同内容的新草稿，历史恢复只复制到草稿，仍需重新测试和发布。
+
 “AI 专项”页签维护默认关闭的 `ai_special_route_enabled / ai_special_route_threshold / ai_special_route_secondary_contact_id / ai_special_route_tertiary_contact_id`：获授权用户选择父级二级接口人后，只能选择其下属三级接口人作为固定目标；已启用状态下切换目标时，页面会先安全关闭专项、更新链路并按最终开关状态恢复。专项命中、证据和内部审计仍不在候选人详情、处理原因或招聘分析中展示。专项证据不足或目标配置失效时会继续普通 AI 结论，不产生候选人报错。
 
 模型连接仅由管理员保存的数据库配置决定；运行时不会读取部署环境变量中的 API 风格、模型、Base URL 或 API Key，也不读取模型服务商/Profile 模板。通常无需为改动模型连接重启 backend/worker。
@@ -373,7 +377,7 @@ docker compose logs --tail=200 ai-worker
 - `DJANGO_DEBUG=False`。
 - `DJANGO_ALLOWED_HOSTS` 只填写实际 IP/域名，避免长期使用 `*`。
 - PostgreSQL `5432` 和 Redis `6379` 不暴露到公网；如无外部访问需求，只允许内网或安全组限制。
-- W3 启用前核对授权、Token、UserInfo 地址均为 HTTPS，`redirect_uri` 与平台登记值完全一致，并保持本地密码登录关闭。
+- W3 启用前核对授权、Token、UserInfo 地址均为 HTTPS，`redirect_uri` 与平台登记值完全一致；本地密码登录和 Django Admin 路由均不存在。
 - 内置受保护管理员使用工号 `012358`、邮箱 `huyue2@ueascend.com` 进行 W3 双字段映射；该账号无本地可用密码且不可通过用户管理编辑、停用或删除。
 
 ### 12. 常见问题
@@ -410,9 +414,9 @@ docker compose up -d
 
 首次 `docker compose build` 会安装 Python 和 npm 依赖，慢是正常现象。后续只要依赖文件没有变化，Docker 会复用缓存；如果服务器无法访问 Docker Hub、PyPI 或 npm registry，需要提前在可联网环境构建并导出完整离线镜像包，再在服务器 `docker load`。
 
-## 本地账号
+## 本地开发账号
 
-初始化后可使用以下账号登录，默认密码均为 `pass1234`。
+`seed_base` 初始化以下账号，但不会生成密码；所有账号都保存 Django 不可用密码标记。
 
 | 用户名 | 角色 | 用途 |
 | --- | --- | --- |
@@ -424,11 +428,19 @@ docker compose up -d
 | `T3002` | 三级接口人 | 查看转派给自己的分配并反馈 |
 | `T3003` | 三级接口人 | 查看转派给自己的分配并反馈 |
 
-这些账号用于正式权限链路的本地测试。W3 登录按 UserInfo 顶层 `employeeNumber` 与 `email` 同时匹配已有且启用的 `User.username + User.email`，不会自动创建账号，并继续复用 RBAC 角色和接口人 `Contact`。
+这些账号用于权限链路的本地测试。W3 登录按 UserInfo 顶层 `employeeNumber` 与 `email` 同时匹配已有且启用的 `User.username + User.email`，不会自动创建账号，并继续复用 RBAC 角色和接口人 `Contact`。
+
+仅在本地 `DEBUG=True` 且 W3 未就绪时，可从 `backend/` 为一个既有且启用的账号签发开发令牌：
+
+```bash
+python manage.py issue_dev_token --username admin
+```
+
+命令每次都会废止该账号的旧 Token。把新令牌粘贴到登录页“开发令牌”输入框后，前端先调用 `/api/me/` 验证，成功才保存本地登录态。非 DEBUG、账号不存在或已停用时命令会拒绝执行；开发令牌不是生产应急登录方式。
 
 ## 权限与配置
 
-系统前端只提供 W3 OAuth2 登录，本地密码 API 默认关闭。W3 登录时，服务端完成授权码和 UserInfo 交换，再通过浏览器 Session 一次性交付项目 Token；前端随后调用 `/api/me/` 获取用户、角色、权限码、绑定接口人和数据范围。
+系统生产只提供 W3 OAuth2 登录，本地密码 API 和 Django Admin `/admin/` 路由均已删除，访问 `/api/auth/login/` 或 `/admin/` 都返回 404。W3 登录时，服务端完成授权码和 UserInfo 交换，再通过浏览器 Session 一次性交付项目 DRF Token；前端随后调用 `/api/me/` 获取用户、角色、权限码、绑定接口人和数据范围。用户新增/编辑页面不维护密码，用户 API 收到 `password` 字段时返回 400。
 
 权限边界：
 
@@ -450,11 +462,13 @@ docker compose up -d
 
 拥有 `settings.manage_ai_connection` 的角色可在「系统设置 → AI 模型连接」配置共享内网 Base URL、API 风格和可选 API Key，通过 `GET /models` 选择或直接输入模型 ID，并执行最小真实模型测试；同页还集中维护 AI 运行参数和“AI 专项”路由。管理员角色默认拥有该权限，HR/接口人未被授权时不可访问。页面不展示服务商/Profile；专项内部命中证据和审计字段仍不对外展示。Key 非空时仅允许写入、不会被读取接口返回，服务端以由 Django `SECRET_KEY` 派生的 Fernet 密文存储。运行时只读取该数据库配置。日常修改连接请使用授权角色的配置页，避免在 shell、文档或工单中传播 API Key。当前完整连接配置测试成功后，上传和“处理简历”弹窗才会开放 AI 模式；保存连接或清除 Key 后测试状态失效，只能选择 Rule，直至重新测试成功。
 
+同一权限还控制独立「Prompt 管理」页面、菜单、路由和全部 `/api/ai-prompts/` 接口。页面展示激活版本、共享草稿、测试模型/时间、五个独立编辑器和字符计数，支持保存、真实测试、发布、恢复激活值/系统默认值、只读组装顺序预览、历史分页、模块级差异和恢复到草稿；有未保存内容、未测试或测试已失效时不能发布。发布确认明确提示“只影响新提交的 AI 任务”，不会改变模型连接测试状态。
+
 ## 主要流程
 
 1. 使用 `admin` 或 `hr` 登录。
 2. 在简历库、岗位需求、院校清单、部门接口人页面导入对应 Excel/简历包；岗位表的“工作职责”列必填，缺失职责的岗位行会被跳过并返回行号，其余行继续导入。也可先执行 `gen_sample` 和 `load_sample`。
-3. 上传简历和人工“处理简历”都选择本次 Rule / AI 模式并只创建一条运行：上传 Rule 执行 Step1–Step3、AI 执行 Step1–Step4，人工处理从 Step2 开始。Rule 始终可选，当前模型连接测试有效时才可选 AI。AI 会把当前岗位工作职责（最多 12,000 字符）纳入岗位要求分析；历史岗位未补工作职责时转为“需处理”，不调用模型。生产 AI Step4 由有界调度器投递专用 `ai` 队列，所有 AI worker 共享 Redis 自适应并发上限。
+3. 上传简历和人工“处理简历”都选择本次 Rule / AI 模式并只创建一条运行：上传 Rule 执行 Step1–Step3、AI 执行 Step1–Step4，人工处理从 Step2 开始。Rule 始终可选，当前模型连接测试有效时才可选 AI。AI 运行创建时把当时的激活 Prompt 版本冻结到 `ProcessingRun.prompt_version`，后续执行和成功/失败决策都继续使用、记录该版本；发布新版不改变已创建或排队任务。AI 会把当前岗位工作职责（最多 12,000 字符）纳入岗位要求分析；历史岗位未补工作职责时转为“需处理”，不调用模型。生产 AI Step4 由有界调度器投递专用 `ai` 队列，所有 AI worker 共享 Redis 自适应并发上限。院校导入触发的省份补全任务也在投递时携带当时的激活 Prompt 版本。
 4. HR 在简历库查看处理完成、需处理、模型超时失败及精确原因，并处置待下发、待复核和 AI 自动分配结果。后台智能路由不显示独立标签、原因或证据。
 5. HR 单条、批量或一键全部下发给二级接口人。
 6. 二级接口人登录后仅看到自己的分配，可导出简历并转派本部门三级接口人。
@@ -465,14 +479,14 @@ docker compose up -d
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/api/auth/login/` | 默认关闭的应急本地账号登录；前端不提供入口 |
+| POST | `/api/auth/login/` | 已删除；访问返回 404 |
 | POST | `/api/auth/logout/` | 退出登录并删除 Token |
-| GET | `/api/auth/w3/status/` | 返回 W3 是否可用和授权入口，不返回密钥或提供方地址 |
+| GET | `/api/auth/w3/status/` | 返回 W3 是否可用、授权入口和 `debug_token_login_enabled`，不返回密钥或提供方地址 |
 | GET | `/api/auth/w3/start/` | 生成 state/PKCE 并跳转 W3 授权地址 |
 | GET | `/api/auth/w3/callback/` | 固定 OAuth2 回调；服务端换取身份并按工号、邮箱共同映射账号 |
 | POST | `/api/auth/w3/complete/` | 同一浏览器 Session 一次性领取项目 Token 和当前用户 |
 | GET | `/api/me/` | 当前用户、角色、权限码、接口人绑定和数据范围 |
-| GET/POST/PATCH | `/api/users/` | 用户管理；内置受保护管理员只读且不可删除 |
+| GET/POST/PATCH | `/api/users/` | 用户管理；不暴露密码，携带 `password` 返回 400；内置受保护管理员只读且不可删除 |
 | GET/POST/PATCH | `/api/roles/` | 角色管理与角色权限绑定 |
 | GET | `/api/permissions/` | 后端预置权限树 |
 | GET | `/api/configs/`、`/api/configs/{key}/` | 查询白名单内的非敏感配置项 |
@@ -489,6 +503,14 @@ docker compose up -d
 | GET | `/api/analytics/recruitment-overview/` | 需要 `analytics.view`；按导入 cohort 返回招聘总览、转化、耗时、趋势和分布，默认最近 30 天，缓存 5 分钟 |
 | GET | `/api/allocation-mode/` | 具有 `pipeline.run` 或 `resume.import` 权限时返回 `default_mode`、`available_modes` 和 `ai_ready`，不泄露模型连接信息 |
 | GET/PATCH | `/api/ai-connection/settings/`、`/api/ai-connection/settings/{key}/` | 具有 `settings.manage_ai_connection` 权限时读取/更新 AI 运行参数和“AI 专项”配置；页面按 `runtime / special_route` 分页签展示 |
+| GET | `/api/ai-prompts/` | 具有 `settings.manage_ai_connection` 权限时读取五模块定义、限制、系统默认值、只读组装预览、激活版本和共享草稿 |
+| PATCH | `/api/ai-prompts/draft/` | 携带完整五模块集合和 `lock_version` 保存共享草稿；校验失败返回 400，并发冲突返回 409 |
+| POST | `/api/ai-prompts/draft/reset/` | 携带 `source=active|default` 和 `lock_version`，将共享草稿恢复为激活版本或系统默认值 |
+| POST | `/api/ai-prompts/draft/test/` | 对已保存共享草稿执行简历筛选和院校省份两条真实模型测试 |
+| POST | `/api/ai-prompts/draft/publish/` | 携带 `lock_version` 原子发布测试仍有效的共享草稿，只影响新提交的 AI 任务 |
+| GET | `/api/ai-prompts/versions/` | 分页读取激活和归档 Prompt 历史摘要 |
+| GET | `/api/ai-prompts/versions/{version}/` | 读取不可编辑的 Prompt 历史版本及五模块全文 |
+| POST | `/api/ai-prompts/versions/{version}/restore/` | 携带当前草稿 `lock_version`，将历史版本复制到共享草稿；仍需重新测试和发布 |
 | GET | `/api/workflow-attempts/` | 分配尝试，后端按登录用户过滤数据范围 |
 | POST | `/api/workflow-attempts/{id}/dispatch/` | HR 单条下发 |
 | POST | `/api/workflow-attempts/bulk-dispatch/` | HR 批量或一键全部下发 |

@@ -27,7 +27,6 @@ class OAuth2ProtocolError(RuntimeError):
 @dataclass(frozen=True)
 class OAuth2Config:
     enabled: bool
-    local_login_enabled: bool
     client_id: str
     client_secret: str
     authorize_url: str
@@ -96,9 +95,6 @@ class OAuth2Config:
 def get_config():
     return OAuth2Config(
         enabled=bool(getattr(settings, "W3_OAUTH2_ENABLED", False)),
-        local_login_enabled=bool(
-            getattr(settings, "W3_OAUTH2_LOCAL_LOGIN_ENABLED", False)
-        ),
         client_id=str(getattr(settings, "W3_OAUTH2_CLIENT_ID", "")).strip(),
         client_secret=str(getattr(settings, "W3_OAUTH2_CLIENT_SECRET", "")),
         authorize_url=str(getattr(settings, "W3_OAUTH2_AUTHORIZE_URL", "")).strip(),
@@ -198,10 +194,12 @@ def fetch_userinfo(config, access_token):
     try:
         response = httpx.get(
             config.userinfo_url,
-            headers={
-                "Accept": "application/json",
-                "Authorization": f"Bearer {access_token}",
+            params={
+                "access_token": access_token,
+                "scope": config.scope,
+                "client_id": config.client_id,
             },
+            headers={"Accept": "application/json"},
             timeout=config.timeout_seconds,
         )
         response.raise_for_status()

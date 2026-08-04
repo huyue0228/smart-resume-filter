@@ -42,6 +42,7 @@ export const allRoute = {
       routes: [
         { path: '/config', name: '配置项', icon: <ControlOutlined /> },
         { path: '/ai-connection', name: 'AI 模型连接', icon: <ControlOutlined /> },
+        { path: '/prompt-management', name: 'Prompt 管理', icon: <ControlOutlined /> },
         { path: '/users', name: '用户权限', icon: <SafetyCertificateOutlined /> },
       ],
     },

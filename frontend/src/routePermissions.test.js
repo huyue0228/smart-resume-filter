@@ -32,4 +32,14 @@ describe('route permissions', () => {
     expect(canAccessRoute('/processing-tasks', (code) => code === 'pipeline.view')).toBe(true)
     expect(canAccessRoute('/processing-tasks', () => false)).toBe(false)
   })
+
+  it('reuses AI connection permission for Prompt management', () => {
+    expect(
+      canAccessRoute(
+        '/prompt-management',
+        (code) => code === 'settings.manage_ai_connection',
+      ),
+    ).toBe(true)
+    expect(canAccessRoute('/prompt-management', () => false)).toBe(false)
+  })
 })

@@ -16,6 +16,7 @@ from apps.accounts.permissions import (
 from apps.core import candidate_summary
 from apps.core import models as m
 from apps.core import system_status
+from apps.core.departments import resolve_department_hierarchy
 
 
 _PUBLIC_REASON_CODE_ALIASES = {
@@ -135,7 +136,6 @@ class UserSerializer(serializers.ModelSerializer):
     )
     roles = serializers.SerializerMethodField()
     permissions = serializers.SerializerMethodField()
-    password = serializers.CharField(write_only=True, required=False, allow_blank=True)
     contact_name = serializers.CharField(source="contact.name", read_only=True, default="")
     is_protected = serializers.SerializerMethodField()
 
@@ -155,7 +155,6 @@ class UserSerializer(serializers.ModelSerializer):
             "role_ids",
             "roles",
             "permissions",
-            "password",
         ]
         read_only_fields = ["is_superuser"]
         extra_kwargs = {
@@ -180,14 +179,17 @@ class UserSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("该邮箱已被其他账号使用")
         return email
 
+    def to_internal_value(self, data):
+        if "password" in data:
+            raise serializers.ValidationError(
+                {"password": "系统账号不接受密码，请使用 W3 登录"}
+            )
+        return super().to_internal_value(data)
+
     def create(self, validated_data):
         groups = validated_data.pop("groups", [])
-        password = validated_data.pop("password", "")
         user = User(**validated_data)
-        if password:
-            user.set_password(password)
-        else:
-            user.set_unusable_password()
+        user.set_unusable_password()
         user.save()
         if groups:
             user.groups.set(groups)
@@ -195,11 +197,9 @@ class UserSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         groups = validated_data.pop("groups", None)
-        password = validated_data.pop("password", None)
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
-        if password:
-            instance.set_password(password)
+        instance.set_unusable_password()
         instance.save()
         if groups is not None:
             instance.groups.set(groups)
@@ -320,6 +320,7 @@ class CandidateSerializer(serializers.ModelSerializer):
     preview_resume = serializers.SerializerMethodField()
     current_rank = serializers.SerializerMethodField()
     current_apply_id = serializers.SerializerMethodField()
+    current_apply_date = serializers.SerializerMethodField()
     job_department_name = serializers.SerializerMethodField()
     reason_type = serializers.SerializerMethodField()
     reason_text = serializers.SerializerMethodField()
@@ -362,6 +363,7 @@ class CandidateSerializer(serializers.ModelSerializer):
             "preview_resume",
             "current_rank",
             "current_apply_id",
+            "current_apply_date",
             "job_department_name",
             "reason_type",
             "reason_text",
@@ -484,6 +486,10 @@ class CandidateSerializer(serializers.ModelSerializer):
         resume = self._current_resume(obj)
         return resume.apply_id if resume else ""
 
+    def get_current_apply_date(self, obj):
+        resume = self._current_resume(obj)
+        return resume.apply_date.isoformat() if resume and resume.apply_date else None
+
     def get_job_department_name(self, obj):
         if not self._is_full_view():
             attempt = self._visible_attempt(obj)
@@ -604,7 +610,13 @@ class CandidateSerializer(serializers.ModelSerializer):
 
 
 class JobSerializer(serializers.ModelSerializer):
-    department_name = serializers.CharField(source="department.name", read_only=True)
+    department_name = serializers.SerializerMethodField()
+    primary_department_id = serializers.SerializerMethodField()
+    primary_department_name = serializers.SerializerMethodField()
+    secondary_department_id = serializers.SerializerMethodField()
+    secondary_department_name = serializers.SerializerMethodField()
+    tertiary_department_id = serializers.SerializerMethodField()
+    tertiary_department_name = serializers.SerializerMethodField()
     responsibilities = serializers.CharField(
         required=True,
         allow_blank=False,
@@ -624,6 +636,12 @@ class JobSerializer(serializers.ModelSerializer):
             "entity",
             "department",
             "department_name",
+            "primary_department_id",
+            "primary_department_name",
+            "secondary_department_id",
+            "secondary_department_name",
+            "tertiary_department_id",
+            "tertiary_department_name",
             "category",
             "public_name",
             "is_public",
@@ -641,9 +659,50 @@ class JobSerializer(serializers.ModelSerializer):
     def get_majors(self, obj):
         return list(obj.majors.order_by("id").values_list("major", flat=True))
 
+    def _department_hierarchy(self, obj):
+        cache = getattr(self, "_department_hierarchy_cache", None)
+        if cache is None:
+            cache = {}
+            self._department_hierarchy_cache = cache
+        key = (obj.pk, obj.department_id)
+        if key not in cache:
+            cache[key] = resolve_department_hierarchy(obj.department)
+        return cache[key]
+
+    def get_department_name(self, obj):
+        department = self._department_hierarchy(obj).secondary
+        return department.name if department else ""
+
+    def get_primary_department_id(self, obj):
+        department = self._department_hierarchy(obj).primary
+        return department.id if department else None
+
+    def get_primary_department_name(self, obj):
+        department = self._department_hierarchy(obj).primary
+        return department.name if department else ""
+
+    def get_secondary_department_id(self, obj):
+        department = self._department_hierarchy(obj).secondary
+        return department.id if department else None
+
+    def get_secondary_department_name(self, obj):
+        return self.get_department_name(obj)
+
+    def get_tertiary_department_id(self, obj):
+        department = self._department_hierarchy(obj).tertiary
+        return department.id if department else None
+
+    def get_tertiary_department_name(self, obj):
+        department = self._department_hierarchy(obj).tertiary
+        return department.name if department else ""
+
     def validate_department(self, department):
-        if department and department.level != 2:
-            raise serializers.ValidationError("岗位必须绑定二级部门")
+        if department and department.level not in (2, 3):
+            raise serializers.ValidationError("岗位只能绑定二级或三级部门")
+        if department and department.level == 3:
+            hierarchy = resolve_department_hierarchy(department)
+            if not hierarchy.secondary:
+                raise serializers.ValidationError("三级部门缺少有效二级父部门")
         return department
 
     def validate(self, attrs):

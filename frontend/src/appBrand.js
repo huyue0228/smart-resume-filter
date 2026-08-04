@@ -1,1 +1,1 @@
-export const APP_NAME = '简历宝'
+export const APP_NAME = '海纳智聘'

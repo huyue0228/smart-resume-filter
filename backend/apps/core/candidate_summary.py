@@ -6,6 +6,7 @@
 """
 
 from apps.core import models as m
+from apps.core.departments import secondary_department
 
 
 REASON_ASSIGNMENT = "assignment"
@@ -126,6 +127,11 @@ def current_apply_id(candidate):
     return resume.apply_id if resume else ""
 
 
+def current_apply_date(candidate):
+    resume = current_resume(candidate)
+    return resume.apply_date if resume else None
+
+
 def current_rank(candidate):
     workflow = workflow_or_none(candidate)
     if workflow and workflow.current_rank:
@@ -147,11 +153,8 @@ def job_department_name(candidate):
         )
 
     department = resume.job.department if resume and resume.job_id else None
-    if not department:
-        return ""
-    if department.level == 3 and department.parent:
-        return department.parent.name
-    return department.name
+    department = secondary_department(department)
+    return department.name if department else ""
 
 
 def reason(candidate):

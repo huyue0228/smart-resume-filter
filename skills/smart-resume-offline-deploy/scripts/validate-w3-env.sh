@@ -106,6 +106,10 @@ validate_frontend_callback() {
 
 [[ -f "$ENV_FILE" ]] || die "缺少环境文件 ${ENV_FILE}"
 
+if [[ "$(normalized_bool DJANGO_DEBUG False)" != "false" ]]; then
+  die "生产部署必须设置 DJANGO_DEBUG=False"
+fi
+
 if [[ "$(normalized_bool W3_OAUTH2_ENABLED False)" != "true" ]]; then
   die "前端仅支持 W3 登录；部署前必须设置 W3_OAUTH2_ENABLED=True 并补齐 OAuth2 必填项"
 fi
@@ -141,10 +145,9 @@ case "$client_auth_method" in
   *) die "W3_OAUTH2_CLIENT_AUTH_METHOD 只接受 client_secret_basic、client_secret_post 或 none" ;;
 esac
 
-normalized_bool W3_OAUTH2_LOCAL_LOGIN_ENABLED False >/dev/null
 normalized_bool W3_OAUTH2_USE_PKCE True >/dev/null
 validate_positive_number W3_OAUTH2_TIMEOUT_SECONDS
 validate_positive_integer W3_OAUTH2_TRANSACTION_TTL_SECONDS
 validate_frontend_callback
 
-echo "W3 OAuth2：登录必填项、HTTPS 端点、字段路径、客户端认证、回跳地址和 redirect_uri 校验通过（密钥未显示）。"
+echo "生产 DEBUG 与 W3 OAuth2 登录配置校验通过（密钥未显示）。"

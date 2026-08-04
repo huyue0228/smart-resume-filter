@@ -27,7 +27,6 @@ router.register("roles", views.RoleViewSet, basename="role")
 router.register("configs", views.ConfigViewSet, basename="config")
 
 urlpatterns = [
-    path("auth/login/", views.AuthLoginView.as_view()),
     path("auth/logout/", views.AuthLogoutView.as_view()),
     path("auth/w3/status/", views.W3OAuth2StatusView.as_view()),
     path("auth/w3/start/", views.W3OAuth2StartView.as_view()),
@@ -44,6 +43,20 @@ urlpatterns = [
     ),
     path("ai-connection/models/", views.AIConnectionModelsView.as_view()),
     path("ai-connection/test/", views.AIConnectionTestView.as_view()),
+    path("ai-prompts/", views.AIPromptManagementView.as_view()),
+    path("ai-prompts/draft/", views.AIPromptDraftView.as_view()),
+    path("ai-prompts/draft/reset/", views.AIPromptDraftResetView.as_view()),
+    path("ai-prompts/draft/test/", views.AIPromptDraftTestView.as_view()),
+    path("ai-prompts/draft/publish/", views.AIPromptDraftPublishView.as_view()),
+    path("ai-prompts/versions/", views.AIPromptVersionListView.as_view()),
+    path(
+        "ai-prompts/versions/<str:version>/",
+        views.AIPromptVersionDetailView.as_view(),
+    ),
+    path(
+        "ai-prompts/versions/<str:version>/restore/",
+        views.AIPromptVersionRestoreView.as_view(),
+    ),
     path("import/", views.ImportView.as_view()),
     path("import/undo/", views.ImportUndoView.as_view()),
     path("pipeline/run/", views.PipelineRunView.as_view()),

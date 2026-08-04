@@ -21,3 +21,17 @@ class User(AbstractUser):
         "core.Contact", null=True, blank=True, on_delete=models.SET_NULL,
         related_name="users",
     )
+
+    def set_password(self, raw_password):
+        """系统账号不接受本地密码，仅保留 Django 的不可用密码标记。"""
+        self.set_unusable_password()
+
+    def save(self, *args, **kwargs):
+        """阻止绕过 set_password 直接保存可用密码哈希。"""
+        password_was_usable = self.has_usable_password()
+        if password_was_usable:
+            self.set_unusable_password()
+            update_fields = kwargs.get("update_fields")
+            if update_fields is not None:
+                kwargs["update_fields"] = set(update_fields) | {"password"}
+        return super().save(*args, **kwargs)

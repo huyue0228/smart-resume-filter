@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   ModalForm,
   PageContainer,
@@ -12,6 +12,7 @@ import { Button, Popconfirm, Space, Tag, message } from 'antd'
 import {
   createJob,
   deleteJob,
+  exportJobs,
   fetchDepartments,
   fetchJobFilterOptions,
   fetchJobs,
@@ -20,6 +21,7 @@ import {
 import ImportButton from '../components/ImportButton'
 import { useRole } from '../contexts/roleState'
 import SmartDataTable from '../components/SmartDataTable'
+import { downloadBlobFromResponse } from '../utils/download'
 
 const IMPORT_FIELDS = [
   { key: 'jobs', label: '校招岗位分类及专业要求 (.xlsx/.xls/.csv)', accept: '.xlsx,.xls,.csv' },
@@ -30,6 +32,7 @@ export default function JobsPage() {
   const { hasPermission } = useRole()
   const [jobModal, setJobModal] = useState({ open: false, record: null })
   const [departments, setDepartments] = useState([])
+  const [exporting, setExporting] = useState(false)
 
   useEffect(() => {
     fetchDepartments({ page_size: 500 })
@@ -38,18 +41,75 @@ export default function JobsPage() {
   }, [])
 
   const canManageJobs = hasPermission('job.manage')
-  const departmentOptions = departments
-    .filter((department) => department.level === 2)
-    .map((department) => ({
-      label: department.name,
-      value: department.id,
-    }))
+  const departmentOptions = useMemo(() => {
+    const departmentsById = new Map(
+      departments.map((department) => [department.id, department]),
+    )
+    const pathLabel = (department) => {
+      const path = []
+      const visited = new Set()
+      let current = department
+      while (current && !visited.has(current.id)) {
+        visited.add(current.id)
+        path.unshift(current.name)
+        current = current.parent ? departmentsById.get(current.parent) : null
+      }
+      return path.filter(Boolean).join(' / ')
+    }
+    return departments
+      .filter((department) => {
+        if (department.level === 2) return true
+        if (department.level !== 3) return false
+        return departmentsById.get(department.parent)?.level === 2
+      })
+      .map((department) => ({
+        label: pathLabel(department),
+        value: department.id,
+      }))
+      .sort((left, right) => left.label.localeCompare(right.label, 'zh-CN'))
+  }, [departments])
   const baseColumns = [
     {
       title: '招聘主体',
       dataIndex: 'entity',
       width: 100,
       filter: { type: 'select', param: 'entity_in', multiple: true, options: 'entity' },
+    },
+    {
+      title: '一级部门',
+      dataIndex: 'primary_department_name',
+      width: 140,
+      filter: {
+        type: 'select',
+        param: 'primary_department_name_in',
+        multiple: true,
+        options: 'primary_department_name',
+      },
+      render: (value) => value || '-',
+    },
+    {
+      title: '二级部门',
+      dataIndex: 'secondary_department_name',
+      width: 140,
+      filter: {
+        type: 'select',
+        param: 'secondary_department_name_in',
+        multiple: true,
+        options: 'secondary_department_name',
+      },
+      render: (value) => value || '-',
+    },
+    {
+      title: '三级部门',
+      dataIndex: 'tertiary_department_name',
+      width: 140,
+      filter: {
+        type: 'select',
+        param: 'tertiary_department_name_in',
+        multiple: true,
+        options: 'tertiary_department_name',
+      },
+      render: (value) => value || '-',
     },
     {
       title: '对外名称',
@@ -85,12 +145,6 @@ export default function JobsPage() {
       dataIndex: 'job_family',
       width: 110,
       filter: { type: 'select', param: 'job_family_in', multiple: true, options: 'job_family' },
-    },
-    {
-      title: '部门',
-      dataIndex: 'department_name',
-      width: 140,
-      filter: { type: 'select', param: 'department_name_in', multiple: true, options: 'department_name' },
     },
     {
       title: '工作地点',
@@ -188,6 +242,25 @@ export default function JobsPage() {
                 }}
               />
             ),
+            <Button
+              key="download"
+              loading={exporting}
+              onClick={async () => {
+                setExporting(true)
+                try {
+                  const response = await exportJobs(actionRef.current?.getFilters?.() || {})
+                  downloadBlobFromResponse(response, '职位清单.xlsx')
+                  const count = response.headers?.['x-export-count']
+                  message.success(count ? `已下载 ${count} 条职位` : '职位清单已下载')
+                } catch {
+                  // API 客户端已统一展示后端错误；这里只负责恢复按钮状态。
+                } finally {
+                  setExporting(false)
+                }
+              }}
+            >
+              下载职位清单
+            </Button>,
           ].filter(Boolean)
         }
       />
@@ -236,7 +309,7 @@ export default function JobsPage() {
         <ProFormText name="job_family" label="岗位族" />
         <ProFormSelect
           name="department"
-          label="部门"
+          label="所属部门（二级/三级）"
           showSearch
           options={departmentOptions}
         />

@@ -353,7 +353,7 @@ class Command(BaseCommand):
             ("T3003", "三级接口人", User.ROLE_TERTIARY_CONTACT, contact_objects["T3003"]),
         ]
         for username, group_name, role, contact in users:
-            user, created = User.objects.update_or_create(
+            user, _ = User.objects.update_or_create(
                 username=username,
                 defaults={
                     "email": contact.email if contact else f"{username}@example.com",
@@ -363,13 +363,12 @@ class Command(BaseCommand):
                     "is_staff": group_name == "管理员",
                 },
             )
-            if created or not user.has_usable_password():
-                user.set_password("pass1234")
-                user.save(update_fields=["password"])
+            user.set_unusable_password()
+            user.save(update_fields=["password"])
             user.groups.set([Group.objects.get(name=group_name)])
 
         self.stdout.write(
             self.style.SUCCESS(
-                "基础数据已初始化（配置 + RBAC + 多接口人测试账号，默认密码 pass1234）"
+                "基础数据已初始化（配置 + RBAC + 多接口人测试账号，账号密码均不可用）"
             )
         )

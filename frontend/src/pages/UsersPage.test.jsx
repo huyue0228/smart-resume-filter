@@ -40,7 +40,7 @@ vi.mock('@ant-design/pro-components', () => ({
   ) : null,
   ProFormSelect: () => null,
   ProFormSwitch: () => null,
-  ProFormText: Object.assign(() => null, { Password: () => null }),
+  ProFormText: ({ label }) => <span>{label}</span>,
 }))
 
 vi.mock('antd', async () => {
@@ -77,11 +77,12 @@ vi.mock('antd', async () => {
 })
 
 vi.mock('../components/SmartDataTable', () => ({
-  default: ({ tableId, columns }) => {
+  default: ({ tableId, columns, toolBarRender }) => {
     if (tableId === 'users') {
       const actionColumn = columns.find((column) => column.title === '操作')
       return (
         <div data-testid="table-users">
+          {toolBarRender?.()}
           <span>{protectedUserRecord.username}</span>
           {actionColumn.render(null, protectedUserRecord)}
         </div>
@@ -166,5 +167,17 @@ describe('UsersPage role permissions', () => {
     expect(screen.queryByText('编辑')).toBeNull()
     expect(screen.queryByText('停用')).toBeNull()
     expect(screen.queryByText('删除')).toBeNull()
+  })
+
+  it('does not render initial-password or reset-password controls', async () => {
+    const user = userEvent.setup()
+    render(<UsersPage />)
+
+    await user.click(await screen.findByRole('button', { name: '新增用户' }))
+
+    expect(await screen.findByRole('dialog', { name: '新增用户' })).toBeTruthy()
+    expect(screen.queryByText('密码')).toBeNull()
+    expect(screen.queryByText('重置密码')).toBeNull()
+    expect(screen.queryByPlaceholderText('请输入初始密码')).toBeNull()
   })
 })

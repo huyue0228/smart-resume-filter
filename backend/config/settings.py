@@ -1,5 +1,5 @@
 """
-简历宝 — Django 配置。
+海纳智聘 — Django 配置。
 
 Demo 默认：SQLite + Celery eager（同步执行，免装 Redis）。
 生产可通过环境变量切换 PostgreSQL，并启用 Celery + Redis。
@@ -115,7 +115,7 @@ RESUME_OCR_CONCURRENCY = int(os.environ.get("RESUME_OCR_CONCURRENCY", "2"))
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-# DRF：正式项目默认启用登录态。W3 接入前，本地开发使用 Token 登录。
+# DRF：W3 登录和 DEBUG 开发命令签发的会话都使用 Token。
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework.authentication.TokenAuthentication",
@@ -132,7 +132,6 @@ CORS_ALLOW_ALL_ORIGINS = True
 
 # W3 OAuth2：默认关闭，接入时通过服务端环境变量启用。访问令牌不会下发到前端。
 W3_OAUTH2_ENABLED = env_bool("W3_OAUTH2_ENABLED", False)
-W3_OAUTH2_LOCAL_LOGIN_ENABLED = env_bool("W3_OAUTH2_LOCAL_LOGIN_ENABLED", False)
 W3_OAUTH2_CLIENT_ID = os.environ.get("W3_OAUTH2_CLIENT_ID", "")
 W3_OAUTH2_CLIENT_SECRET = os.environ.get("W3_OAUTH2_CLIENT_SECRET", "")
 W3_OAUTH2_AUTHORIZE_URL = os.environ.get("W3_OAUTH2_AUTHORIZE_URL", "")

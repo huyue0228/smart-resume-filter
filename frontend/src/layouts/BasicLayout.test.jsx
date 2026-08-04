@@ -20,6 +20,8 @@ describe('BasicLayout menu hierarchy', () => {
 
     expect(dataManagement.routes.some((route) => route.path === '/analytics')).toBe(false)
     expect(analytics.routes).toBeUndefined()
+    const systemSettings = allRoute.routes.find((route) => route.path === '/system')
+    expect(systemSettings.routes.map((route) => route.path)).toContain('/prompt-management')
   })
 
   it('uses the reference dashboard dark sider and light application background', () => {

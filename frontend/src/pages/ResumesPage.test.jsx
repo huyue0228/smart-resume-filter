@@ -23,6 +23,7 @@ const candidate = vi.hoisted(() => ({
   highest_degree_platform: '平台B',
   current_rank: 1,
   current_apply_id: 'A001',
+  current_apply_date: '2026-07-15',
   workflow_status: 'in_progress',
   system_status_label: '待处理',
   reason_type: 'none',
@@ -32,6 +33,7 @@ const candidate = vi.hoisted(() => ({
   current_resume: {
     id: 11,
     apply_id: 'A001',
+    apply_date: '2026-07-15',
     volunteer_rank: 1,
     entity: '主体A',
     position_name: '后端工程师',
@@ -124,6 +126,7 @@ vi.mock('../components/SmartDataTable', () => ({
     params,
     actionRef,
     batchActions,
+    defaultColumnsState,
   }) => {
     if (actionRef) {
       actionRef.current = {
@@ -136,6 +139,7 @@ vi.mock('../components/SmartDataTable', () => ({
         data-filter-count={columns.filter((column) => column.filter).length}
         data-columns={columns.map((column) => column.title).join(',')}
         data-params={JSON.stringify(params || {})}
+        data-default-columns-state={JSON.stringify(defaultColumnsState || {})}
       >
         {tableId === 'candidates' && (
           <>
@@ -144,6 +148,10 @@ vi.mock('../components/SmartDataTable', () => ({
             <button type="button" onClick={() => onRowClick?.(candidate)}>
               打开候选人
             </button>
+            <span data-testid="current-apply-date-cell">
+              {columns.find((column) => column.dataIndex === 'current_apply_date')
+                ?.render?.(candidate.current_apply_date, candidate)}
+            </span>
             <button type="button" onClick={() => rowSelection?.onChange?.([1, 2])}>
               选择两名候选人
             </button>
@@ -164,6 +172,18 @@ vi.mock('../components/SmartDataTable', () => ({
               })}
             >
               加载候选人
+            </button>
+            <button
+              type="button"
+              onClick={() => request?.({
+                ...params,
+                page: 1,
+                page_size: 10,
+                current_apply_date_from: '2026-07-01',
+                current_apply_date_to: '2026-07-31',
+              })}
+            >
+              加载日期筛选
             </button>
           </>
         )}
@@ -290,6 +310,13 @@ describe('ResumesPage detail', () => {
     }
     expect(screen.getByTestId('table-candidate-resumes').dataset.columns).not.toContain('预览')
     expect(screen.getByTestId('table-candidates').dataset.columns).not.toContain('处理结果')
+    expect(screen.getByTestId('table-candidates').dataset.columns).toContain(
+      '当前志愿,投递时间,当前应聘ID',
+    )
+    expect(screen.getByTestId('current-apply-date-cell').textContent).toBe('2026-07-15')
+    expect(
+      JSON.parse(screen.getByTestId('table-candidates').dataset.defaultColumnsState),
+    ).not.toHaveProperty('current_apply_date')
     expect(screen.queryByText('第一学历标签')).toBeNull()
     expect(screen.queryByText('最高学历标签')).toBeNull()
     expect(screen.getByText('平台A').classList.contains('ant-tag')).toBe(true)
@@ -429,6 +456,31 @@ describe('ResumesPage detail', () => {
     ))
   })
 
+  it('passes the current apply date range into status reprocessing scope', async () => {
+    roleState.permissions = new Set(['pipeline.run'])
+    render(<MemoryRouter><ResumesPage /></MemoryRouter>)
+
+    await userEvent.click(screen.getByRole('button', { name: '加载日期筛选' }))
+    await userEvent.click(screen.getByRole('button', { name: /处理简历/ }))
+    await userEvent.click(screen.getByRole('checkbox', { name: '待处理' }))
+    await userEvent.click(screen.getByRole('button', { name: '开始处理' }))
+
+    await waitFor(() => expect(runProcess).toHaveBeenCalledWith(
+      [{ step: 'step2', label: '院校分类 → Rule 前检 → AI 深度筛选' }],
+      expect.any(String),
+      {
+        mode: 'rule',
+        scope: {
+          system_statuses: ['raw'],
+          candidate_filters: {
+            current_apply_date_from: '2026-07-01',
+            current_apply_date_to: '2026-07-31',
+          },
+        },
+      },
+    ))
+  })
+
   it('allows selecting AI per processing run only when the connection is ready', async () => {
     roleState.permissions = new Set(['pipeline.run'])
     fetchAllocationMode.mockResolvedValue({
@@ -529,6 +581,24 @@ describe('ResumesPage detail', () => {
     await waitFor(() => expect(exportCandidates).toHaveBeenCalledWith(null, {
       name: '张三',
       system_status: 'raw',
+      fields: 'candidate_name,candidate_phone,current_apply_id',
+    }))
+  })
+
+  it('uses the frozen current apply date range for current-filter export', async () => {
+    roleState.permissions = new Set(['resume.view'])
+    const user = userEvent.setup()
+    render(<MemoryRouter><ResumesPage /></MemoryRouter>)
+
+    await user.click(screen.getByRole('button', { name: '加载日期筛选' }))
+    await user.click(screen.getByRole('button', { name: '选择两名候选人' }))
+    await user.click(screen.getByRole('button', { name: /导出当前筛选/ }))
+    await screen.findByRole('checkbox', { name: '姓名' })
+    await user.click(screen.getByRole('button', { name: '导出 ZIP' }))
+
+    await waitFor(() => expect(exportCandidates).toHaveBeenCalledWith(null, {
+      current_apply_date_from: '2026-07-01',
+      current_apply_date_to: '2026-07-31',
       fields: 'candidate_name,candidate_phone,current_apply_id',
     }))
   })

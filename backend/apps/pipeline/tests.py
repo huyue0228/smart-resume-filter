@@ -95,6 +95,26 @@ class AllocationDesignContractTests(TestCase):
         self.assertIsNone(attempt.matched_rule)
         self.assertEqual(self.candidate.workflow.status, m.CandidateWorkflow.STATUS_IN_PROGRESS)
 
+    def test_rule_allocation_uses_parent_secondary_contact_for_tertiary_job(self):
+        primary = m.Department.objects.create(name="研发中心", level=1)
+        self.department.parent = primary
+        self.department.save(update_fields=["parent"])
+        tertiary = m.Department.objects.create(
+            name="平台研发组", level=3, parent=self.department
+        )
+        self.job.department = tertiary
+        self.job.save(update_fields=["department"])
+
+        allocate.run(mode="rule")
+
+        attempt = m.AssignmentAttempt.objects.get()
+        self.resume.refresh_from_db()
+        self.assertEqual(self.resume.job, self.job)
+        self.assertEqual(attempt.department, self.department)
+        self.assertEqual(attempt.contact, self.contact)
+        self.assertIsNone(attempt.sub_department)
+        self.assertIsNone(attempt.sub_contact)
+
     def test_resume_process_freezes_scope_and_exposes_rule_first_stages(self):
         user = User.objects.create_user(username="hr-run-owner", password="pass")
         run = runner.create_run(
