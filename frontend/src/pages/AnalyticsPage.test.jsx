@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import AnalyticsPage from './AnalyticsPage'
 import { exportResumeResultReport, fetchRecruitmentOverview } from '../api/services'
 
@@ -51,6 +52,7 @@ const payload = {
   ],
   ai_error_distribution: [],
   job_ranking: [{ key: 1, label: '软件工程师', count: 5 }],
+  primary_department_ranking: [{ key: 10, label: '科技中心', count: 5 }],
   department_ranking: [{ key: 1, label: '产品研发', count: 5 }],
   school_tag_ranking: [],
   education_distribution: [],
@@ -59,11 +61,34 @@ const payload = {
   filter_options: {
     entities: ['GW'],
     jobs: [],
-    departments: [{ value: 1, label: '研发二部' }],
+    primary_departments: [
+      { value: 10, label: '科技中心' },
+      { value: 20, label: '市场中心' },
+    ],
+    departments: [
+      { value: 1, label: '研发二部', parent_id: 10 },
+      { value: 2, label: '市场二部', parent_id: 20 },
+    ],
     school_tags: [],
     educations: [],
     sources: [],
   },
+}
+
+function LocationProbe() {
+  const location = useLocation()
+  return <output data-testid="location">{`${location.pathname}${location.search}`}</output>
+}
+
+function renderAnalytics() {
+  return render(
+    <MemoryRouter initialEntries={['/analytics']}>
+      <Routes>
+        <Route path="/analytics" element={<AnalyticsPage />} />
+        <Route path="/resumes" element={<LocationProbe />} />
+      </Routes>
+    </MemoryRouter>,
+  )
 }
 
 describe('AnalyticsPage', () => {
@@ -76,12 +101,13 @@ describe('AnalyticsPage', () => {
   })
 
   it('renders the management overview, conversion, rankings and diagnosis sections', async () => {
-    render(<AnalyticsPage />)
+    renderAnalytics()
 
     expect(await screen.findByText('招聘概览')).toBeTruthy()
     expect(screen.getByText('候选人数')).toBeTruthy()
     expect(screen.queryByText('去重候选人')).toBeNull()
-    expect(screen.getByText(/投递 12 · 已分类 9/)).toBeTruthy()
+    expect(screen.getByRole('button', { name: '投递 12' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '已分类 9' })).toBeTruthy()
     expect(screen.getByText('招聘流程')).toBeTruthy()
     expect(screen.queryByText('按日趋势')).toBeNull()
     expect(screen.queryByText('最近候选人')).toBeNull()
@@ -90,16 +116,18 @@ describe('AnalyticsPage', () => {
     expect(screen.getByRole('img', { name: /分配来源：规则分配 6/ })).toBeTruthy()
     expect(screen.getByRole('img', { name: /AI 建议分布：人工复核 1/ })).toBeTruthy()
     expect(screen.getByRole('img', { name: /岗位排行：软件工程师 5/ })).toBeTruthy()
+    expect(screen.getByRole('img', { name: /一级部门排行：科技中心 5/ })).toBeTruthy()
     expect(screen.getByRole('img', { name: /二级部门排行：产品研发 5/ })).toBeTruthy()
     expect(screen.getByText('暂无 AI 错误记录')).toBeTruthy()
     expect(fetchRecruitmentOverview).toHaveBeenCalledWith({})
   })
 
-  it('keeps only the time range and level-2 department filters in the data area', async () => {
-    render(<AnalyticsPage />)
+  it('keeps only the time range and level-1/level-2 department filters in the data area', async () => {
+    renderAnalytics()
     await screen.findByText('招聘概览')
 
     expect(screen.getByText('时间区间')).toBeTruthy()
+    expect(screen.getAllByText('一级部门').length).toBeGreaterThan(0)
     expect(screen.getAllByText('二级部门').length).toBeGreaterThan(0)
     expect(screen.queryByText('招聘主体')).toBeNull()
     expect(screen.queryByText('岗位', { selector: 'label *' })).toBeNull()
@@ -108,12 +136,30 @@ describe('AnalyticsPage', () => {
     expect(screen.queryByText('最高学历', { selector: 'label *' })).toBeNull()
   })
 
-  it('applies the selected level-2 department when querying', async () => {
+  it('applies the selected level-1 department and narrows level-2 options', async () => {
     const user = userEvent.setup()
-    render(<AnalyticsPage />)
+    renderAnalytics()
     await screen.findByText('招聘概览')
 
-    await user.click(screen.getByRole('combobox'))
+    const [primarySelect, secondarySelect] = screen.getAllByRole('combobox')
+    await user.click(primarySelect)
+    await user.click(await screen.findByText('科技中心'))
+    await user.click(secondarySelect)
+    expect(await screen.findByText('研发二部')).toBeTruthy()
+    expect(screen.queryByText('市场二部')).toBeNull()
+    await user.keyboard('{Escape}')
+    await user.click(screen.getByRole('button', { name: /查询/ }))
+
+    await waitFor(() => expect(fetchRecruitmentOverview).toHaveBeenCalledTimes(2))
+    expect(fetchRecruitmentOverview).toHaveBeenLastCalledWith({ primary_department_id: 10 })
+  })
+
+  it('applies the selected level-2 department when querying', async () => {
+    const user = userEvent.setup()
+    renderAnalytics()
+    await screen.findByText('招聘概览')
+
+    await user.click(screen.getAllByRole('combobox')[1])
     await user.click(await screen.findByText('研发二部'))
     await user.click(screen.getByRole('button', { name: /查询/ }))
     await waitFor(() => expect(fetchRecruitmentOverview).toHaveBeenCalledTimes(2))
@@ -122,8 +168,8 @@ describe('AnalyticsPage', () => {
 
   it('resets filters and reloads the default 30-day cohort', async () => {
     const user = userEvent.setup()
-    render(<AnalyticsPage />)
-    await screen.findByText(/投递 12 · 已分类 9/)
+    renderAnalytics()
+    await screen.findByRole('button', { name: '投递 12' })
 
     await user.click(screen.getByRole('button', { name: /重置/ }))
     await waitFor(() => expect(fetchRecruitmentOverview).toHaveBeenCalledTimes(2))
@@ -132,16 +178,42 @@ describe('AnalyticsPage', () => {
 
   it('exports the result report with the filters already applied to the dashboard', async () => {
     const user = userEvent.setup()
-    render(<AnalyticsPage />)
+    renderAnalytics()
     await screen.findByText('招聘概览')
 
-    await user.click(screen.getByRole('combobox'))
+    await user.click(screen.getAllByRole('combobox')[1])
     await user.click(await screen.findByText('研发二部'))
     await user.click(screen.getByRole('button', { name: /导出结果报表/ }))
 
     await waitFor(() => expect(exportResumeResultReport).toHaveBeenCalledWith({
       imported_after: '2026-06-17',
       imported_before: '2026-07-16',
+    }))
+  })
+
+  it('includes the applied level-1 department in result report export', async () => {
+    const user = userEvent.setup()
+    fetchRecruitmentOverview
+      .mockResolvedValueOnce({ data: payload })
+      .mockResolvedValueOnce({
+        data: {
+          ...payload,
+          filters: { ...payload.filters, primary_department_id: 10 },
+        },
+      })
+    renderAnalytics()
+    await screen.findByText('招聘概览')
+
+    await user.click(screen.getAllByRole('combobox')[0])
+    await user.click(await screen.findByText('科技中心'))
+    await user.click(screen.getByRole('button', { name: /查询/ }))
+    await waitFor(() => expect(fetchRecruitmentOverview).toHaveBeenCalledTimes(2))
+    await user.click(screen.getByRole('button', { name: /导出结果报表/ }))
+
+    await waitFor(() => expect(exportResumeResultReport).toHaveBeenCalledWith({
+      imported_after: '2026-06-17',
+      imported_before: '2026-07-16',
+      primary_department_id: 10,
     }))
   })
 
@@ -155,10 +227,10 @@ describe('AnalyticsPage', () => {
           filters: { ...payload.filters, department_id: 1 },
         },
       })
-    render(<AnalyticsPage />)
+    renderAnalytics()
     await screen.findByText('招聘概览')
 
-    await user.click(screen.getByRole('combobox'))
+    await user.click(screen.getAllByRole('combobox')[1])
     await user.click(await screen.findByText('研发二部'))
     await user.click(screen.getByRole('button', { name: /查询/ }))
     await waitFor(() => expect(fetchRecruitmentOverview).toHaveBeenCalledTimes(2))
@@ -171,18 +243,55 @@ describe('AnalyticsPage', () => {
     }))
   })
 
+  it('drills a KPI into the resume library with the applied dashboard cohort', async () => {
+    const user = userEvent.setup()
+    renderAnalytics()
+    await screen.findByText('招聘概览')
+
+    await user.click(screen.getByRole('button', { name: /已生成分配/ }))
+
+    const location = await screen.findByTestId('location')
+    const [, query = ''] = location.textContent.split('?')
+    const params = new URLSearchParams(query)
+    expect(location.textContent.startsWith('/resumes?')).toBe(true)
+    expect(params.get('analytics_dimension')).toBe('allocated')
+    expect(params.get('analytics_date_from')).toBe('2026-06-17')
+    expect(params.get('analytics_date_to')).toBe('2026-07-16')
+    expect(params.get('analytics_title')).toBe('已生成分配')
+  })
+
+  it('drills a chart item with its category value', async () => {
+    const user = userEvent.setup()
+    renderAnalytics()
+    await screen.findByText('招聘概览')
+
+    await user.click(screen.getByRole('button', { name: /规则分配/ }))
+
+    const location = await screen.findByTestId('location')
+    const [, query = ''] = location.textContent.split('?')
+    const params = new URLSearchParams(query)
+    expect(params.get('analytics_dimension')).toBe('source')
+    expect(JSON.parse(params.get('analytics_values'))).toEqual(['rule'])
+    expect(params.get('analytics_title')).toBe('分配来源 · 规则分配')
+  })
+
   it('hides result report export without resume.view', async () => {
     roleState.permissions = new Set()
-    render(<AnalyticsPage />)
+    renderAnalytics()
     await screen.findByText('招聘概览')
 
     expect(screen.queryByRole('button', { name: /导出结果报表/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: /已生成分配，查看对应简历/ })).toBeNull()
+    expect(screen.queryByRole('link', { name: /导入至分配，查看参与统计的简历/ })).toBeNull()
+    expect(screen.queryByText('点击数据项查看简历')).toBeNull()
+    expect(screen.queryByText('点击柱形查看简历')).toBeNull()
+    expect(screen.getByRole('button', { name: /规则分配/ }).disabled).toBe(true)
   })
 
   it('shows an API failure and allows retry', async () => {
     const user = userEvent.setup()
     fetchRecruitmentOverview.mockRejectedValueOnce({ response: { data: { detail: '统计失败' } } })
-    render(<AnalyticsPage />)
+    renderAnalytics()
 
     expect(await screen.findByText('统计失败')).toBeTruthy()
     await user.click(screen.getByRole('button', { name: /重\s*试/ }))
@@ -199,7 +308,7 @@ describe('AnalyticsPage', () => {
         ],
       },
     })
-    render(<AnalyticsPage />)
+    renderAnalytics()
 
     expect(await screen.findByText('llm_timeout')).toBeTruthy()
     expect(screen.queryByText('暂无 AI 错误记录')).toBeNull()

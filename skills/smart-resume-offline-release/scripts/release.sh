@@ -90,6 +90,20 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || die "缺少命令：$1"
 }
 
+check_usage_metrics_contract() {
+  local env_template="$1"
+  local compose_template="$2"
+  local deploy_script="$3"
+  grep -Fxq 'USAGE_METRICS_TOKEN=auto-generate-on-first-deploy' "$env_template" || \
+    die "环境变量模板缺少 USAGE_METRICS_TOKEN 自动生成占位值"
+  grep -Fq 'USAGE_METRICS_TOKEN: ${USAGE_METRICS_TOKEN:?Set USAGE_METRICS_TOKEN in .env}' "$compose_template" || \
+    die "Compose 模板未向后端服务传入 USAGE_METRICS_TOKEN"
+  grep -Eq 'GENERATED_SECRET_KEYS=.*USAGE_METRICS_TOKEN' "$deploy_script" || \
+    die "部署脚本未自动生成 USAGE_METRICS_TOKEN"
+  grep -Fq 'require_value USAGE_METRICS_TOKEN' "$deploy_script" || \
+    die "部署脚本未校验 USAGE_METRICS_TOKEN"
+}
+
 check_prerequisites() {
   log "检查发布环境"
   [[ "$REPO_ROOT" == */smart-resume-filter ]] || die "必须从 smart-resume-filter 项目 Skill 执行"
@@ -99,6 +113,10 @@ check_prerequisites() {
   [[ -f "${ASSET_DIR}/env.example" ]] || die "缺少环境变量模板"
   [[ -f "${ASSET_DIR}/README-offline-deploy.md" ]] || die "缺少部署说明模板"
   [[ -f "${ASSET_DIR}/AGENT-offline-deploy-guide.md" ]] || die "缺少 Agent 指南模板"
+  check_usage_metrics_contract \
+    "${ASSET_DIR}/env.example" \
+    "${ASSET_DIR}/docker-compose.yml" \
+    "${REPO_ROOT}/skills/smart-resume-offline-deploy/scripts/deploy.sh"
   require_command docker
   require_command shasum
   require_command tar
@@ -163,6 +181,7 @@ cat > "$BUILD_ENV" <<EOF
 APP_VERSION=${VERSION}
 DOCKER_PLATFORM=${TARGET_PLATFORM}
 DJANGO_SECRET_KEY=build-only-not-for-deployment
+USAGE_METRICS_TOKEN=build-only-not-for-deployment
 DJANGO_ALLOWED_HOSTS=localhost
 POSTGRES_DB=srf
 POSTGRES_USER=srf_user
@@ -197,6 +216,10 @@ mkdir -p "${PACKAGE_DIR}/ops/backup"
 cp "${REPO_ROOT}/ops/backup/drill.sh" "${PACKAGE_DIR}/ops/backup/drill.sh"
 cp -R "${REPO_ROOT}/skills/smart-resume-offline-deploy" \
   "${PACKAGE_DIR}/smart-resume-offline-deploy-skill"
+check_usage_metrics_contract \
+  "${PACKAGE_DIR}/.env.example" \
+  "${PACKAGE_DIR}/docker-compose.yml" \
+  "${PACKAGE_DIR}/smart-resume-offline-deploy-skill/scripts/deploy.sh"
 
 if grep -Eq '^[[:space:]]*build:' "${PACKAGE_DIR}/docker-compose.yml"; then
   die "离线 Compose 不得包含 build:"

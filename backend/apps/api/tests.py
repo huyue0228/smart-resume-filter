@@ -3726,6 +3726,10 @@ class CandidateExportApiTests(TestCase):
         with zipfile.ZipFile(BytesIO(response.content)) as archive:
             return load_workbook(BytesIO(archive.read("简历库清单.xlsx")))
 
+    @staticmethod
+    def _excel_workbook(response):
+        return load_workbook(BytesIO(response.content))
+
     def test_export_fields_returns_stable_public_catalog_and_defaults(self):
         response = self.client.get("/api/candidates/export-fields/")
 
@@ -3818,6 +3822,62 @@ class CandidateExportApiTests(TestCase):
                 "简历状态",
             ],
         )
+
+    def test_export_rejects_invalid_include_resume_files_for_both_endpoints(self):
+        for endpoint in (
+            "/api/candidates/export/",
+            "/api/workflow-attempts/export/",
+        ):
+            with self.subTest(endpoint=endpoint):
+                response = self.client.get(
+                    endpoint,
+                    {"include_resume_files": "sometimes"},
+                )
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("include_resume_files", response.data["detail"])
+
+    def test_candidate_export_returns_standalone_excel_without_scanning_files(self):
+        candidate = m.Candidate.objects.create(
+            identity_hash="candidate-export-excel-only",
+            name="清单候选人",
+            phone="13800000013",
+        )
+        m.Resume.objects.create(
+            candidate=candidate,
+            apply_id="EXCEL-ONLY",
+            resume_file="should-not-be-scanned.pdf",
+        )
+
+        with patch(
+            "apps.api.resume_export._resume_file_info",
+            side_effect=AssertionError("Excel 模式不应扫描简历原件"),
+        ) as resume_file_info:
+            response = self.client.get(
+                "/api/candidates/export/",
+                {
+                    "ids": candidate.id,
+                    "include_resume_files": "false",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        resume_file_info.assert_not_called()
+        self.assertEqual(
+            response["Content-Type"],
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        self.assertEqual(response["X-Export-Mode"], "excel")
+        self.assertEqual(response["X-Export-Count"], "0")
+        self.assertEqual(response["X-Export-Missing"], "0")
+        self.assertEqual(response["X-Export-Candidate-Count"], "1")
+        self.assertIn(
+            f"filename*=UTF-8''{quote('简历库清单.xlsx')}",
+            response["Content-Disposition"],
+        )
+        sheet = self._excel_workbook(response)["简历库"]
+        self.assertEqual(sheet.max_row, 2)
+        self.assertEqual(sheet.cell(row=2, column=1).value, candidate.name)
 
     def test_candidate_export_uses_current_volunteer_and_protects_excel_text(self):
         secondary = m.Department.objects.create(name="当前二级部", level=2)
@@ -4051,7 +4111,11 @@ class CandidateExportApiTests(TestCase):
 
             with self.settings(MEDIA_ROOT=media_root):
                 response = self.client.get(
-                    "/api/candidates/export/", {"ids": str(candidate.id)}
+                    "/api/candidates/export/",
+                    {
+                        "ids": str(candidate.id),
+                        "include_resume_files": "true",
+                    },
                 )
 
         self.assertEqual(response.status_code, 200)
@@ -4059,6 +4123,7 @@ class CandidateExportApiTests(TestCase):
         self.assertEqual(response["X-Export-Count"], "1")
         self.assertEqual(response["X-Export-Missing"], "0")
         self.assertEqual(response["X-Export-Candidate-Count"], "1")
+        self.assertEqual(response["X-Export-Mode"], "zip")
         self.assertIn("attachment", response["Content-Disposition"])
         with zipfile.ZipFile(BytesIO(response.content)) as zf:
             self.assertEqual(
@@ -4132,6 +4197,7 @@ class CandidateExportApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["X-Export-Count"], "0")
         self.assertEqual(response["X-Export-Missing"], "1")
+        self.assertEqual(response["X-Export-Mode"], "zip")
         with zipfile.ZipFile(BytesIO(response.content)) as archive:
             self.assertIn("简历库清单.xlsx", archive.namelist())
             self.assertIn("简历文件/", archive.namelist())
@@ -4178,7 +4244,11 @@ class CandidateExportApiTests(TestCase):
 
             with self.settings(MEDIA_ROOT=media_root):
                 response = self.client.get(
-                    "/api/workflow-attempts/export/", {"ids": str(attempt.id)}
+                    "/api/workflow-attempts/export/",
+                    {
+                        "ids": str(attempt.id),
+                        "include_resume_files": "true",
+                    },
                 )
 
         self.assertEqual(response.status_code, 200)
@@ -4186,12 +4256,60 @@ class CandidateExportApiTests(TestCase):
         self.assertEqual(response["X-Export-Count"], "1")
         self.assertEqual(response["X-Export-Missing"], "0")
         self.assertEqual(response["X-Export-Candidate-Count"], "1")
+        self.assertEqual(response["X-Export-Mode"], "zip")
         self.assertIn("attachment", response["Content-Disposition"])
         with zipfile.ZipFile(BytesIO(response.content)) as zf:
             self.assertEqual(
                 zf.read("简历文件/李四（B1001）.txt").decode("utf-8"),
                 "attempt resume",
             )
+
+    def test_attempt_export_returns_standalone_excel_without_scanning_files(self):
+        candidate = m.Candidate.objects.create(
+            identity_hash="attempt-export-excel-only",
+            name="尝试清单候选人",
+            phone="13900000002",
+        )
+        resume = m.Resume.objects.create(
+            candidate=candidate,
+            apply_id="ATTEMPT-EXCEL-ONLY",
+            resume_file="attempt-not-scanned.pdf",
+        )
+        workflow = m.CandidateWorkflow.objects.create(
+            candidate=candidate,
+            status=m.CandidateWorkflow.STATUS_IN_PROGRESS,
+            current_resume=resume,
+            current_rank=1,
+        )
+        attempt = m.AssignmentAttempt.objects.create(
+            workflow=workflow,
+            resume=resume,
+            attempt_no=1,
+            source=m.AssignmentAttempt.SOURCE_RULE,
+            status=m.AssignmentAttempt.STATUS_PENDING_DISPATCH,
+        )
+
+        with patch(
+            "apps.api.resume_export._resume_file_info",
+            side_effect=AssertionError("Excel 模式不应扫描简历原件"),
+        ) as resume_file_info:
+            response = self.client.get(
+                "/api/workflow-attempts/export/",
+                {
+                    "ids": attempt.id,
+                    "include_resume_files": "0",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        resume_file_info.assert_not_called()
+        self.assertEqual(response["X-Export-Mode"], "excel")
+        self.assertEqual(response["X-Export-Count"], "0")
+        self.assertEqual(response["X-Export-Missing"], "0")
+        self.assertEqual(response["X-Export-Candidate-Count"], "1")
+        sheet = self._excel_workbook(response)["简历库"]
+        self.assertEqual(sheet.max_row, 2)
+        self.assertEqual(sheet.cell(row=2, column=1).value, candidate.name)
 
     def test_attempt_export_uses_latest_selected_attempt_per_candidate(self):
         first_department = m.Department.objects.create(name="第一尝试部门", level=2)
@@ -4271,7 +4389,12 @@ class ResumeResultReportApiTests(TestCase):
         )
         self.hr.groups.add(Group.objects.get(name="HR"))
         self.client.force_authenticate(self.hr)
-        self.department = m.Department.objects.create(name="当前研发部", level=2)
+        self.primary_department = m.Department.objects.create(
+            name="当前一级部门", level=1
+        )
+        self.department = m.Department.objects.create(
+            name="当前研发部", level=2, parent=self.primary_department
+        )
         self.contact = m.Contact.objects.create(
             name="当前二级接口人",
             employee_no="REPORT-L2",
@@ -4344,8 +4467,23 @@ class ResumeResultReportApiTests(TestCase):
         )
         self.assertEqual(invalid_department.status_code, 400)
 
+        invalid_primary_department = self.client.get(
+            "/api/resumes/result-report/",
+            {
+                "imported_after": "2026-07-01",
+                "imported_before": "2026-07-02",
+                "primary_department_id": "not-an-id",
+            },
+        )
+        self.assertEqual(invalid_primary_department.status_code, 400)
+
     def test_result_report_department_filter_uses_latest_non_cancelled_attempt(self):
-        latest_department = m.Department.objects.create(name="最新归属部门", level=2)
+        latest_primary_department = m.Department.objects.create(
+            name="最新一级部门", level=1
+        )
+        latest_department = m.Department.objects.create(
+            name="最新归属部门", level=2, parent=latest_primary_department
+        )
         latest_contact = m.Contact.objects.create(
             name="最新接口人",
             employee_no="REPORT-LATEST-L2",
@@ -4400,6 +4538,14 @@ class ResumeResultReportApiTests(TestCase):
                 "department_id": latest_department.id,
             },
         )
+        primary_response = self.client.get(
+            "/api/resumes/result-report/",
+            {
+                "imported_after": "2026-07-01",
+                "imported_before": "2026-07-02",
+                "primary_department_id": latest_primary_department.id,
+            },
+        )
 
         self.assertEqual(response.status_code, 200)
         workbook = load_workbook(BytesIO(response.content))
@@ -4407,6 +4553,13 @@ class ResumeResultReportApiTests(TestCase):
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[1][2], moved.apply_id)
         self.assertEqual(rows[1][7], "最新归属部门快照")
+        self.assertEqual(primary_response.status_code, 200)
+        primary_workbook = load_workbook(BytesIO(primary_response.content))
+        primary_rows = list(
+            primary_workbook["简历明细"].iter_rows(values_only=True)
+        )
+        self.assertEqual(len(primary_rows), 2)
+        self.assertEqual(primary_rows[1][2], moved.apply_id)
 
     def test_result_report_department_filter_uses_current_volunteer_attempt(self):
         historical_department = m.Department.objects.create(

@@ -285,6 +285,23 @@ export function fetchRecruitmentOverview(params) {
   return client.get('/analytics/recruitment-overview/', { params })
 }
 
+// 页面浏览上报不应触发现有 Axios 全局错误提示，也不应因失败影响业务页面。
+export function reportUsagePageView(body) {
+  const headers = { 'Content-Type': 'application/json' }
+  try {
+    const token = localStorage.getItem('srf_token')
+    if (token) headers.Authorization = `Token ${token}`
+  } catch {
+    // 浏览器禁用本地存储时按匿名失败处理，由调用方静默忽略。
+  }
+  return fetch('/api/analytics/usage/page-view/', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers,
+    body: JSON.stringify(body),
+  })
+}
+
 // ---- Workflow attempts ----
 export function dispatchAllocation(id) {
   return client.post(`/workflow-attempts/${id}/dispatch/`)

@@ -9,7 +9,7 @@ from django.db.models import F, Max
 from django.utils import timezone
 
 from apps.core import models as m
-from apps.core import system_status
+from apps.core import analytics_scope, system_status
 from apps.core.departments import secondary_department as _secondary_department
 from apps.pipeline import ai_config
 from apps.pipeline.ai import service as ai_service
@@ -247,6 +247,7 @@ def _candidate_queryset(scope):
     if candidate_ids:
         qs = qs.filter(id__in=candidate_ids)
     if candidate_filters:
+        qs = analytics_scope.apply_candidate_drilldown(qs, candidate_filters)
         qs = system_status.apply_candidate_filters(qs, candidate_filters)
     statuses = scope.get("system_statuses") or []
     if statuses:

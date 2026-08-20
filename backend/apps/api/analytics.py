@@ -1,7 +1,7 @@
 import hashlib
 import json
 from collections import Counter
-from datetime import date, datetime, time, timedelta
+from datetime import date, timedelta
 
 from django.core.cache import cache
 from django.db.models import (
@@ -11,9 +11,7 @@ from django.db.models import (
     ExpressionWrapper,
     F,
     Min,
-    OuterRef,
     Q,
-    Subquery,
 )
 from django.db.models.functions import TruncDate
 from django.utils import timezone
@@ -22,73 +20,18 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.permissions import HasPermissionCode
+from apps.core.analytics_scope import (
+    AnalyticsQueryError,
+    effective_resume_ids,
+    normalize_filters,
+    rejection_reason_key,
+    scoped_resumes,
+)
 from apps.core import models as m
 
 
 CACHE_SECONDS = 300
-MAX_RANGE_DAYS = 366
 TOP_N = 10
-
-
-class AnalyticsQueryError(ValueError):
-    pass
-
-
-def _parse_date(value, field_name):
-    if not value:
-        return None
-    try:
-        return date.fromisoformat(value)
-    except (TypeError, ValueError) as exc:
-        raise AnalyticsQueryError(f"{field_name} 必须是 YYYY-MM-DD") from exc
-
-
-def _parse_int(value, field_name):
-    if value in (None, ""):
-        return None
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError) as exc:
-        raise AnalyticsQueryError(f"{field_name} 必须是正整数") from exc
-    if parsed <= 0:
-        raise AnalyticsQueryError(f"{field_name} 必须是正整数")
-    return parsed
-
-
-def normalize_filters(params):
-    today = timezone.localdate()
-    date_to = _parse_date(params.get("date_to"), "date_to") or today
-    date_from = _parse_date(params.get("date_from"), "date_from") or (
-        date_to - timedelta(days=29)
-    )
-    if date_from > date_to:
-        raise AnalyticsQueryError("date_from 不能晚于 date_to")
-    if (date_to - date_from).days + 1 > MAX_RANGE_DAYS:
-        raise AnalyticsQueryError(f"日期范围不能超过 {MAX_RANGE_DAYS} 天")
-
-    education = str(params.get("education") or "").strip()
-    allowed_educations = {item[0] for item in m.Candidate.HIGHEST_EDUCATION_CHOICES}
-    if education and education not in allowed_educations:
-        raise AnalyticsQueryError("education 不是有效学历代码")
-    source = str(params.get("source") or "").strip()
-    allowed_sources = {item[0] for item in m.AssignmentAttempt.SOURCE_CHOICES}
-    if source and source not in allowed_sources:
-        raise AnalyticsQueryError("source 不是有效分配来源")
-
-    return {
-        "date_from": date_from,
-        "date_to": date_to,
-        "entity": str(params.get("entity") or "").strip(),
-        "job_id": _parse_int(params.get("job_id"), "job_id"),
-        "department_id": _parse_int(
-            params.get("department_id"), "department_id"
-        ),
-        "school_tag_id": _parse_int(
-            params.get("school_tag_id"), "school_tag_id"
-        ),
-        "education": education,
-        "source": source,
-    }
 
 
 def _cache_key(filters):
@@ -99,7 +42,7 @@ def _cache_key(filters):
     digest = hashlib.sha256(
         json.dumps(serializable, sort_keys=True, ensure_ascii=True).encode("utf-8")
     ).hexdigest()
-    return f"recruitment-analytics:v2:{digest}"
+    return f"recruitment-analytics:v3:{digest}"
 
 
 def _percentage(value, total):
@@ -190,22 +133,28 @@ def _department_ranking(attempts):
     ]
 
 
-def _effective_resume_ids(candidate_ids, base_resumes):
-    current = dict(
-        m.CandidateWorkflow.objects.filter(
-            candidate_id__in=candidate_ids, current_resume_id__isnull=False
-        ).values_list("candidate_id", "current_resume_id")
-    )
-    fallback = {}
-    for candidate_id, resume_id in base_resumes.order_by(
-        "candidate_id", "volunteer_rank", "apply_date", "id"
-    ).values_list("candidate_id", "id"):
-        fallback.setdefault(candidate_id, resume_id)
-    return [current.get(candidate_id) or fallback.get(candidate_id) for candidate_id in candidate_ids]
+def _primary_department_ranking(attempts):
+    grouped_candidates = {}
+    for row in attempts.values(
+        "workflow__candidate_id",
+        "department__parent_id",
+        "department__parent__name",
+    ):
+        label = row["department__parent__name"] or "未归属一级部门"
+        key = row["department__parent_id"] or f"text:{label}"
+        grouped_candidates.setdefault((key, label), set()).add(
+            row["workflow__candidate_id"]
+        )
+    return [
+        {"key": key, "label": label, "count": len(candidate_ids)}
+        for (key, label), candidate_ids in sorted(
+            grouped_candidates.items(), key=lambda item: (-len(item[1]), item[0][1])
+        )[:TOP_N]
+    ]
 
 
 def _job_ranking(candidate_ids, base_resumes):
-    resume_ids = [item for item in _effective_resume_ids(candidate_ids, base_resumes) if item]
+    resume_ids = [item for item in effective_resume_ids(candidate_ids, base_resumes) if item]
     rows = m.Resume.objects.filter(id__in=resume_ids).values(
         "candidate_id",
         "job_id",
@@ -326,8 +275,12 @@ def _filter_options():
                 "public_name", "position_name", "id"
             )
         ],
-        "departments": [
+        "primary_departments": [
             {"value": item.id, "label": item.name}
+            for item in m.Department.objects.filter(level=1).order_by("name", "id")
+        ],
+        "departments": [
+            {"value": item.id, "label": item.name, "parent_id": item.parent_id}
             for item in m.Department.objects.filter(level=2).order_by("name", "id")
         ],
         "school_tags": [
@@ -346,54 +299,7 @@ def _filter_options():
 
 
 def build_recruitment_overview(filters):
-    current_timezone = timezone.get_current_timezone()
-    start_at = timezone.make_aware(
-        datetime.combine(filters["date_from"], time.min), current_timezone
-    )
-    end_at = timezone.make_aware(
-        datetime.combine(filters["date_to"] + timedelta(days=1), time.min),
-        current_timezone,
-    )
-    resumes = m.Resume.objects.filter(imported_at__gte=start_at, imported_at__lt=end_at)
-    if filters["entity"]:
-        resumes = resumes.filter(entity=filters["entity"])
-    if filters["job_id"]:
-        resumes = resumes.filter(
-            Q(candidate__workflow__current_resume__job_id=filters["job_id"])
-            | Q(
-                candidate__workflow__current_resume__isnull=True,
-                job_id=filters["job_id"],
-            )
-        )
-    if filters["school_tag_id"]:
-        resumes = resumes.filter(
-            Q(candidate__highest_degree_tag_id=filters["school_tag_id"])
-            | Q(
-                candidate__highest_degree_tag__isnull=True,
-                candidate__first_degree_tag_id=filters["school_tag_id"],
-            )
-        )
-    if filters["education"]:
-        resumes = resumes.filter(candidate__highest_education=filters["education"])
-    latest_attempt = (
-        m.AssignmentAttempt.objects.filter(resume_id=OuterRef("pk"))
-        .exclude(status=m.AssignmentAttempt.STATUS_CANCELLED)
-        .order_by("-attempt_no", "-id")
-    )
-    resumes = resumes.annotate(
-        latest_effective_attempt_id=Subquery(latest_attempt.values("id")[:1]),
-        latest_effective_department_id=Subquery(
-            latest_attempt.values("department_id")[:1]
-        ),
-        latest_effective_source=Subquery(latest_attempt.values("source")[:1]),
-    )
-    if filters["department_id"]:
-        resumes = resumes.filter(
-            latest_effective_department_id=filters["department_id"]
-        )
-    if filters["source"]:
-        resumes = resumes.filter(latest_effective_source=filters["source"])
-    resumes = resumes.distinct()
+    resumes = scoped_resumes(filters)
 
     resume_ids = resumes.values("id")
     candidate_ids = list(
@@ -491,6 +397,7 @@ def build_recruitment_overview(filters):
             )
         },
     )
+    primary_department_ranking = _primary_department_ranking(attempts)
     department_ranking = _department_ranking(attempts)
     school_tag_ranking = _school_tag_ranking(candidate_ids)
     education_distribution = _choice_distribution(
@@ -513,7 +420,7 @@ def build_recruitment_overview(filters):
     )
     rejection_reason_distribution = [
         {
-            "key": row["feedback_note"] or "empty",
+            "key": rejection_reason_key(row["feedback_note"]),
             "label": (row["feedback_note"] or "未填写原因")[:80],
             "count": row["count"],
         }
@@ -530,7 +437,7 @@ def build_recruitment_overview(filters):
             "cohort": "Resume.imported_at 落在所选日期范围内的投递记录",
             "candidate_scope": "候选人数及各阶段按 Candidate 去重",
             "job_scope": "岗位排行优先使用 CandidateWorkflow.current_resume",
-            "department_scope": "部门筛选和排行使用投递最新非取消分配尝试，并优先读取部门快照",
+            "department_scope": "一、二级部门筛选和排行使用投递最新非取消分配尝试；一级部门按当前部门树推导，二级部门优先读取分配快照",
             "conversion_denominator": "所选 cohort 去重候选人数",
         },
         "summary": summary,
@@ -543,6 +450,7 @@ def build_recruitment_overview(filters):
         "ai_recommendation_distribution": recommendation_distribution,
         "ai_error_distribution": ai_error_distribution,
         "job_ranking": _job_ranking(candidate_ids, resumes),
+        "primary_department_ranking": primary_department_ranking,
         "department_ranking": department_ranking,
         "school_tag_ranking": school_tag_ranking,
         "education_distribution": education_distribution,

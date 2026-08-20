@@ -41,6 +41,7 @@ export default function ResumeExportModal({
 }) {
   const [catalog, setCatalog] = useState({ version: null, groups: [] })
   const [selected, setSelected] = useState([])
+  const [includeResumeFiles, setIncludeResumeFiles] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
@@ -62,7 +63,10 @@ export default function ResumeExportModal({
   }, [userKey])
 
   useEffect(() => {
-    if (open) loadCatalog()
+    if (open) {
+      setIncludeResumeFiles(false)
+      loadCatalog()
+    }
   }, [loadCatalog, open])
 
   const allKeys = useMemo(
@@ -89,7 +93,7 @@ export default function ResumeExportModal({
     } catch {
       // 浏览器禁用本地存储时仍允许本次导出。
     }
-    onExport(fields)
+    onExport(fields, includeResumeFiles)
   }
 
   return (
@@ -97,7 +101,7 @@ export default function ResumeExportModal({
       title="选择简历导出属性"
       open={open}
       width={760}
-      okText="导出 ZIP"
+      okText={includeResumeFiles ? '导出 ZIP' : '导出 Excel'}
       cancelText="取消"
       confirmLoading={exporting}
       okButtonProps={{ disabled: loading || Boolean(error) || selected.length === 0 }}
@@ -109,7 +113,9 @@ export default function ResumeExportModal({
       <Spin spinning={loading}>
         <Space direction="vertical" size="middle" style={{ width: '100%' }}>
           <Typography.Text type="secondary">
-            ZIP 将包含简历文件和一张按候选人汇总的 Excel 清单。字段按固定目录顺序写入。
+            {includeResumeFiles
+              ? 'ZIP 将包含简历原件和一张按候选人汇总的 Excel 清单。字段按固定目录顺序写入。'
+              : '将下载一张按候选人汇总的 Excel 清单，不包含简历原件。字段按固定目录顺序写入。'}
           </Typography.Text>
           {error ? (
             <Alert
@@ -127,6 +133,12 @@ export default function ResumeExportModal({
                 <Button size="small" onClick={() => setSelected(defaults)}>恢复默认</Button>
                 <Typography.Text type="secondary">已选择 {selected.length} 项</Typography.Text>
               </Space>
+              <Checkbox
+                checked={includeResumeFiles}
+                onChange={(event) => setIncludeResumeFiles(event.target.checked)}
+              >
+                同时下载简历原件
+              </Checkbox>
               {catalog.groups.map((group) => (
                 <section key={group.key} aria-label={group.label}>
                   <Typography.Title level={5} style={{ margin: '4px 0 8px' }}>

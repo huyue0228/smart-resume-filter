@@ -52,9 +52,12 @@ describe('ResumeExportModal', () => {
     expect(screen.getByRole('checkbox', { name: '手机号' }).checked).toBe(true)
     expect(screen.getByRole('checkbox', { name: '应聘ID' }).checked).toBe(true)
     expect(screen.getByRole('checkbox', { name: '主体' }).checked).toBe(false)
+    expect(screen.getByRole('checkbox', { name: '同时下载简历原件' }).checked).toBe(false)
+    expect(screen.getByRole('button', { name: '导出 Excel' })).toBeTruthy()
+    expect(screen.getByText(/不包含简历原件/)).toBeTruthy()
 
     await user.click(screen.getByRole('button', { name: /清\s*空/ }))
-    expect(screen.getByRole('button', { name: '导出 ZIP' }).disabled).toBe(true)
+    expect(screen.getByRole('button', { name: '导出 Excel' }).disabled).toBe(true)
 
     await user.click(screen.getByRole('button', { name: '恢复默认' }))
     expect(screen.getByRole('checkbox', { name: '姓名' }).checked).toBe(true)
@@ -116,11 +119,59 @@ describe('ResumeExportModal', () => {
     await user.click(screen.getByRole('button', { name: /清\s*空/ }))
     await user.click(screen.getByRole('checkbox', { name: '主体' }))
     await user.click(screen.getByRole('checkbox', { name: '姓名' }))
-    await user.click(screen.getByRole('button', { name: '导出 ZIP' }))
+    await user.click(screen.getByRole('button', { name: '导出 Excel' }))
 
-    expect(onExport).toHaveBeenCalledWith(['candidate_name', 'entity'])
+    expect(onExport).toHaveBeenCalledWith(['candidate_name', 'entity'], false)
     await waitFor(() => expect(JSON.parse(
       localStorage.getItem('srf.resume-export-fields:bob'),
     )).toEqual({ version: 2, fields: ['candidate_name', 'entity'] }))
+  })
+
+  it('submits the original-file option but resets it every time the modal opens', async () => {
+    const user = userEvent.setup()
+    const onExport = vi.fn()
+    const { rerender } = render(
+      <ResumeExportModal
+        open
+        userKey="bob"
+        onCancel={vi.fn()}
+        onExport={onExport}
+      />,
+    )
+    await screen.findByRole('checkbox', { name: '姓名' })
+
+    await user.click(screen.getByRole('checkbox', { name: '同时下载简历原件' }))
+    expect(screen.getByRole('button', { name: '导出 ZIP' })).toBeTruthy()
+    expect(screen.getByText(/ZIP 将包含简历原件/)).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: '导出 ZIP' }))
+    expect(onExport).toHaveBeenCalledWith(
+      ['candidate_name', 'candidate_phone', 'current_apply_id'],
+      true,
+    )
+    expect(JSON.parse(localStorage.getItem('srf.resume-export-fields:bob'))).toEqual({
+      version: 2,
+      fields: ['candidate_name', 'candidate_phone', 'current_apply_id'],
+    })
+
+    rerender(
+      <ResumeExportModal
+        open={false}
+        userKey="bob"
+        onCancel={vi.fn()}
+        onExport={onExport}
+      />,
+    )
+    rerender(
+      <ResumeExportModal
+        open
+        userKey="bob"
+        onCancel={vi.fn()}
+        onExport={onExport}
+      />,
+    )
+    await waitFor(() => {
+      expect(screen.getByRole('checkbox', { name: '同时下载简历原件' }).checked).toBe(false)
+    })
+    expect(screen.getByRole('button', { name: '导出 Excel' })).toBeTruthy()
   })
 })

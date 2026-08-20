@@ -154,6 +154,8 @@ W3_OAUTH2_TIMEOUT_SECONDS = float(os.environ.get("W3_OAUTH2_TIMEOUT_SECONDS", "1
 W3_OAUTH2_TRANSACTION_TTL_SECONDS = int(
     os.environ.get("W3_OAUTH2_TRANSACTION_TTL_SECONDS", "300")
 )
+# Grafana 等监控方只读查询使用频率指标；空值表示禁用密钥访问。
+USAGE_METRICS_TOKEN = os.environ.get("USAGE_METRICS_TOKEN", "")
 # OAuth2 state/PKCE 和一次性登录凭据存于服务端 Session；正式启用时 Cookie 仅走 HTTPS。
 SESSION_COOKIE_SECURE = W3_OAUTH2_ENABLED and not DEBUG
 SESSION_COOKIE_HTTPONLY = True

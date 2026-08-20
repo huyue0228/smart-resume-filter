@@ -131,10 +131,36 @@
   overflow: hidden;
 }
 
+.analytics-efficiency-item--clickable {
+  cursor: pointer;
+}
+
+.analytics-metric-main:focus-visible,
+.analytics-efficiency-item--clickable:focus-visible,
+.analytics-chart-legend-item:focus-visible {
+  outline: 2px solid var(--srf-primary);
+  outline-offset: 2px;
+}
+
 .analytics-metric-card .ant-card-body {
   display: flex;
   min-height: 140px;
   flex-direction: column;
+}
+
+.analytics-metric-main {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  text-align: start;
+  background: transparent;
+}
+
+button.analytics-metric-main {
+  cursor: pointer;
 }
 
 .analytics-metric-card--primary {
@@ -211,6 +237,13 @@
   background: var(--metric-soft);
 }
 
+.analytics-metric-footer .ant-btn-link {
+  height: auto;
+  padding: 0;
+  color: var(--metric-color);
+  font-size: 11px;
+}
+
 .analytics-panel {
   width: 100%;
   height: 100%;
@@ -233,6 +266,10 @@
 
 .analytics-chart-card > .ant-card-body {
   min-height: 258px;
+}
+
+.analytics-chart-card--clickable canvas {
+  cursor: pointer;
 }
 
 .analytics-doughnut-layout {
@@ -286,6 +323,16 @@
   align-items: center;
   min-width: 0;
   font-size: 12px;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  text-align: start;
+  background: transparent;
+  cursor: pointer;
+}
+
+.analytics-chart-legend-item:disabled {
+  cursor: default;
 }
 
 .analytics-chart-dot {

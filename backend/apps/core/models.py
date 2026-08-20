@@ -1177,6 +1177,31 @@ class ProcessingRunScopeItem(models.Model):
         ]
 
 
+class UsagePageView(models.Model):
+    """登录用户页面访问事件；仅保留稳定页面键和统计所需快照。"""
+
+    event_id = models.UUIDField(unique=True, editable=False)
+    session_id = models.UUIDField(editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="usage_page_views",
+    )
+    employee_no_snapshot = models.CharField(max_length=150)
+    page_key = models.CharField(max_length=64)
+    occurred_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-occurred_at", "-id"]
+        indexes = [
+            models.Index(fields=["occurred_at"]),
+            models.Index(fields=["page_key", "occurred_at"]),
+            models.Index(fields=["session_id", "occurred_at"]),
+        ]
+
+
 class Config(models.Model):
     """键值配置。"""
 

@@ -217,6 +217,21 @@ const REASON_TYPE = {
   none: { text: '无', color: 'default' },
 }
 
+const ANALYTICS_REQUEST_PARAM_KEYS = [
+  'analytics_date_from',
+  'analytics_date_to',
+  'analytics_entity',
+  'analytics_job_id',
+  'analytics_primary_department_id',
+  'analytics_department_id',
+  'analytics_school_tag_id',
+  'analytics_education',
+  'analytics_source',
+  'analytics_dimension',
+  'analytics_values',
+  'analytics_value_labels',
+]
+
 export default function ResumesPage() {
   const actionRef = useRef()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -652,21 +667,31 @@ export default function ResumesPage() {
     setExportTarget({ type: 'attempts', ids: [attempt.id], params: {} })
   }
 
-  const handleExport = async (fields) => {
+  const handleExport = async (fields, includeResumeFiles) => {
     if (!exportTarget) return
     setExporting(true)
     try {
-      const params = { ...exportTarget.params, fields: fields.join(',') }
+      const params = {
+        ...exportTarget.params,
+        fields: fields.join(','),
+        include_resume_files: includeResumeFiles,
+      }
       const resp = exportTarget.type === 'attempts'
         ? await exportAllocations(exportTarget.ids, params)
         : await exportCandidates(exportTarget.ids, params)
       const count = Number(resp.headers?.['x-export-count'] ?? 0)
       const missing = Number(resp.headers?.['x-export-missing'] ?? 0)
       const candidateCount = Number(resp.headers?.['x-export-candidate-count'] ?? 0)
-      downloadBlobFromResponse(resp, '简历导出.zip')
-      message.success(
-        `已导出 ${candidateCount} 名候选人，包含 ${count} 份简历${missing ? `，${missing} 份缺文件（见压缩包内清单）` : ''}`,
-      )
+      const exportMode = String(resp.headers?.['x-export-mode'] || '').toLowerCase()
+      const isZip = exportMode ? exportMode === 'zip' : includeResumeFiles
+      downloadBlobFromResponse(resp, isZip ? '简历导出.zip' : '简历库清单.xlsx')
+      if (isZip) {
+        message.success(
+          `已导出 ${candidateCount} 名候选人，包含 ${count} 份简历${missing ? `，${missing} 份缺文件（见压缩包内清单）` : ''}`,
+        )
+      } else {
+        message.success(`已导出 ${candidateCount} 名候选人的 Excel 清单`)
+      }
       setExportTarget(null)
     } catch {
       message.error('导出失败')
@@ -814,9 +839,33 @@ export default function ResumesPage() {
     processing_result: processingResultFilter?.result,
   }), [processingResultFilter?.runId, processingResultFilter?.result])
 
+  const analyticsDrilldown = useMemo(() => {
+    const dimension = searchParams.get('analytics_dimension')
+    if (!dimension) return null
+    const params = Object.fromEntries(
+      ANALYTICS_REQUEST_PARAM_KEYS
+        .map((key) => [key, searchParams.get(key)])
+        .filter(([, value]) => value !== null && value !== ''),
+    )
+    return {
+      params,
+      title: searchParams.get('analytics_title') || '数据看板明细',
+      context: searchParams.get('analytics_context') || '',
+    }
+  }, [searchParams])
+
+  const externalRequestParams = useMemo(() => ({
+    ...processingRequestParams,
+    ...(analyticsDrilldown?.params || {}),
+  }), [analyticsDrilldown?.params, processingRequestParams])
+
   useEffect(() => {
     setDetailRecord(null)
-  }, [processingResultFilter?.runId, processingResultFilter?.result])
+  }, [
+    analyticsDrilldown?.params,
+    processingResultFilter?.runId,
+    processingResultFilter?.result,
+  ])
 
   const requestCandidates = useCallback((params) => {
     const { page: _page, page_size: _pageSize, ...query } = params
@@ -999,6 +1048,16 @@ export default function ResumesPage() {
           action={<Button size="small" onClick={() => setSearchParams({})}>清除筛选</Button>}
         />
       )}
+      {analyticsDrilldown && (
+        <Alert
+          showIcon
+          type="info"
+          style={{ marginBottom: 16 }}
+          message={`看板下钻：${analyticsDrilldown.title}`}
+          description={`${analyticsDrilldown.context || '沿用数据看板当前已生效的统计范围'}。简历库按候选人一人一行展示；涉及多投递或多分组的指标，列表行数可能小于看板计数。`}
+          action={<Button size="small" onClick={() => setSearchParams({})}>返回全部简历</Button>}
+        />
+      )}
       <SmartDataTable
         tableId="candidates"
         stickyPagination
@@ -1100,7 +1159,7 @@ export default function ResumesPage() {
             撤销上次上传
           </Button>,
         ].filter(Boolean)}
-        params={processingRequestParams}
+        params={externalRequestParams}
         request={requestCandidates}
       />
       <Modal

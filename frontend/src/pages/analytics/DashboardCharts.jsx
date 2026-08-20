@@ -41,6 +41,7 @@ export function DoughnutChartCard({
   rows = [],
   emptyText,
   successWhenEmpty = false,
+  onRowClick,
 }) {
   const chartRows = prepareDistributionRows(rows)
   const total = chartRows.reduce((sum, item) => sum + item.count, 0)
@@ -59,6 +60,12 @@ export function DoughnutChartCard({
     maintainAspectRatio: false,
     cutout: '68%',
     animation: false,
+    onClick: onRowClick
+      ? (_event, elements = []) => {
+          const index = elements[0]?.index
+          if (index !== undefined && chartRows[index]) onRowClick(chartRows[index])
+        }
+      : undefined,
     plugins: {
       legend: { display: false },
       tooltip: {
@@ -73,28 +80,38 @@ export function DoughnutChartCard({
   }
 
   return (
-    <Card title={title} className="analytics-panel analytics-chart-card">
+    <Card
+      title={title}
+      extra={onRowClick ? <Typography.Text type="secondary">点击数据项查看简历</Typography.Text> : null}
+      className={`analytics-panel analytics-chart-card${onRowClick ? ' analytics-chart-card--clickable' : ''}`}
+    >
       {chartRows.length ? (
-        <div
-          className="analytics-doughnut-layout"
-          role="img"
-          aria-label={chartSummary(title, chartRows, total)}
-        >
-          <div className="analytics-doughnut-canvas">
+        <div className="analytics-doughnut-layout">
+          <div
+            className="analytics-doughnut-canvas"
+            role="img"
+            aria-label={chartSummary(title, chartRows, total)}
+          >
             <Doughnut data={data} options={options} aria-label={title} />
             <div className="analytics-doughnut-total" aria-hidden="true">
               <strong>{formatChartCount(total)}</strong>
               <span>合计</span>
             </div>
           </div>
-          <div className="analytics-chart-legend" aria-hidden="true">
+          <div className="analytics-chart-legend">
             {chartRows.map((item, index) => (
-              <div className="analytics-chart-legend-item" key={String(item.key)}>
+              <button
+                type="button"
+                className="analytics-chart-legend-item"
+                disabled={!onRowClick}
+                key={`${String(item.key)}-${index}`}
+                onClick={() => onRowClick?.(item)}
+              >
                 <span className="analytics-chart-dot" style={{ backgroundColor: colors[index] }} />
                 <Typography.Text ellipsis={{ tooltip: item.label }}>{item.label}</Typography.Text>
                 <strong>{formatChartCount(item.count)}</strong>
                 <small>{percentage(item.count, total).toFixed(1)}%</small>
-              </div>
+              </button>
             ))}
           </div>
         </div>
@@ -116,6 +133,7 @@ export function HorizontalBarChartCard({
   rows = [],
   emptyText,
   palette = 'default',
+  onRowClick,
 }) {
   const chartRows = rows
     .map((item) => ({ ...item, count: Number(item.count || 0) }))
@@ -139,6 +157,12 @@ export function HorizontalBarChartCard({
     responsive: true,
     maintainAspectRatio: false,
     animation: false,
+    onClick: onRowClick
+      ? (_event, elements = []) => {
+          const index = elements[0]?.index
+          if (index !== undefined && chartRows[index]) onRowClick(chartRows[index])
+        }
+      : undefined,
     scales: {
       x: {
         beginAtZero: true,
@@ -165,7 +189,11 @@ export function HorizontalBarChartCard({
   const summary = `${title}：${chartRows.map((item) => `${item.label} ${formatChartCount(item.count)}`).join('；')}`
 
   return (
-    <Card title={title} className="analytics-panel analytics-chart-card analytics-bar-chart-card">
+    <Card
+      title={title}
+      extra={onRowClick ? <Typography.Text type="secondary">点击柱形查看简历</Typography.Text> : null}
+      className={`analytics-panel analytics-chart-card analytics-bar-chart-card${onRowClick ? ' analytics-chart-card--clickable' : ''}`}
+    >
       {chartRows.length ? (
         <div className="analytics-bar-canvas" style={{ height }} role="img" aria-label={summary}>
           <Bar data={data} options={options} aria-label={title} />

@@ -6,7 +6,11 @@ export function formatChartCount(value) {
 
 export function prepareDistributionRows(rows = [], maximumItems = 5) {
   const ordered = rows
-    .map((item) => ({ ...item, count: Number(item.count || 0) }))
+    .map((item) => ({
+      ...item,
+      count: Number(item.count || 0),
+      drilldownItems: item.drilldownItems?.length ? item.drilldownItems : [item],
+    }))
     .filter((item) => item.count > 0)
     .sort((left, right) => right.count - left.count)
 
@@ -18,6 +22,7 @@ export function prepareDistributionRows(rows = [], maximumItems = 5) {
       key: 'other',
       label: '其他',
       count: ordered.slice(maximumItems).reduce((sum, item) => sum + item.count, 0),
+      drilldownItems: ordered.slice(maximumItems).flatMap((item) => item.drilldownItems),
     },
   ]
 }

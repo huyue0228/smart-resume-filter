@@ -37,7 +37,7 @@ from apps.accounts.permissions import (
     user_permission_codes,
 )
 from apps.core import models as m
-from apps.core import candidate_summary, system_status
+from apps.core import analytics_scope, candidate_summary, system_status
 from apps.core.departments import resolve_department_hierarchy
 from apps.core.name_pinyin import name_to_pinyin
 from apps.ingestion import snapshot
@@ -65,9 +65,12 @@ from .pagination import StandardResultsSetPagination
 from .resume_export import (
     CandidateExportRecord,
     ExportFieldError,
+    ExportOptionError,
+    build_resume_export_excel,
     build_resume_export_zip,
     export_fields_payload,
     parse_export_fields,
+    parse_include_resume_files,
 )
 from .result_report import build_result_report, current_effective_attempt
 
@@ -246,12 +249,28 @@ def delete_user_and_bound_contact(user):
         _delete_users([locked_user])
 
 
-def candidate_export_response(records, field_keys):
-    content, exported_count, missing_count, candidate_count = build_resume_export_zip(
-        records, field_keys
-    )
-    response = HttpResponse(content, content_type="application/zip")
-    response["Content-Disposition"] = 'attachment; filename="resumes_export.zip"'
+def candidate_export_response(records, field_keys, *, include_resume_files=True):
+    if include_resume_files:
+        content, exported_count, missing_count, candidate_count = (
+            build_resume_export_zip(records, field_keys)
+        )
+        response = HttpResponse(content, content_type="application/zip")
+        response["Content-Disposition"] = 'attachment; filename="resumes_export.zip"'
+        response["X-Export-Mode"] = "zip"
+    else:
+        content, candidate_count = build_resume_export_excel(records, field_keys)
+        exported_count = 0
+        missing_count = 0
+        response = HttpResponse(
+            content,
+            content_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+        )
+        response["Content-Disposition"] = (
+            f"attachment; filename*=UTF-8''{quote('简历库清单.xlsx')}"
+        )
+        response["X-Export-Mode"] = "excel"
     response["X-Export-Count"] = str(exported_count)
     response["X-Export-Missing"] = str(missing_count)
     response["X-Export-Candidate-Count"] = str(candidate_count)
@@ -680,6 +699,7 @@ class ResumeViewSet(PermissionedReadOnlyModelViewSet):
     def result_report(self, request):
         imported_after = request.query_params.get("imported_after")
         imported_before = request.query_params.get("imported_before")
+        primary_department_id = request.query_params.get("primary_department_id")
         department_id = request.query_params.get("department_id")
         if not imported_after or not imported_before:
             return Response(
@@ -704,18 +724,26 @@ class ResumeViewSet(PermissionedReadOnlyModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if department_id not in (None, ""):
+        department_filters = {
+            "primary_department_id": primary_department_id,
+            "department_id": department_id,
+        }
+        for field_name, raw_value in department_filters.items():
+            if raw_value in (None, ""):
+                department_filters[field_name] = None
+                continue
             try:
-                department_id = int(department_id)
-                if department_id <= 0:
+                parsed_value = int(raw_value)
+                if parsed_value <= 0:
                     raise ValueError
             except (TypeError, ValueError):
                 return Response(
-                    {"detail": "department_id 必须是正整数"},
+                    {"detail": f"{field_name} 必须是正整数"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-        else:
-            department_id = None
+            department_filters[field_name] = parsed_value
+        primary_department_id = department_filters["primary_department_id"]
+        department_id = department_filters["department_id"]
 
         current_timezone = timezone.get_current_timezone()
         start_at = timezone.make_aware(
@@ -730,7 +758,11 @@ class ResumeViewSet(PermissionedReadOnlyModelViewSet):
                 status=m.AssignmentAttempt.STATUS_CANCELLED
             )
             .select_related(
-                "department", "contact", "sub_department", "sub_contact"
+                "department",
+                "department__parent",
+                "contact",
+                "sub_department",
+                "sub_contact",
             )
             .order_by("attempt_no", "id")
         )
@@ -752,13 +784,21 @@ class ResumeViewSet(PermissionedReadOnlyModelViewSet):
             .order_by("imported_at", "id")
         )
         resumes = list(resume_queryset)
-        if department_id:
+        if primary_department_id or department_id:
             resumes = [
                 resume
                 for resume in resumes
                 if (
                     (attempt := current_effective_attempt(resume))
-                    and attempt.department_id == department_id
+                    and (
+                        not primary_department_id
+                        or (
+                            attempt.department
+                            and attempt.department.parent_id
+                            == primary_department_id
+                        )
+                    )
+                    and (not department_id or attempt.department_id == department_id)
                 )
             ]
         content = build_result_report(resumes)
@@ -878,6 +918,10 @@ class CandidateViewSet(PermissionedModelViewSet):
                 return attempt.resume if attempt else None
 
         try:
+            qs = analytics_scope.apply_candidate_drilldown(
+                qs,
+                self.request.query_params,
+            )
             qs = system_status.apply_candidate_filters(
                 qs,
                 self.request.query_params,
@@ -979,7 +1023,8 @@ class CandidateViewSet(PermissionedModelViewSet):
     def export_resumes(self, request):
         try:
             field_keys = parse_export_fields(request.query_params)
-        except ExportFieldError as exc:
+            include_resume_files = parse_include_resume_files(request.query_params)
+        except (ExportFieldError, ExportOptionError) as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         permissions = user_permission_codes(request.user)
@@ -1020,7 +1065,11 @@ class CandidateViewSet(PermissionedModelViewSet):
                     file_resumes=list(candidate.resumes.all()),
                 )
             )
-        return candidate_export_response(records, field_keys)
+        return candidate_export_response(
+            records,
+            field_keys,
+            include_resume_files=include_resume_files,
+        )
 
     @action(detail=False, methods=["get"], url_path="export-fields")
     def export_fields(self, request):
@@ -1955,13 +2004,14 @@ class AssignmentAttemptViewSet(PermissionedReadOnlyModelViewSet):
 
     @action(detail=False, methods=["get"], url_path="export")
     def export_resumes(self, request):
-        """按候选人一行导出 Excel，并附上所选尝试对应的简历文件。
+        """按候选人一行导出 Excel，可选附上所选尝试对应的简历文件。
 
         ?ids=1,2,3 导出指定分配尝试；不传则导出当前筛选（含 status）下全部。
         """
         try:
             field_keys = parse_export_fields(request.query_params)
-        except ExportFieldError as exc:
+            include_resume_files = parse_include_resume_files(request.query_params)
+        except (ExportFieldError, ExportOptionError) as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         qs = self.get_queryset()
         ids = request.query_params.get("ids")
@@ -1987,7 +2037,11 @@ class AssignmentAttemptViewSet(PermissionedReadOnlyModelViewSet):
                     file_resumes=[item.resume for item in attempts],
                 )
             )
-        return candidate_export_response(records, field_keys)
+        return candidate_export_response(
+            records,
+            field_keys,
+            include_resume_files=include_resume_files,
+        )
 
     @action(detail=True, methods=["get"], url_path="resume-preview")
     def resume_preview(self, request, pk=None):

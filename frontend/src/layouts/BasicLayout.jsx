@@ -9,6 +9,7 @@ import { canAccessRoute } from '../routePermissions'
 import BrandLogo from '../components/BrandLogo'
 import { allRoute } from './menuRoutes'
 import { appLayoutSettings, appLayoutToken, appSiderMenuProps } from '../theme'
+import useUsagePageView from '../utils/useUsagePageView'
 
 const ROOT_MENU_KEYS = ['/data', '/system']
 
@@ -47,6 +48,7 @@ export default function BasicLayout() {
   const { role, roles, user, logout, hasPermission, isContact } = useRole()
   const [pathname, setPathname] = useState(location.pathname)
   const [openKeys, setOpenKeys] = useState(() => defaultOpenKeys(location.pathname))
+  useUsagePageView(location.pathname)
 
   useEffect(() => {
     setPathname(location.pathname)

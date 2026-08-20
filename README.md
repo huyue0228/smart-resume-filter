@@ -113,7 +113,7 @@ git checkout --detach <交付说明中的发布标签或 commit>
 
 ### 3. 创建服务器 `.env`
 
-推荐直接使用项目部署脚本。首次运行会创建权限为 `600` 的 `.env`，自动生成三项独立随机密钥，然后退出等待确认目标服务器信息：
+推荐直接使用项目部署脚本。首次运行会创建权限为 `600` 的 `.env`，自动生成四项独立随机密钥，然后退出等待确认目标服务器信息：
 
 ```bash
 bash skills/smart-resume-offline-deploy/scripts/deploy.sh
@@ -124,7 +124,7 @@ bash skills/smart-resume-offline-deploy/scripts/deploy.sh
 - `DJANGO_ALLOWED_HOSTS`：生产环境填写反向代理对外域名，多个值用英文逗号分隔。
 - `BACKUP_TARGET_PATH`：默认约定为 `/mnt/smart-resume-filter-backups`。先把异机共享目录或外置磁盘挂载到这里；现场挂载点不同才修改该值。脚本会拒绝不存在、不可写或非绝对路径。
 
-确认后再次运行同一命令即可部署。`DJANGO_SECRET_KEY`、`POSTGRES_PASSWORD` 和 `RESTIC_PASSWORD` 由脚本从 `/dev/urandom` 自动生成且不回显。检测到旧容器或旧数据卷时，脚本绝不重新生成密钥；升级或灾后重建必须恢复原 `.env`，否则数据库可能无法连接，既有 AI 连接密文也可能无法解密。
+确认后再次运行同一命令即可部署。`DJANGO_SECRET_KEY`、`POSTGRES_PASSWORD`、`RESTIC_PASSWORD` 和 `USAGE_METRICS_TOKEN` 由脚本从 `/dev/urandom` 自动生成且不回显。检测到旧容器或旧数据卷时，脚本绝不替换已有安全值；缺少新增的使用频率监控密钥时只补齐该项。升级或灾后重建仍必须恢复原 `.env`，否则数据库可能无法连接，既有 AI 连接密文也可能无法解密。
 
 系统生产只提供 W3 登录，因此 W3 OAuth2 是可用部署的必要条件。模板中的 `W3_OAUTH2_ENABLED=False` 只是首次生成 `.env` 的安全占位；正式部署前必须改为 `True`，填写 client id、授权/Token/UserInfo HTTPS 地址、工号和邮箱字段路径、客户端认证方式、超时、事务有效期，并把 `W3_OAUTH2_REDIRECT_URI` 设置为 W3 平台登记的精确地址，例如 `https://你的域名/api/auth/w3/callback/`。当前 W3 UserInfo 的工号和邮箱字段分别为顶层 `employeeNumber`、`email`，模板已预填；`tenantId`、`uuid`、`globalUserID` 不参与账号匹配。机密客户端还必须填写 client secret，scope 按 W3 要求填写。部署脚本会在任何 Docker 变更前强制 `DJANGO_DEBUG=False` 并校验 W3，DEBUG 开启、W3 关闭或配置不完整都会停止且不显示密钥。系统不提供本地密码登录，模板也不包含本地登录开关。
 
@@ -199,7 +199,7 @@ docker compose exec backend python manage.py load_sample
 
 - 简历库按候选人聚合展示，一名候选人一行；详情抽屉可查看全部投递、分配尝试、反馈和 PDF 预览。
 - 简历库、岗位、院校、接口人等主要表格支持表头筛选和列宽拖拽；筛选在后端执行，分页接口支持 `page_size`，单页最大 500。
-- 简历库可以按当前筛选条件导出候选人简历，也可以在候选人详情中操作分配尝试。仅命中一个可用文件且无缺失清单时返回原文件，多文件或存在缺失时返回 zip，并在页面提示导出成功数量和缺失数量。
+- 简历库可以导出选中候选人或当前筛选全部，候选人详情中的分配尝试也复用同一导出弹窗。每次打开默认只下载 `简历库清单.xlsx`；勾选“同时下载简历原件”后才返回包含 Excel、简历原件和可选缺失清单的 ZIP，并提示候选人数、原件数和缺失数。
 - 部门接口人导入要求“工号 + 邮箱”，并自动创建或更新同工号、同邮箱的登录账号；每次同步都保持密码不可用。清空重导时，本次文件中不存在的旧接口人及绑定账号会同步停用。
 
 ### 8. 常用运维命令
@@ -373,7 +373,7 @@ docker compose logs --tail=200 ai-worker
 上线前至少完成：
 
 - `.env` 不提交 Git，不复制到公开位置。
-- `.env` 权限为 `600`，且 `DJANGO_SECRET_KEY`、`POSTGRES_PASSWORD`、`RESTIC_PASSWORD` 已由首次部署脚本分别生成强随机值。
+- `.env` 权限为 `600`，且 `DJANGO_SECRET_KEY`、`POSTGRES_PASSWORD`、`RESTIC_PASSWORD`、`USAGE_METRICS_TOKEN` 已由首次部署脚本分别生成强随机值。
 - `DJANGO_DEBUG=False`。
 - `DJANGO_ALLOWED_HOSTS` 只填写实际 IP/域名，避免长期使用 `*`。
 - PostgreSQL `5432` 和 Redis `6379` 不暴露到公网；如无外部访问需求，只允许内网或安全组限制。
@@ -496,11 +496,13 @@ python manage.py issue_dev_token --username admin
 | GET | `/api/resumes/` | 投递清单 |
 | GET | `/api/resumes/{id}/preview/` | 预览单条投递 PDF |
 | GET | `/api/candidates/` | 候选人聚合列表 |
-| GET | `/api/candidates/export/` | 按候选人 ID 或当前筛选条件导出单个原文件或 zip |
+| GET | `/api/candidates/export/` | 按候选人 ID 或当前筛选条件导出；`include_resume_files=false` 返回独立 XLSX，`true` 返回组合 ZIP，缺参按 `true` 兼容旧客户端 |
 | GET/POST/PATCH | `/api/jobs/` `/api/schools/` `/api/departments/` `/api/contacts/` | 主数据维护 |
 | POST | `/api/pipeline/run/` | 提交 `step + mode + scope` 并创建唯一 Rule 或 AI 运行；缺少 `mode`、提交 `modes` 或在连接未就绪时选择 AI 返回 400。生产异步返回 202，本地 `CELERY_TASK_ALWAYS_EAGER=True` 同步完成返回 200，均返回 `processing_runs` |
 | GET | `/api/pipeline/runs/` | 处理运行记录 |
 | GET | `/api/analytics/recruitment-overview/` | 需要 `analytics.view`；按导入 cohort 返回招聘总览、转化、耗时、趋势和分布，默认最近 30 天，缓存 5 分钟 |
+| POST | `/api/analytics/usage/page-view/` | 登录用户静默上报页面访问；事件 ID 幂等，不用于逐条 API 审计 |
+| GET | `/api/analytics/usage/overview/` | 使用 `X-Usage-Metrics-Key`，或登录用户具有 `analytics.view`；返回 PV、会话、活跃用户、补零趋势和页面排行 |
 | GET | `/api/allocation-mode/` | 具有 `pipeline.run` 或 `resume.import` 权限时返回 `default_mode`、`available_modes` 和 `ai_ready`，不泄露模型连接信息 |
 | GET/PATCH | `/api/ai-connection/settings/`、`/api/ai-connection/settings/{key}/` | 具有 `settings.manage_ai_connection` 权限时读取/更新 AI 运行参数和“AI 专项”配置；页面按 `runtime / special_route` 分页签展示 |
 | GET | `/api/ai-prompts/` | 具有 `settings.manage_ai_connection` 权限时读取五模块定义、限制、系统默认值、只读组装预览、激活版本和共享草稿 |
@@ -516,12 +518,20 @@ python manage.py issue_dev_token --username admin
 | POST | `/api/workflow-attempts/bulk-dispatch/` | HR 批量或一键全部下发 |
 | POST | `/api/workflow-attempts/{id}/assign-sub-contact/` | 二级接口人转派三级接口人 |
 | POST | `/api/workflow-attempts/{id}/feedback/` | 三级接口人提交反馈 |
-| GET | `/api/workflow-attempts/export/` | 导出单个原文件或 zip |
+| GET | `/api/workflow-attempts/export/` | 按尝试数据范围导出；`include_resume_files=false` 返回独立 XLSX，`true` 返回组合 ZIP，缺参按 `true` 兼容旧客户端 |
 | GET | `/api/workflow-attempts/{id}/resume-preview/` | 按分配尝试数据范围预览 PDF |
 | GET | `/api/agent-decisions/` | AI 决策查看 |
 | POST | `/api/agent-decisions/{id}/retry/` | AI 决策重试 |
 
 列表接口默认分页，支持 `page` / `page_size` 查询参数；`page_size` 最大 500。
+
+Grafana JSON 数据源调用使用频率查询接口时，在受控配置中注入 `.env` 的 `USAGE_METRICS_TOKEN`，并发送请求头 `X-Usage-Metrics-Key`。接口支持 `date_from`、`date_to`、`granularity=hour|day|week` 和可选页面筛选；默认最近 30 天，单次范围最长 90 天，按 `Asia/Shanghai` 聚合且不返回个人访问名单。不要把监控密钥写入面板 JSON、仓库、工单或命令历史。通过安全方式把密钥注入当前 shell 后，可做最小连通性验证：
+
+```bash
+curl --fail --silent --show-error \
+  -H "X-Usage-Metrics-Key: ${USAGE_METRICS_TOKEN}" \
+  "https://resume.example.com/api/analytics/usage/overview/?granularity=day"
+```
 
 ## 验证命令
 

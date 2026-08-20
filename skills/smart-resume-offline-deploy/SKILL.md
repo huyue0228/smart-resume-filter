@@ -38,12 +38,13 @@ bash skills/smart-resume-offline-deploy/scripts/deploy.sh
 
 若 Skill 随离线包存放在包根目录下一层，则将上面的 `skills/smart-resume-offline-deploy` 改为实际 Skill 目录名。
 
-3. 镜像、端口、worker/OCR、数据库名/用户、备份周期和保留策略已经写入模板。脚本首次运行会创建权限为 `600` 的 `.env`，并自动生成互不复用的 `DJANGO_SECRET_KEY`、`POSTGRES_PASSWORD` 和 `RESTIC_PASSWORD`，密钥不回显。部署人员需把实际域名写入 `DJANGO_ALLOWED_HOSTS`，按下一节完成 DNS、证书和 HTTPS 反向代理，确认异机/外置存储已经挂载到预设的 `/mnt/smart-resume-filter-backups`，并补齐 W3 OAuth2 配置；挂载点不同时只修改 `BACKUP_TARGET_PATH`。
+3. 镜像、端口、worker/OCR、数据库名/用户、备份周期和保留策略已经写入模板。脚本首次运行会创建权限为 `600` 的 `.env`，并自动生成互不复用的 `DJANGO_SECRET_KEY`、`POSTGRES_PASSWORD`、`RESTIC_PASSWORD` 和 `USAGE_METRICS_TOKEN`，密钥不回显。部署人员需把实际域名写入 `DJANGO_ALLOWED_HOSTS`，按下一节完成 DNS、证书和 HTTPS 反向代理，确认异机/外置存储已经挂载到预设的 `/mnt/smart-resume-filter-backups`，并补齐 W3 OAuth2 配置；挂载点不同时只修改 `BACKUP_TARGET_PATH`。
 4. `DEPLOY_MODE=auto`（默认）在存在 `smart-resume-filter-images-amd64.tar` 时选择离线模式，否则从当前源码构建。可显式指定 `DEPLOY_MODE=offline` 或 `DEPLOY_MODE=source`。
 5. 离线模式要求交付包内的 `docker-compose.yml` 只使用 `image:`，不得保留 `build:`；源码模式使用当前项目的 Compose 构建后端、前端、PostgreSQL、Redis 和备份工具镜像。
 6. 首次部署才会执行 `init` 写入基础权限、账号和预置数据。检测到已有部署时，脚本只更新镜像并启动服务，迁移由 backend 自动完成，不会重置管理员在系统设置中维护的配置。
 7. 部署不决定 AI 功能是否启用、模型连接或 API Key。服务启动后，由拥有权限的管理员在「系统设置 → AI 模型连接」配置并测试；不要在部署对话、脚本参数或日志中提供 API Key。
 8. 生产只提供 W3 登录，因此 W3 OAuth2 是可用部署的必要条件。模板中的 `W3_OAUTH2_ENABLED=False` 只是首次生成 `.env` 时的安全占位；正式部署前必须通过安全渠道补齐配置并改为 `True`，同时保持 `DJANGO_DEBUG=False`。部署脚本会在任何 Docker 变更前执行校验，DEBUG 开启、W3 关闭、缺少必填项、端点非 HTTPS、客户端认证方式无效或回调路径不精确均立即停止。本地密码 API 与 Django Admin 路由均已删除；DEBUG 开发令牌不是生产应急入口。
+9. Grafana JSON 数据源使用 `GET /api/analytics/usage/overview/`，以 `.env` 中的 `USAGE_METRICS_TOKEN` 作为 `X-Usage-Metrics-Key` 请求头。密钥只通过安全配置注入，不写入面板 JSON、仓库、工单、对话或命令历史。
 
 ### 域名与 HTTPS 反向代理
 
@@ -122,7 +123,7 @@ server {
 
 模板已预填当前 UserInfo 映射 `W3_OAUTH2_EMPLOYEE_NO_FIELD=employeeNumber`、`W3_OAUTH2_EMAIL_FIELD=email`，并提供以下安全默认值，通常不修改：`W3_OAUTH2_FRONTEND_CALLBACK_URL=/login`、`W3_OAUTH2_USE_PKCE=True`。模板不含本地登录开关；`tenantId`、`uuid`、`globalUserID` 当前不参与账号匹配，也不落库。客户端密钥不得出现在对话、日志或截图中。
 
-检测到已有同项目容器或数据卷时，脚本不会替换缺失/占位的三项密钥。升级或灾后重建必须恢复原 `.env`；擅自生成新值可能导致 PostgreSQL 无法连接，并使既有 AI 连接密文无法解密。
+检测到已有同项目容器或数据卷时，脚本不会替换已有安全密钥；`DJANGO_SECRET_KEY`、`POSTGRES_PASSWORD` 或 `RESTIC_PASSWORD` 缺失/仍为占位值时必须恢复原 `.env`。旧环境仅缺新增的 `USAGE_METRICS_TOKEN` 时，脚本会补齐该项且不修改其它密钥。
 
 部署脚本会先显示部署前检查菜单；若检测到同项目已有容器，会说明升级会保留数据卷与配置并让操作者选择升级、仅查看状态或取消。
 
@@ -133,6 +134,14 @@ bash skills/smart-resume-offline-deploy/scripts/verify.sh
 ```
 
 成功条件：`db`、`redis`、`backend`、`worker`、`ai-worker`、`frontend`、`backup-scheduler` 均处于运行状态；`worker` 只消费 `default`，`ai-worker` 以 threads 池消费 `ai` 队列，备份调度默认每小时执行。backend 的 `manage.py check` 通过，frontend 的 `nginx -t` 通过。生产环境还必须从客户端网络访问 `https://生产域名/` 和 `https://生产域名/api/auth/w3/status/`，确认使用有效证书、HTTP 自动跳转 HTTPS、响应经过 frontend 且 W3 状态就绪；仅验证 `http://服务器IP:5173` 不视为生产验收完成。
+
+通过安全方式把监控密钥注入当前 shell 后，可做 Grafana 查询接口的最小验证：
+
+```bash
+curl --fail --silent --show-error \
+  -H "X-Usage-Metrics-Key: ${USAGE_METRICS_TOKEN}" \
+  "https://resume.example.com/api/analytics/usage/overview/?granularity=day"
+```
 
 ## 卸载
 

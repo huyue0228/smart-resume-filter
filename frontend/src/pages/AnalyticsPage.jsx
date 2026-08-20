@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { PageContainer } from '@ant-design/pro-components'
 import {
   Alert,
@@ -35,6 +36,7 @@ import {
   DoughnutChartCard,
   HorizontalBarChartCard,
 } from './analytics/DashboardCharts'
+import { buildAnalyticsDrilldownLocation } from './analytics/drilldown'
 import './AnalyticsPage.css'
 
 const numberFormatter = new Intl.NumberFormat('zh-CN')
@@ -73,30 +75,84 @@ function FilterField({ label, className = '', children }) {
   )
 }
 
-function MetricCard({ title, value, icon, tone, rate, detail }) {
-  return (
-    <Card className={`analytics-metric-card analytics-metric-card--${tone}`}>
-      <span className="analytics-metric-icon" aria-hidden="true">{icon}</span>
+function activateOnKeyboard(event, action) {
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault()
+    action?.()
+  }
+}
+
+function MetricCard({
+  title,
+  value,
+  icon,
+  tone,
+  rate,
+  detail,
+  detailActions = [],
+  onDrilldown,
+}) {
+  const metricContent = (
+    <>
       <Typography.Text className="analytics-metric-label">{title}</Typography.Text>
       <strong className="analytics-metric-value">{formatCount(value)}</strong>
+    </>
+  )
+  return (
+    <Card
+      className={`analytics-metric-card analytics-metric-card--${tone}${onDrilldown ? ' analytics-metric-card--clickable' : ''}`}
+    >
+      <span className="analytics-metric-icon" aria-hidden="true">{icon}</span>
+      {onDrilldown ? (
+        <button
+          type="button"
+          className="analytics-metric-main"
+          aria-label={`${title}，查看对应简历`}
+          onClick={onDrilldown}
+        >
+          {metricContent}
+        </button>
+      ) : <div className="analytics-metric-main">{metricContent}</div>}
       <div className="analytics-metric-footer">
         {rate == null ? null : <Tag bordered={false}>{formatRate(rate)}</Tag>}
-        <span>{detail}</span>
+        {detailActions.length ? detailActions.map((action) => (
+          <Button
+            type="link"
+            size="small"
+            key={action.label}
+            onClick={(event) => {
+              event.stopPropagation()
+              action.onClick?.()
+            }}
+          >
+            {action.label}
+          </Button>
+        )) : <span>{detail}</span>}
       </div>
     </Card>
   )
 }
 
-function EfficiencyStrip({ values = {} }) {
+function EfficiencyStrip({ values = {}, onItemClick }) {
   const items = [
-    ['导入至分配', values.to_allocation, DeploymentUnitOutlined],
-    ['导入至下发', values.to_dispatch, SendOutlined],
-    ['导入至反馈', values.to_feedback, CommentOutlined],
+    ['导入至分配', values.to_allocation, DeploymentUnitOutlined, 'allocated'],
+    ['导入至下发', values.to_dispatch, SendOutlined, 'dispatched'],
+    ['导入至反馈', values.to_feedback, CommentOutlined, 'feedback'],
   ]
   return (
     <Card className="analytics-efficiency-strip">
-      {items.map(([label, value, Icon]) => (
-        <div className="analytics-efficiency-item" key={label}>
+      {items.map(([label, value, Icon, dimension]) => (
+        <div
+          className={`analytics-efficiency-item${onItemClick ? ' analytics-efficiency-item--clickable' : ''}`}
+          key={label}
+          role={onItemClick ? 'link' : undefined}
+          tabIndex={onItemClick ? 0 : undefined}
+          aria-label={onItemClick ? `${label}，查看参与统计的简历` : undefined}
+          onClick={onItemClick ? () => onItemClick(dimension, label) : undefined}
+          onKeyDown={onItemClick
+            ? (event) => activateOnKeyboard(event, () => onItemClick(dimension, label))
+            : undefined}
+        >
           <span className="analytics-efficiency-icon"><Icon /></span>
           <div>
             <Typography.Text type="secondary">{label}</Typography.Text>
@@ -110,6 +166,7 @@ function EfficiencyStrip({ values = {} }) {
 }
 
 export default function AnalyticsPage() {
+  const navigate = useNavigate()
   const { hasPermission } = useRole()
   const [loading, setLoading] = useState(true)
   const [reportExporting, setReportExporting] = useState(false)
@@ -136,9 +193,27 @@ export default function AnalyticsPage() {
   }, [load])
 
   const options = data?.filter_options || {}
+  const canDrilldown = hasPermission('resume.view')
+  const secondaryDepartmentOptions = useMemo(() => {
+    const departments = options.departments || []
+    if (!filters.primary_department_id) return departments
+    return departments.filter(
+      (department) => department.parent_id === filters.primary_department_id,
+    )
+  }, [filters.primary_department_id, options.departments])
   const activeRange = data?.filters
     ? `${data.filters.date_from} 至 ${data.filters.date_to}`
     : '最近 30 天'
+  const openDrilldown = useCallback((dimension, row, title) => {
+    if (!canDrilldown || !data?.filters) return
+    navigate(buildAnalyticsDrilldownLocation({
+      filters: data.filters,
+      options: data.filter_options,
+      dimension,
+      row,
+      title,
+    }))
+  }, [canDrilldown, data?.filter_options, data?.filters, navigate])
   const asOf = useMemo(() => {
     if (!data?.data_as_of) return '-'
     return new Date(data.data_as_of).toLocaleString('zh-CN', { hour12: false })
@@ -158,6 +233,9 @@ export default function AnalyticsPage() {
       const params = {
         imported_after: activeFilters.date_from,
         imported_before: activeFilters.date_to,
+      }
+      if (activeFilters.primary_department_id) {
+        params.primary_department_id = activeFilters.primary_department_id
       }
       if (activeFilters.department_id) params.department_id = activeFilters.department_id
       const response = await exportResumeResultReport(params)
@@ -238,14 +316,39 @@ export default function AnalyticsPage() {
                       }}
                     />
                   </FilterField>
+                  <FilterField label="一级部门">
+                    <Select
+                      allowClear
+                      value={filters.primary_department_id}
+                      showSearch
+                      optionFilterProp="label"
+                      placeholder="全部一级部门"
+                      options={options.primary_departments || []}
+                      onChange={(value) => setFilters((current) => {
+                        const selectedSecondary = (options.departments || []).find(
+                          (department) => department.value === current.department_id,
+                        )
+                        return {
+                          ...current,
+                          primary_department_id: value,
+                          department_id: (
+                            value
+                            && selectedSecondary?.parent_id !== value
+                              ? undefined
+                              : current.department_id
+                          ),
+                        }
+                      })}
+                    />
+                  </FilterField>
                   <FilterField label="二级部门">
                     <Select
                       allowClear
                       value={filters.department_id}
                       showSearch
                       optionFilterProp="label"
-                      placeholder="全部部门"
-                      options={options.departments || []}
+                      placeholder="全部二级部门"
+                      options={secondaryDepartmentOptions}
                       onChange={(value) => setFilters((current) => ({ ...current, department_id: value }))}
                     />
                   </FilterField>
@@ -266,7 +369,18 @@ export default function AnalyticsPage() {
                   value={summary.candidate_count}
                   icon={<TeamOutlined />}
                   tone="primary"
+                  detailActions={canDrilldown ? [
+                    {
+                      label: `投递 ${formatCount(summary.resume_count)}`,
+                      onClick: () => openDrilldown('candidate', null, '投递对应候选人'),
+                    },
+                    {
+                      label: `已分类 ${formatCount(summary.classified_count)}`,
+                      onClick: () => openDrilldown('classified', null, '已分类'),
+                    },
+                  ] : []}
                   detail={`投递 ${formatCount(summary.resume_count)} · 已分类 ${formatCount(summary.classified_count)}`}
+                  onDrilldown={canDrilldown ? () => openDrilldown('candidate', null, '候选人数') : undefined}
                 />
                 <MetricCard
                   title="已生成分配"
@@ -275,6 +389,7 @@ export default function AnalyticsPage() {
                   tone="violet"
                   rate={conversion.allocated_rate}
                   detail="候选人分配转化率"
+                  onDrilldown={canDrilldown ? () => openDrilldown('allocated', null, '已生成分配') : undefined}
                 />
                 <MetricCard
                   title="已下发"
@@ -283,6 +398,7 @@ export default function AnalyticsPage() {
                   tone="cyan"
                   rate={conversion.dispatched_rate}
                   detail="候选人下发转化率"
+                  onDrilldown={canDrilldown ? () => openDrilldown('dispatched', null, '已下发') : undefined}
                 />
                 <MetricCard
                   title="已反馈"
@@ -291,6 +407,7 @@ export default function AnalyticsPage() {
                   tone="warning"
                   rate={conversion.feedback_rate}
                   detail="候选人反馈转化率"
+                  onDrilldown={canDrilldown ? () => openDrilldown('feedback', null, '已反馈') : undefined}
                 />
                 <MetricCard
                   title="已通过"
@@ -298,7 +415,12 @@ export default function AnalyticsPage() {
                   icon={<CheckCircleOutlined />}
                   tone="success"
                   rate={conversion.passed_rate}
+                  detailActions={canDrilldown ? [{
+                    label: `已归档 ${formatCount(summary.archived_count)}`,
+                    onClick: () => openDrilldown('archived', null, '已归档'),
+                  }] : []}
                   detail={`已归档 ${formatCount(summary.archived_count)}`}
+                  onDrilldown={canDrilldown ? () => openDrilldown('passed', null, '已通过') : undefined}
                 />
               </div>
             </section>
@@ -307,40 +429,79 @@ export default function AnalyticsPage() {
               <SectionHeading title="招聘概览" description="分配来源、流程转化与 AI 建议构成" />
               <Row gutter={[16, 16]} className="analytics-equal-row">
                 <Col xs={24} xl={7}>
-                  <DoughnutChartCard title="分配来源" rows={data.source_distribution} />
+                  <DoughnutChartCard
+                    title="分配来源"
+                    rows={data.source_distribution}
+                    onRowClick={canDrilldown ? (row) => openDrilldown('source', row, '分配来源') : undefined}
+                  />
                 </Col>
                 <Col xs={24} xl={10}>
                   <HorizontalBarChartCard
                     title="招聘流程"
                     rows={pipelineRows}
                     palette="pipeline"
+                    onRowClick={canDrilldown
+                      ? (row) => openDrilldown(row.key === 'candidate' ? 'candidate' : row.key, row, '招聘流程')
+                      : undefined}
                   />
                 </Col>
                 <Col xs={24} xl={7}>
-                  <DoughnutChartCard title="AI 建议分布" rows={data.ai_recommendation_distribution} />
+                  <DoughnutChartCard
+                    title="AI 建议分布"
+                    rows={data.ai_recommendation_distribution}
+                    onRowClick={canDrilldown ? (row) => openDrilldown('ai_recommendation', row, 'AI 建议分布') : undefined}
+                  />
                 </Col>
               </Row>
             </section>
 
             <section>
               <SectionHeading title="处理效率" description="候选人从导入到关键阶段的平均耗时" />
-              <EfficiencyStrip values={data.average_hours} />
+              <EfficiencyStrip
+                values={data.average_hours}
+                onItemClick={canDrilldown
+                  ? (dimension, label) => openDrilldown(dimension, null, label)
+                  : undefined}
+              />
             </section>
 
             <section>
               <SectionHeading title="岗位与人才结构" description="识别需求集中度和候选人结构分布" />
               <Row gutter={[16, 16]} className="analytics-equal-row">
-                <Col xs={24} lg={12}>
-                  <HorizontalBarChartCard title="岗位排行" rows={data.job_ranking} />
+                <Col xs={24} xl={8}>
+                  <HorizontalBarChartCard
+                    title="岗位排行"
+                    rows={data.job_ranking}
+                    onRowClick={canDrilldown ? (row) => openDrilldown('job', row, '岗位排行') : undefined}
+                  />
+                </Col>
+                <Col xs={24} xl={8}>
+                  <HorizontalBarChartCard
+                    title="一级部门排行"
+                    rows={data.primary_department_ranking}
+                    onRowClick={canDrilldown ? (row) => openDrilldown('primary_department', row, '一级部门排行') : undefined}
+                  />
+                </Col>
+                <Col xs={24} xl={8}>
+                  <HorizontalBarChartCard
+                    title="二级部门排行"
+                    rows={data.department_ranking}
+                    onRowClick={canDrilldown ? (row) => openDrilldown('department', row, '二级部门排行') : undefined}
+                  />
                 </Col>
                 <Col xs={24} lg={12}>
-                  <HorizontalBarChartCard title="二级部门排行" rows={data.department_ranking} />
+                  <DoughnutChartCard
+                    title="院校标签"
+                    rows={data.school_tag_ranking}
+                    onRowClick={canDrilldown ? (row) => openDrilldown('school_tag', row, '院校标签') : undefined}
+                  />
                 </Col>
                 <Col xs={24} lg={12}>
-                  <DoughnutChartCard title="院校标签" rows={data.school_tag_ranking} />
-                </Col>
-                <Col xs={24} lg={12}>
-                  <DoughnutChartCard title="最高学历" rows={data.education_distribution} />
+                  <DoughnutChartCard
+                    title="最高学历"
+                    rows={data.education_distribution}
+                    onRowClick={canDrilldown ? (row) => openDrilldown('education', row, '最高学历') : undefined}
+                  />
                 </Col>
               </Row>
             </section>
@@ -353,13 +514,22 @@ export default function AnalyticsPage() {
                     title="AI 错误码"
                     rows={data.ai_error_distribution}
                     successWhenEmpty
+                    onRowClick={canDrilldown ? (row) => openDrilldown('ai_error', row, 'AI 错误码') : undefined}
                   />
                 </Col>
                 <Col xs={24} xl={8}>
-                  <DoughnutChartCard title="归档原因" rows={data.archive_reason_distribution} />
+                  <DoughnutChartCard
+                    title="归档原因"
+                    rows={data.archive_reason_distribution}
+                    onRowClick={canDrilldown ? (row) => openDrilldown('archive_reason', row, '归档原因') : undefined}
+                  />
                 </Col>
                 <Col xs={24} xl={8}>
-                  <DoughnutChartCard title="未通过原因" rows={data.rejection_reason_distribution} />
+                  <DoughnutChartCard
+                    title="未通过原因"
+                    rows={data.rejection_reason_distribution}
+                    onRowClick={canDrilldown ? (row) => openDrilldown('rejection_reason', row, '未通过原因') : undefined}
+                  />
                 </Col>
               </Row>
             </section>

@@ -6,6 +6,7 @@ import ResumesPage from './ResumesPage'
 import {
   exportAllocations,
   exportCandidates,
+  fetchCandidates,
   fetchCandidateExportFields,
   fetchCandidateFilterOptions,
   bulkDispatchCandidates,
@@ -274,10 +275,11 @@ describe('ResumesPage detail', () => {
     fetchCandidateExportFields.mockResolvedValue({ data: exportCatalog })
     exportCandidates.mockReset()
     exportCandidates.mockResolvedValue({
-      data: new Blob(['zip']),
+      data: new Blob(['xlsx']),
       headers: {
-        'x-export-count': '3',
-        'x-export-missing': '1',
+        'x-export-mode': 'excel',
+        'x-export-count': '0',
+        'x-export-missing': '0',
         'x-export-candidate-count': '2',
       },
     })
@@ -285,6 +287,7 @@ describe('ResumesPage detail', () => {
     exportAllocations.mockResolvedValue({
       data: new Blob(['zip']),
       headers: {
+        'x-export-mode': 'zip',
         'x-export-count': '1',
         'x-export-missing': '0',
         'x-export-candidate-count': '1',
@@ -297,6 +300,8 @@ describe('ResumesPage detail', () => {
     bulkDispatchCandidates.mockResolvedValue({
       data: { detail: '已下发 2 条，跳过 0 条，失败 0 条' },
     })
+    fetchCandidates.mockReset()
+    fetchCandidates.mockResolvedValue({ data: { count: 0, results: [] } })
   })
 
   it('removes detail filters and switches preview by volunteer row', async () => {
@@ -527,7 +532,45 @@ describe('ResumesPage detail', () => {
     expect(screen.getByTestId('table-candidates').dataset.params).toBe('{}')
   })
 
-  it('opens the field chooser for selected candidate export and submits fields with statistics', async () => {
+  it('restores dashboard drilldown parameters and exposes the active scope', async () => {
+    const query = new URLSearchParams({
+      analytics_date_from: '2026-06-17',
+      analytics_date_to: '2026-07-16',
+      analytics_primary_department_id: '10',
+      analytics_dimension: 'source',
+      analytics_values: JSON.stringify(['rule']),
+      analytics_value_labels: JSON.stringify(['规则分配']),
+      analytics_title: '分配来源 · 规则分配',
+      analytics_context: '导入时间 2026-06-17 至 2026-07-16；一级部门 科技中心',
+    }).toString()
+    render(
+      <MemoryRouter initialEntries={[`/resumes?${query}`]}>
+        <ResumesPage />
+      </MemoryRouter>,
+    )
+
+    expect(screen.getByText('看板下钻：分配来源 · 规则分配')).toBeTruthy()
+    expect(screen.getByText(/一级部门 科技中心/)).toBeTruthy()
+    expect(JSON.parse(screen.getByTestId('table-candidates').dataset.params)).toEqual({
+      analytics_date_from: '2026-06-17',
+      analytics_date_to: '2026-07-16',
+      analytics_primary_department_id: '10',
+      analytics_dimension: 'source',
+      analytics_values: '["rule"]',
+      analytics_value_labels: '["规则分配"]',
+    })
+
+    await userEvent.click(screen.getByRole('button', { name: '加载候选人' }))
+    expect(fetchCandidates).toHaveBeenCalledWith(expect.objectContaining({
+      analytics_dimension: 'source',
+      analytics_values: '["rule"]',
+      analytics_primary_department_id: '10',
+      name: '张三',
+      system_status: 'raw',
+    }))
+  })
+
+  it('exports selected candidates as an Excel list by default', async () => {
     roleState.permissions = new Set(['resume.view'])
     const user = userEvent.setup()
     render(<MemoryRouter><ResumesPage /></MemoryRouter>)
@@ -539,16 +582,17 @@ describe('ResumesPage detail', () => {
     expect(exportCandidates).not.toHaveBeenCalled()
 
     await user.click(screen.getByRole('checkbox', { name: '手机号' }))
-    await user.click(screen.getByRole('button', { name: '导出 ZIP' }))
+    await user.click(screen.getByRole('button', { name: '导出 Excel' }))
 
     await waitFor(() => expect(exportCandidates).toHaveBeenCalledWith([1, 2], {
       fields: 'candidate_name,current_apply_id',
+      include_resume_files: false,
     }))
     expect(downloadBlobFromResponse).toHaveBeenCalledWith(
       expect.objectContaining({ headers: expect.objectContaining({ 'x-export-candidate-count': '2' }) }),
-      '简历导出.zip',
+      '简历库清单.xlsx',
     )
-    expect(await screen.findByText(/已导出 2 名候选人，包含 3 份简历，1 份缺文件/)).toBeTruthy()
+    expect(await screen.findByText(/已导出 2 名候选人的 Excel 清单/)).toBeTruthy()
   })
 
   it('keeps dispatch in the toolbar and freezes selected candidate ids', async () => {
@@ -576,12 +620,13 @@ describe('ResumesPage detail', () => {
     await user.click(screen.getByRole('button', { name: '选择两名候选人' }))
     await user.click(screen.getByRole('button', { name: /导出当前筛选/ }))
     await screen.findByRole('checkbox', { name: '姓名' })
-    await user.click(screen.getByRole('button', { name: '导出 ZIP' }))
+    await user.click(screen.getByRole('button', { name: '导出 Excel' }))
 
     await waitFor(() => expect(exportCandidates).toHaveBeenCalledWith(null, {
       name: '张三',
       system_status: 'raw',
       fields: 'candidate_name,candidate_phone,current_apply_id',
+      include_resume_files: false,
     }))
   })
 
@@ -594,12 +639,13 @@ describe('ResumesPage detail', () => {
     await user.click(screen.getByRole('button', { name: '选择两名候选人' }))
     await user.click(screen.getByRole('button', { name: /导出当前筛选/ }))
     await screen.findByRole('checkbox', { name: '姓名' })
-    await user.click(screen.getByRole('button', { name: '导出 ZIP' }))
+    await user.click(screen.getByRole('button', { name: '导出 Excel' }))
 
     await waitFor(() => expect(exportCandidates).toHaveBeenCalledWith(null, {
       current_apply_date_from: '2026-07-01',
       current_apply_date_to: '2026-07-31',
       fields: 'candidate_name,candidate_phone,current_apply_id',
+      include_resume_files: false,
     }))
   })
 
@@ -619,10 +665,17 @@ describe('ResumesPage detail', () => {
     await user.click(screen.getByRole('button', { name: '打开候选人' }))
     await user.click(screen.getByRole('button', { name: /导出$/ }))
     await screen.findByRole('checkbox', { name: '姓名' })
+    await user.click(screen.getByRole('checkbox', { name: '同时下载简历原件' }))
     await user.click(screen.getByRole('button', { name: '导出 ZIP' }))
 
     await waitFor(() => expect(exportAllocations).toHaveBeenCalledWith([31], {
       fields: 'candidate_name,candidate_phone,current_apply_id',
+      include_resume_files: true,
     }))
+    expect(downloadBlobFromResponse).toHaveBeenCalledWith(
+      expect.objectContaining({ headers: expect.objectContaining({ 'x-export-mode': 'zip' }) }),
+      '简历导出.zip',
+    )
+    expect(await screen.findByText(/已导出 1 名候选人，包含 1 份简历/)).toBeTruthy()
   })
 })

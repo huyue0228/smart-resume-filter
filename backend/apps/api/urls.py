@@ -1,7 +1,7 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
-from . import analytics, views
+from . import analytics, usage_analytics, views
 
 router = DefaultRouter()
 router.register("resumes", views.ResumeViewSet, basename="resume")
@@ -67,6 +67,14 @@ urlpatterns = [
     path(
         "analytics/recruitment-overview/",
         analytics.RecruitmentOverviewView.as_view(),
+    ),
+    path(
+        "analytics/usage/page-view/",
+        usage_analytics.UsagePageViewCreateView.as_view(),
+    ),
+    path(
+        "analytics/usage/overview/",
+        usage_analytics.UsageOverviewView.as_view(),
     ),
     path("", include(router.urls)),
 ]

@@ -136,6 +136,10 @@ class ExportFieldError(ValueError):
     pass
 
 
+class ExportOptionError(ValueError):
+    pass
+
+
 def export_fields_payload():
     return {"version": EXPORT_FIELDS_VERSION, "groups": EXPORT_FIELD_GROUPS}
 
@@ -153,6 +157,18 @@ def parse_export_fields(params):
         raise ExportFieldError(f"存在未知导出字段：{','.join(unknown)}")
     requested_set = set(requested)
     return [key for key in FIELD_ORDER if key in requested_set]
+
+
+def parse_include_resume_files(params):
+    """解析原件导出开关；缺失时兼容旧客户端，继续导出 ZIP。"""
+    if "include_resume_files" not in params:
+        return True
+    raw = str(params.get("include_resume_files", "")).strip().lower()
+    if raw in {"true", "1"}:
+        return True
+    if raw in {"false", "0"}:
+        return False
+    raise ExportOptionError("include_resume_files 必须是 true 或 false")
 
 
 @dataclass
@@ -359,7 +375,7 @@ def _record_values(record):
     }
 
 
-def _build_workbook(records, field_keys):
+def build_resume_export_workbook(records, field_keys):
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "简历库"
@@ -404,6 +420,11 @@ def _deduplicated_records(records):
     return list(deduplicated.values())
 
 
+def build_resume_export_excel(records, field_keys):
+    records = _deduplicated_records(records)
+    return build_resume_export_workbook(records, field_keys), len(records)
+
+
 def build_resume_export_zip(records, field_keys):
     records = _deduplicated_records(records)
     file_resumes = []
@@ -425,7 +446,10 @@ def build_resume_export_zip(records, field_keys):
 
     output = BytesIO()
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("简历库清单.xlsx", _build_workbook(records, field_keys))
+        archive.writestr(
+            "简历库清单.xlsx",
+            build_resume_export_workbook(records, field_keys),
+        )
         archive.writestr("简历文件/", b"")
         used_names = set()
         filename_counts = {}

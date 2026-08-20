@@ -22,6 +22,8 @@ ENV_FILE="${ENV_FILE:-.env}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}"
 IMAGE_TAR="${IMAGE_TAR:-smart-resume-filter-images-amd64.tar}"
 DEPLOY_MODE="${DEPLOY_MODE:-auto}"
+PERSISTENT_SECRET_KEYS=(DJANGO_SECRET_KEY POSTGRES_PASSWORD RESTIC_PASSWORD)
+GENERATED_SECRET_KEYS=("${PERSISTENT_SECRET_KEYS[@]}" USAGE_METRICS_TOKEN)
 
 compose() {
   docker compose --project-name "$PROJECT_NAME" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
@@ -106,7 +108,7 @@ has_existing_resources() {
 
 needs_secret_generation() {
   local key value
-  for key in DJANGO_SECRET_KEY POSTGRES_PASSWORD RESTIC_PASSWORD; do
+  for key in "${GENERATED_SECRET_KEYS[@]}"; do
     value="$(env_value "$key")"
     if is_placeholder_value "$value"; then
       return 0
@@ -116,21 +118,27 @@ needs_secret_generation() {
 }
 
 initialize_secret_values() {
-  local key value
+  local key value generated_count=0
   needs_secret_generation || return 0
   if has_existing_resources; then
-    echo "检测到已有容器或数据卷，但 ${ENV_FILE} 缺少原部署密钥。"
-    echo "为避免数据库失联或 AI 连接密文无法解密，脚本不会生成新密钥；请恢复原 ${ENV_FILE}。"
-    exit 1
+    for key in "${PERSISTENT_SECRET_KEYS[@]}"; do
+      value="$(env_value "$key")"
+      if is_placeholder_value "$value"; then
+        echo "检测到已有容器或数据卷，但 ${ENV_FILE} 缺少原部署密钥。"
+        echo "为避免数据库失联或 AI 连接密文无法解密，脚本不会生成新密钥；请恢复原 ${ENV_FILE}。"
+        exit 1
+      fi
+    done
   fi
-  for key in DJANGO_SECRET_KEY POSTGRES_PASSWORD RESTIC_PASSWORD; do
+  for key in "${GENERATED_SECRET_KEYS[@]}"; do
     value="$(env_value "$key")"
     if is_placeholder_value "$value"; then
       set_env_value "$key" "$(generate_random_secret)"
+      ((generated_count += 1))
     fi
   done
   chmod 600 "$ENV_FILE"
-  echo "已在 ${ENV_FILE} 自动生成 Django、PostgreSQL 和 restic 三项独立随机密钥（内容不回显）。"
+  echo "已在 ${ENV_FILE} 自动补齐 ${generated_count} 项独立随机密钥（内容不回显，已有安全值未更改）。"
 }
 
 require_value() {
@@ -193,7 +201,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
   cp .env.example "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   initialize_secret_values
-  echo "已创建 ${ENV_FILE}。静态运行参数已预置，三项密钥已自动生成。"
+  echo "已创建 ${ENV_FILE}。静态运行参数已预置，四项密钥已自动生成。"
   echo "请确认 DJANGO_ALLOWED_HOSTS、生产域名 DNS/证书/HTTPS 反向代理，并确保 BACKUP_TARGET_PATH 对应的外置/异机存储已挂载。"
   echo "前端仅支持 W3 登录。请补齐 OAuth2 必填项并设置 W3_OAUTH2_ENABLED=True；下次执行会在 Docker 变更前校验且不显示密钥。"
   echo "OAuth2 必填键：CLIENT_ID、AUTHORIZE_URL、TOKEN_URL、USERINFO_URL、REDIRECT_URI、EMPLOYEE_NO_FIELD、EMAIL_FIELD、CLIENT_AUTH_METHOD、TIMEOUT_SECONDS、TRANSACTION_TTL_SECONDS（均使用 W3_OAUTH2_ 前缀）。"
@@ -204,6 +212,7 @@ fi
 chmod 600 "$ENV_FILE"
 initialize_secret_values
 require_value DJANGO_SECRET_KEY
+require_value USAGE_METRICS_TOKEN
 require_value DJANGO_ALLOWED_HOSTS
 require_value POSTGRES_PASSWORD
 require_value RESTIC_PASSWORD
