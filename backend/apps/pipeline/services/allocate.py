@@ -23,8 +23,7 @@ from .job_mapping import JobMappingError, resolve_job_pool
 UNFEEDBACKED_STATUSES = [
     m.AssignmentAttempt.STATUS_PENDING_REVIEW,
     m.AssignmentAttempt.STATUS_PENDING_DISPATCH,
-    m.AssignmentAttempt.STATUS_DISPATCHED_L2,
-    m.AssignmentAttempt.STATUS_ASSIGNED_L3,
+    m.AssignmentAttempt.STATUS_DISPATCHED,
 ]
 
 RESULT_COMPLETED = m.ProcessingRunScopeItem.RESULT_COMPLETED
@@ -50,6 +49,10 @@ AI_ATTENTION_REASON_CODES = {
     "job_responsibility_missing": "job_responsibility_missing",
     "task_execution_error": "ai_connection_error",
 }
+
+
+class AttemptStateChanged(ValueError):
+    """写入时发现分配尝试已被其他操作处理，API 应映射为 409。"""
 
 
 def _scope_result(item, *, status, result_type, reason_code="", message=""):
@@ -214,6 +217,14 @@ def _cancel_unfeedbacked_attempts(workflow, reason, source=None, sources=None):
                 "updated_at",
             ]
         )
+        _record_handling_event(
+            attempt,
+            m.AssignmentHandlingEvent.EVENT_CANCELLED,
+            from_department=attempt.current_department,
+            note=reason,
+            is_system_auto=True,
+            metadata={"cancel_reason": reason},
+        )
     return len(attempts)
 
 
@@ -302,18 +313,6 @@ def _next_attempt_no(workflow):
     return max_no + 1
 
 
-def _first_secondary_contact(department):
-    return (
-        m.Contact.objects.filter(
-            department=department,
-            contact_level=m.Contact.LEVEL_SECONDARY,
-            is_active=True,
-        )
-        .order_by("id")
-        .first()
-    )
-
-
 def _mapped_job_pool(resume, *, mode):
     jobs_query = (
         m.Job.objects.select_related("department", "department__parent")
@@ -342,28 +341,10 @@ def _targetable_job_pool(resume, *, mode):
             "secondary_department_missing",
             f"已映射内部职位“{mapping['internal_name']}”，但未配置有效二级部门岗位",
         )
-    contacts = {}
-    targetable = []
-    for job in jobs_with_departments:
-        contact = _first_secondary_contact(_secondary_department(job.department))
-        if contact:
-            targetable.append(job)
-            contacts[job.id] = contact
-    if not targetable:
-        department_names = "、".join(
-            sorted(
-                {
-                    _secondary_department(job.department).name
-                    for job in jobs_with_departments
-                }
-            )
-        )
-        raise JobMappingError(
-            "secondary_contact_missing",
-            f"已映射内部职位“{mapping['internal_name']}”，但二级部门“{department_names}”"
-            "没有启用的二级接口人",
-        )
-    return targetable, contacts, mapping
+    departments = {
+        job.id: _secondary_department(job.department) for job in jobs_with_departments
+    }
+    return jobs_with_departments, departments, mapping
 
 
 def _select_job_capacity(processing_run, jobs, *, reserve):
@@ -430,29 +411,22 @@ def _archive_reason_for_mapping_code(code):
     return m.CandidateWorkflow.ARCHIVE_JOB_NOT_MATCHED
 
 
-def _assert_tertiary_contact(sub_contact, secondary_department):
-    if not sub_contact or sub_contact.contact_level != m.Contact.LEVEL_TERTIARY:
-        raise ValueError("目标三级接口人不存在")
-    if not sub_contact.is_active:
-        raise ValueError("目标三级接口人未启用")
-    if not sub_contact.department or sub_contact.department.parent_id != secondary_department.id:
-        raise ValueError("三级接口人不属于当前二级部门")
+def _secondary_target_department(department):
+    if not department:
+        raise ValueError("目标部门不存在")
+    if department.level == 2:
+        return department
+    if department.level == 3 and department.parent_id and department.parent.level == 2:
+        return department.parent
+    raise ValueError("目标部门必须是二级部门或其下属三级部门")
 
 
 def _set_snapshots(attempt):
-    attempt.department_name_snapshot = attempt.department.name if attempt.department else ""
-    attempt.contact_name_snapshot = attempt.contact.name if attempt.contact else ""
-    attempt.contact_employee_no_snapshot = (
-        attempt.contact.employee_no if attempt.contact else ""
+    attempt.initial_department_name_snapshot = (
+        attempt.initial_department.name if attempt.initial_department else ""
     )
-    attempt.sub_department_name_snapshot = (
-        attempt.sub_department.name if attempt.sub_department else ""
-    )
-    attempt.sub_contact_name_snapshot = (
-        attempt.sub_contact.name if attempt.sub_contact else ""
-    )
-    attempt.sub_contact_employee_no_snapshot = (
-        attempt.sub_contact.employee_no if attempt.sub_contact else ""
+    attempt.current_department_name_snapshot = (
+        attempt.current_department.name if attempt.current_department else ""
     )
     attempt.resume_apply_id_snapshot = attempt.resume.apply_id
     attempt.position_name_snapshot = attempt.resume.position_name
@@ -461,41 +435,72 @@ def _set_snapshots(attempt):
     )
 
 
-def _create_handoff(
-    *,
+def _record_handling_event(
     attempt,
-    action,
-    to_contact,
+    event_type,
+    *,
+    from_department=None,
     to_department=None,
-    from_contact=None,
     note="",
-    created_by=None,
+    user=None,
+    batch_operation_id=None,
+    is_system_auto=False,
+    metadata=None,
 ):
-    actual_to_department = to_department or (to_contact.department if to_contact else None)
-    actual_created_by = (
-        created_by if getattr(created_by, "is_authenticated", False) else None
-    )
-    return m.AssignmentHandoff.objects.create(
+    actor = user if getattr(user, "is_authenticated", False) else None
+    return m.AssignmentHandlingEvent.objects.create(
         attempt=attempt,
-        action=action,
-        from_contact=from_contact,
-        to_department=actual_to_department,
-        to_contact=to_contact,
-        from_contact_name_snapshot=from_contact.name if from_contact else "",
-        from_contact_employee_no_snapshot=(
-            from_contact.employee_no if from_contact else ""
-        ),
-        to_department_name_snapshot=(
-            actual_to_department.name if actual_to_department else ""
-        ),
-        to_contact_name_snapshot=to_contact.name if to_contact else "",
-        to_contact_employee_no_snapshot=to_contact.employee_no if to_contact else "",
+        event_type=event_type,
+        from_department=from_department,
+        to_department=to_department,
+        from_department_name_snapshot=from_department.name if from_department else "",
+        to_department_name_snapshot=to_department.name if to_department else "",
         note=note,
-        created_by=actual_created_by,
-        created_by_username_snapshot=actual_created_by.username
-        if actual_created_by
-        else "",
+        actor=actor,
+        actor_username_snapshot=actor.username if actor else "",
+        batch_operation_id=batch_operation_id,
+        is_system_auto=is_system_auto,
+        metadata=metadata or {},
     )
+
+
+def _department_notification_metadata(department):
+    """解析目标部门收件人；当前 WeLink 仍为占位集成，不阻断业务状态。"""
+
+    raw_enabled = m.Config.objects.filter(key="welink_enabled").values_list(
+        "value", flat=True
+    ).first()
+    if isinstance(raw_enabled, dict):
+        raw_enabled = raw_enabled.get("value")
+    enabled = raw_enabled is True or str(raw_enabled or "").strip().casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    recipients = list(
+        m.Contact.objects.filter(department=department, is_active=True)
+        .order_by("id")
+        .values("id", "employee_no")
+    )
+    if not enabled:
+        status, skipped_reason = "skipped", "welink_disabled"
+    elif not recipients:
+        status, skipped_reason = "skipped", "no_active_recipient"
+    else:
+        # 仓库尚无 WeLink 发送客户端；先固化完整收件人与占位结果。
+        status, skipped_reason = "stubbed", "welink_sender_not_configured"
+    return {
+        "welink": {
+            "enabled": enabled,
+            "recipient_count": len(recipients),
+            "recipient_ids": [item["id"] for item in recipients],
+            "recipient_employee_nos": [item["employee_no"] for item in recipients],
+            "delivery_status": status,
+            "skipped_reason": skipped_reason,
+            "error": "",
+        }
+    }
 
 
 def _touch_workflow(workflow, resume, mode):
@@ -529,14 +534,14 @@ def _create_attempt(
     *,
     workflow,
     resume,
-    contact,
+    initial_department,
+    current_department=None,
     source,
     mode,
     matched_rule=None,
     match_reason="",
     manual_reason="",
     created_by=None,
-    sub_contact=None,
     agent_decision=None,
     confidence_score=None,
     review_required=False,
@@ -548,7 +553,12 @@ def _create_attempt(
     capacity_reservation=None,
 ):
     now = timezone.now()
-    sub_department = sub_contact.department if sub_contact else None
+    initial_department = _secondary_target_department(initial_department)
+    current_department = current_department or initial_department
+    current_parent = _secondary_target_department(current_department)
+    if current_department.level == 3 and current_parent.id != initial_department.id:
+        raise ValueError("首次二级部门与直达三级部门不属于同一层级树")
+    direct_route = current_department.id != initial_department.id
     attempt = m.AssignmentAttempt(
         workflow=workflow,
         resume=resume,
@@ -556,14 +566,12 @@ def _create_attempt(
         source=source,
         status=status
         or (
-            m.AssignmentAttempt.STATUS_ASSIGNED_L3
-            if sub_contact
+            m.AssignmentAttempt.STATUS_DISPATCHED
+            if direct_route
             else m.AssignmentAttempt.STATUS_PENDING_DISPATCH
         ),
-        department=contact.department if contact else None,
-        contact=contact,
-        sub_department=sub_department,
-        sub_contact=sub_contact,
+        initial_department=initial_department,
+        current_department=current_department,
         matched_rule=matched_rule,
         agent_decision=agent_decision,
         confidence_score=confidence_score,
@@ -575,36 +583,48 @@ def _create_attempt(
         special_route_confidence=special_route_confidence,
         special_route_evidence=special_route_evidence or [],
         special_route_config_snapshot=special_route_config_snapshot or {},
-        dispatched_at=now if sub_contact else None,
-        assigned_to_sub_at=now if sub_contact else None,
+        dispatched_at=now if direct_route else None,
         created_by=created_by if getattr(created_by, "is_authenticated", False) else None,
         capacity_reservation=capacity_reservation,
     )
     _set_snapshots(attempt)
     attempt.save()
+    _record_handling_event(
+        attempt,
+        m.AssignmentHandlingEvent.EVENT_ATTEMPT_CREATED,
+        user=created_by,
+        note=match_reason,
+        is_system_auto=source != m.AssignmentAttempt.SOURCE_MANUAL,
+        metadata={
+            "source": source,
+            "initial_department_id": initial_department.id,
+        },
+    )
 
-    if sub_contact:
+    if direct_route:
         direct_note = (
             "系统 AI 自动分配"
             if route_code == "ai_special_route"
-            else "HR 手动直达三级接口人"
+            else "HR 手动直达三级部门"
         )
-        _create_handoff(
-            attempt=attempt,
-            action=m.AssignmentHandoff.ACTION_HR_DISPATCH,
-            to_contact=contact,
-            to_department=attempt.department,
-            created_by=created_by,
+        _record_handling_event(
+            attempt,
+            m.AssignmentHandlingEvent.EVENT_DEPARTMENT_DISPATCHED,
+            to_department=initial_department,
+            user=created_by,
             note=direct_note,
+            is_system_auto=source == m.AssignmentAttempt.SOURCE_AI,
+            metadata=_department_notification_metadata(initial_department),
         )
-        _create_handoff(
-            attempt=attempt,
-            action=m.AssignmentHandoff.ACTION_SUB_ASSIGN,
-            from_contact=contact,
-            to_contact=sub_contact,
-            to_department=sub_department,
-            created_by=created_by,
+        _record_handling_event(
+            attempt,
+            m.AssignmentHandlingEvent.EVENT_DEPARTMENT_TRANSFERRED,
+            from_department=initial_department,
+            to_department=current_department,
+            user=created_by,
             note=direct_note,
+            is_system_auto=True,
+            metadata=_department_notification_metadata(current_department),
         )
 
     _touch_workflow(workflow, resume, mode)
@@ -665,12 +685,12 @@ def _classify_resume(resume, strategy, jobs, mode):
     return job, category, reason
 
 
-def _rule_match_reason(admission, resume, job, contact, classify_reason):
+def _rule_match_reason(admission, resume, job, department, classify_reason):
     """生成 Rule 分配尝试的人可读匹配理由。
 
     AssignmentAttempt.match_reason 是 HR 查看自动分配结果时最直接的审计线索，
     因此这里把硬规则和匹配链路串起来：院校准入、志愿序号、岗位/专业命中、
-    最终分配到的二级部门和接口人。
+    最终分配到的二级部门。
     """
     admission_reason = (
         f"院校准入：命中{admission.matched_rule.name}"
@@ -678,13 +698,7 @@ def _rule_match_reason(admission, resume, job, contact, classify_reason):
         else "院校准入：未启用规则，放行"
     )
     rank_reason = f"第{resume.volunteer_rank}志愿"
-    department_name = contact.department.name if contact and contact.department else ""
-    contact_name = contact.name if contact else ""
-    dispatch_reason = (
-        f"分配至{department_name}/{contact_name}"
-        if department_name or contact_name
-        else "分配目标待确认"
-    )
+    dispatch_reason = f"分配至{department.name}" if department else "分配目标待确认"
     return "；".join(
         part
         for part in [
@@ -739,11 +753,6 @@ def _create_agent_decision(workflow, resume, result):
         recommended_job=result.job,
         matched_job_category=result.job.category if result.job else "",
         recommended_department=result.department,
-        recommended_contact=result.contact,
-        recommended_contact_name_snapshot=result.contact.name if result.contact else "",
-        recommended_contact_employee_no_snapshot=(
-            result.contact.employee_no if result.contact else ""
-        ),
         confidence_score=confidence,
         score_breakdown=result.score_breakdown,
         summary=output.summary,
@@ -809,7 +818,6 @@ def _create_agent_failure_decision(
         recommended_job=None,
         matched_job_category="",
         recommended_department=None,
-        recommended_contact=None,
         confidence_score=None,
         score_breakdown={},
         summary="AI 未形成有效下发建议",
@@ -824,13 +832,13 @@ def _create_agent_failure_decision(
 
 
 def _ai_current_volunteer_prerequisite(resume, processing_run=None):
-    """直接完成 AI 当前志愿的岗位、部门、接口人和 HC 目标选择。"""
+    """直接完成 AI 当前志愿的岗位、部门和 HC 目标选择。"""
     try:
-        jobs, _contacts, mapping = _targetable_job_pool(resume, mode="ai")
+        jobs, _departments, mapping = _targetable_job_pool(resume, mode="ai")
     except JobMappingError as exc:
         error_code = (
             "reference_not_found"
-            if exc.code in {"secondary_department_missing", "secondary_contact_missing"}
+            if exc.code == "secondary_department_missing"
             else "guardrail_blocked"
         )
         return None, error_code, exc.detail
@@ -860,7 +868,6 @@ def _process_ai_recommendation(
             resume,
             job,
             department=department,
-            contact=_first_secondary_contact(department),
             force=force,
         )
     except ai_service.AIServiceError as exc:
@@ -898,19 +905,12 @@ def _apply_ai_result(workflow, resume, *, matched_rule, result):
         update_fields=["job", "job_category", "category_mode", "category_reason"]
     )
     capacity_reservation = None
-    automatic_contact = result.contact
+    automatic_department = result.department
     if decision.recommendation != m.AgentDispatchDecision.RECOMMEND_ARCHIVE:
         try:
-            job_pool, contacts, mapping = _targetable_job_pool(resume, mode="ai")
+            job_pool, departments, mapping = _targetable_job_pool(resume, mode="ai")
         except JobMappingError as exc:
-            if exc.code == "secondary_contact_missing":
-                _block_current_volunteer(
-                    workflow, m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND, exc.detail
-                )
-            else:
-                _archive(
-                    workflow, _archive_reason_for_mapping_code(exc.code), exc.detail
-                )
+            _archive(workflow, _archive_reason_for_mapping_code(exc.code), exc.detail)
             return None
         selected_job, capacity_reservation = _select_job_capacity(
             getattr(workflow, "_processing_run", None), job_pool, reserve=True
@@ -925,19 +925,13 @@ def _apply_ai_result(workflow, resume, *, matched_rule, result):
             )
             return None
         _save_mapped_classification(resume, selected_job, mapping, "ai")
-        automatic_contact = contacts[selected_job.id]
+        automatic_department = departments[selected_job.id]
         decision.recommended_job = selected_job
         decision.recommended_department = _secondary_department(selected_job.department)
-        decision.recommended_contact = automatic_contact
-        decision.recommended_contact_name_snapshot = automatic_contact.name
-        decision.recommended_contact_employee_no_snapshot = automatic_contact.employee_no
         decision.save(
             update_fields=[
                 "recommended_job",
                 "recommended_department",
-                "recommended_contact",
-                "recommended_contact_name_snapshot",
-                "recommended_contact_employee_no_snapshot",
             ]
         )
     try:
@@ -959,18 +953,19 @@ def _apply_ai_result(workflow, resume, *, matched_rule, result):
     if special_hit:
         try:
             special_config = ai_config.get_ai_special_route_config(validate=True)
-            secondary_contact = m.Contact.objects.select_related("department").get(
-                pk=special_config.secondary_contact_id
+            secondary_department = m.Department.objects.get(
+                pk=special_config.secondary_department_id, level=2
             )
-            tertiary_contact = m.Contact.objects.select_related(
-                "department__parent"
-            ).get(pk=special_config.tertiary_contact_id)
+            tertiary_department = m.Department.objects.select_related("parent").get(
+                pk=special_config.tertiary_department_id,
+                level=3,
+                parent=secondary_department,
+            )
             snapshot = special_config.snapshot()
             attempt = _force_assign_locked(
                 workflow=workflow,
                 resume=resume,
-                contact=tertiary_contact,
-                secondary_contact=secondary_contact,
+                target_department=tertiary_department,
                 source=m.AssignmentAttempt.SOURCE_AI,
                 mode="ai",
                 match_reason="AI 自动分配",
@@ -983,7 +978,7 @@ def _apply_ai_result(workflow, resume, *, matched_rule, result):
                 invalidate_processing=False,
                 capacity_reservation=capacity_reservation,
             )
-        except (m.Contact.DoesNotExist, TypeError, ValueError) as exc:
+        except (m.Department.DoesNotExist, TypeError, ValueError) as exc:
             # 专项路由是后台增强能力，目标配置瞬时失效不能阻断普通 AI 结果。
             # 失败原因仅写入内部审计快照，不进入候选人结果或公开错误码。
             snapshot = special_config.snapshot()
@@ -1011,7 +1006,7 @@ def _apply_ai_result(workflow, resume, *, matched_rule, result):
         return _create_attempt(
             workflow=workflow,
             resume=resume,
-            contact=result.contact,
+            initial_department=result.department,
             source=m.AssignmentAttempt.SOURCE_AI,
             mode="ai",
             matched_rule=matched_rule,
@@ -1025,7 +1020,7 @@ def _apply_ai_result(workflow, resume, *, matched_rule, result):
     return _create_attempt(
         workflow=workflow,
         resume=resume,
-        contact=automatic_contact,
+        initial_department=automatic_department,
         source=m.AssignmentAttempt.SOURCE_AI,
         mode="ai",
         matched_rule=matched_rule,
@@ -1176,7 +1171,6 @@ def process_ai_scope_item(run_id, scope_item_id):
         prepared_resume_id = item.prepared_resume_id
         prepared_job_id = item.prepared_job_id
         prepared_department_id = item.prepared_department_id
-        prepared_contact_id = item.prepared_contact_id
         force_ai = _should_force_ai(run.scope)
 
     resume = m.Resume.objects.filter(pk=prepared_resume_id).first()
@@ -1185,11 +1179,6 @@ def process_ai_scope_item(run_id, scope_item_id):
         is_active=True,
     ).first()
     department = m.Department.objects.filter(pk=prepared_department_id, level=2).first()
-    contact = m.Contact.objects.select_related("department").filter(
-        pk=prepared_contact_id,
-        contact_level=m.Contact.LEVEL_SECONDARY,
-        is_active=True,
-    ).first()
     result = None
     ai_error = None
     last_cancel_check = [0.0, False]
@@ -1207,15 +1196,13 @@ def process_ai_scope_item(run_id, scope_item_id):
         resume
         and job
         and department
-        and contact
-        and contact.department_id == department.id
         and _secondary_department(job.department)
         and _secondary_department(job.department).id == department.id
     )
     if not references_valid:
         ai_error = ai_service.AIServiceError(
             "ai_reference_invalidated",
-            "岗位与分配前置检查固定的岗位、二级部门或二级接口人在 AI 执行前已失效",
+            "岗位与分配前置检查固定的岗位或二级部门在 AI 执行前已失效",
         )
     else:
         try:
@@ -1223,7 +1210,6 @@ def process_ai_scope_item(run_id, scope_item_id):
                 resume,
                 job,
                 department=department,
-                contact=contact,
                 force=force_ai,
                 processing_run_id=run_id,
                 cancelled=cancelled,
@@ -1392,7 +1378,7 @@ def _create_next_auto_attempt(
     这是 Rule/AI 共用的自动分配入口。共同硬规则先于策略执行：
     1. 院校准入不通过则直接归档，不进入岗位/专业匹配。
     2. 每次只处理当前有效志愿；收到未通过反馈后，workflow.current_rank 才推进。
-    3. 当前志愿必须能匹配岗位、二级部门和启用的二级接口人，才生成尝试。
+    3. 当前志愿必须能匹配岗位和二级部门，才生成尝试。
 
     AI 只评估当前有效志愿；任何 AI 失败都不会跳志愿或回退 Rule。
     """
@@ -1461,14 +1447,9 @@ def _create_next_auto_attempt(
 
     _touch_workflow(workflow, resume, mode)
     try:
-        job_pool, contacts, mapping = _targetable_job_pool(resume, mode="rule")
+        job_pool, departments, mapping = _targetable_job_pool(resume, mode="rule")
     except JobMappingError as exc:
-        if exc.code == "secondary_contact_missing":
-            _block_current_volunteer(
-                workflow, m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND, exc.detail
-            )
-        else:
-            _archive(workflow, _archive_reason_for_mapping_code(exc.code), exc.detail)
+        _archive(workflow, _archive_reason_for_mapping_code(exc.code), exc.detail)
         return None
 
     # 即使本任务容量已耗尽，也保留职位映射和岗位分类，供新任务直接回池。
@@ -1486,18 +1467,18 @@ def _create_next_auto_attempt(
         )
         return None
     _save_mapped_classification(resume, job, mapping, "rule")
-    contact = contacts[job.id]
+    department = departments[job.id]
     classify_reason = _mapped_classification_reason(mapping, job)
 
     return _create_attempt(
         workflow=workflow,
         resume=resume,
-        contact=contact,
+        initial_department=department,
         source=m.AssignmentAttempt.SOURCE_RULE,
         mode="rule",
         matched_rule=admission.matched_rule,
         match_reason=_rule_match_reason(
-            admission, resume, job, contact, classify_reason
+            admission, resume, job, department, classify_reason
         ),
         capacity_reservation=capacity_reservation,
     )
@@ -1628,22 +1609,21 @@ def run_school_gate(scope=None, mode="rule", processing_run=None, processing_sta
 
 def _prepare_ai_target(resume, processing_run=None):
     try:
-        job_pool, contacts, mapping = _targetable_job_pool(resume, mode="ai")
+        job_pool, departments, mapping = _targetable_job_pool(resume, mode="ai")
     except JobMappingError as exc:
-        return None, None, None, exc.code, exc.detail
+        return None, None, exc.code, exc.detail
     _save_mapped_classification(resume, job_pool[0], mapping, "ai")
     job, _capacity = _select_job_capacity(processing_run, job_pool, reserve=False)
     if not job:
         return (
             job_pool[0],
             _secondary_department(job_pool[0].department),
-            contacts[job_pool[0].id],
             "job_hc_exhausted",
             f"当前任务中内部职位“{mapping['internal_name']}”的岗位 HC 容量已用尽，"
             "候选人保留当前志愿，等待新任务重新分配",
         )
     _save_mapped_classification(resume, job, mapping, "ai")
-    return job, _secondary_department(job.department), contacts[job.id], "", ""
+    return job, departments[job.id], "", ""
 
 
 def _rule_result_code(workflow, attempt):
@@ -1651,8 +1631,6 @@ def _rule_result_code(workflow, attempt):
         return "rule_assigned", attempt.match_reason
     if workflow.block_reason == m.CandidateWorkflow.BLOCK_JOB_HC_EXHAUSTED:
         return "job_hc_exhausted", workflow.block_detail
-    if workflow.block_reason == m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND:
-        return "secondary_contact_missing", workflow.block_detail
     if workflow.archive_reason == m.CandidateWorkflow.ARCHIVE_SCHOOL_RULE_NOT_MATCHED:
         code = (
             "education_not_eligible"
@@ -1683,7 +1661,7 @@ def _rule_result_code(workflow, attempt):
 def run_allocation_precheck(
     scope=None, mode="rule", processing_run=None, processing_stage=None
 ):
-    """Step3：Rule 完成专业审核与分配；AI 独立冻结岗位/部门/接口人引用。"""
+    """Step3：Rule 完成专业审核与分配；AI 独立冻结岗位/部门引用。"""
     scope = scope or {}
     candidate_ids = list(candidate_ids_for_scope(scope))
     rules = school_admission.active_rules()
@@ -1769,18 +1747,15 @@ def run_allocation_precheck(
                 completed += 1
                 continue
 
-            job, department, contact, reason_code, detail = _prepare_ai_target(
+            job, department, reason_code, detail = _prepare_ai_target(
                 resume, processing_run
             )
             _touch_workflow(workflow, resume, "ai")
             if reason_code:
-                if reason_code in {"secondary_contact_missing", "job_hc_exhausted"}:
-                    block_reason = (
-                        m.CandidateWorkflow.BLOCK_JOB_HC_EXHAUSTED
-                        if reason_code == "job_hc_exhausted"
-                        else m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND
+                if reason_code == "job_hc_exhausted":
+                    _block_current_volunteer(
+                        workflow, m.CandidateWorkflow.BLOCK_JOB_HC_EXHAUSTED, detail
                     )
-                    _block_current_volunteer(workflow, block_reason, detail)
                 else:
                     archive_reason = _archive_reason_for_mapping_code(reason_code)
                     _archive(workflow, archive_reason, detail)
@@ -1799,7 +1774,6 @@ def run_allocation_precheck(
                 item.prepared_resume = resume
                 item.prepared_job = job
                 item.prepared_department = department
-                item.prepared_contact = contact
                 item.workflow_revision_at_prepare = workflow.revision
                 item.status = "pending"
                 item.save(
@@ -1807,7 +1781,6 @@ def run_allocation_precheck(
                         "prepared_resume",
                         "prepared_job",
                         "prepared_department",
-                        "prepared_contact",
                         "workflow_revision_at_prepare",
                         "status",
                     ]
@@ -2034,39 +2007,11 @@ def run(scope=None, mode="rule", processing_run=None, processing_stage=None):
     )
 
 
-def _manual_target(contact, secondary_contact=None):
-    if contact.contact_level == m.Contact.LEVEL_SECONDARY:
-        if not contact.department or contact.department.level != 2:
-            raise ValueError("二级接口人必须绑定二级部门")
-        return contact, None
-    if contact.contact_level == m.Contact.LEVEL_TERTIARY:
-        if not contact.department or contact.department.level != 3 or not contact.department.parent:
-            raise ValueError("三级接口人必须绑定三级部门")
-        candidates = list(
-            m.Contact.objects.filter(
-                department=contact.department.parent,
-                contact_level=m.Contact.LEVEL_SECONDARY,
-                is_active=True,
-            ).order_by("id")
-        )
-        if not candidates:
-            raise ValueError("三级接口人所属二级部门没有可用二级接口人")
-        if len(candidates) == 1:
-            secondary_contact = candidates[0]
-        elif not secondary_contact:
-            raise ValueError("该三级部门存在多个二级接口人，请明确 secondary_contact_id")
-        elif secondary_contact.id not in {item.id for item in candidates}:
-            raise ValueError("指定二级接口人不属于三级接口人的上级二级部门")
-        return secondary_contact, contact
-    raise ValueError("目标接口人层级无效")
-
-
 def _force_assign_locked(
     *,
     workflow,
     resume,
-    contact,
-    secondary_contact=None,
+    target_department,
     source,
     mode,
     match_reason,
@@ -2086,15 +2031,13 @@ def _force_assign_locked(
         _invalidate_active_processing(workflow)
     if workflow.status == m.CandidateWorkflow.STATUS_PASSED:
         raise ValueError("已通过候选人不可再强制分配")
-    if not contact.is_active:
-        raise ValueError("目标接口人未启用")
-    secondary_contact, sub_contact = _manual_target(contact, secondary_contact)
+    initial_department = _secondary_target_department(target_department)
     _cancel_unfeedbacked_attempts(workflow, m.AssignmentAttempt.CANCEL_MANUAL_REPLACED)
     return _create_attempt(
         workflow=workflow,
         resume=resume,
-        contact=secondary_contact,
-        sub_contact=sub_contact,
+        initial_department=initial_department,
+        current_department=target_department,
         source=source,
         mode=mode,
         match_reason=match_reason,
@@ -2125,7 +2068,12 @@ def _invalidate_active_processing(workflow):
 def _lock_attempt_for_manual_write(attempt):
     locked_attempt = (
         m.AssignmentAttempt.objects.select_for_update()
-        .select_related("workflow")
+        .select_related(
+            "workflow",
+            "initial_department",
+            "current_department",
+            "current_department__parent",
+        )
         .get(pk=attempt.pk)
     )
     workflow = m.CandidateWorkflow.objects.select_for_update().get(
@@ -2141,10 +2089,10 @@ def _lock_attempt_for_manual_write(attempt):
 @transaction.atomic
 def manual_assign(
     resume,
-    contact,
+    target_department,
+    *,
     user=None,
     manual_reason="",
-    secondary_contact=None,
 ):
     candidate = m.Candidate.objects.select_for_update().get(pk=resume.candidate_id)
     workflow, _ = m.CandidateWorkflow.objects.select_for_update().get_or_create(
@@ -2153,8 +2101,7 @@ def manual_assign(
     return _force_assign_locked(
         workflow=workflow,
         resume=resume,
-        contact=contact,
-        secondary_contact=secondary_contact,
+        target_department=target_department,
         source=m.AssignmentAttempt.SOURCE_MANUAL,
         mode="manual",
         match_reason="HR 手动强制分配",
@@ -2164,126 +2111,169 @@ def manual_assign(
 
 
 @transaction.atomic
-def dispatch_attempt(attempt, user=None):
+def dispatch_attempt(attempt, *, user=None):
     attempt, _workflow = _lock_attempt_for_manual_write(attempt)
     if attempt.status != m.AssignmentAttempt.STATUS_PENDING_DISPATCH:
-        raise ValueError("仅待下发尝试可以下发")
-    attempt.status = m.AssignmentAttempt.STATUS_DISPATCHED_L2
+        raise AttemptStateChanged("仅待下发尝试可以下发")
+    attempt.status = m.AssignmentAttempt.STATUS_DISPATCHED
     attempt.dispatched_at = timezone.now()
     _set_snapshots(attempt)
     attempt.save(
         update_fields=[
             "status",
             "dispatched_at",
-            "department_name_snapshot",
-            "contact_name_snapshot",
-            "contact_employee_no_snapshot",
+            "initial_department_name_snapshot",
+            "current_department_name_snapshot",
             "created_by_username_snapshot",
             "updated_at",
         ]
     )
-    _create_handoff(
-        attempt=attempt,
-        action=m.AssignmentHandoff.ACTION_HR_DISPATCH,
-        to_contact=attempt.contact,
-        to_department=attempt.department,
-        created_by=user,
+    _record_handling_event(
+        attempt,
+        m.AssignmentHandlingEvent.EVENT_DEPARTMENT_DISPATCHED,
+        to_department=attempt.current_department,
+        user=user,
+        metadata=_department_notification_metadata(attempt.current_department),
     )
     return attempt
 
 
-@transaction.atomic
-def assign_sub_contact(attempt, sub_contact, operator_contact=None, user=None, note=""):
-    attempt, _workflow = _lock_attempt_for_manual_write(attempt)
-    if attempt.status not in [
-        m.AssignmentAttempt.STATUS_DISPATCHED_L2,
-        m.AssignmentAttempt.STATUS_ASSIGNED_L3,
-    ]:
-        raise ValueError("仅已下发二级的尝试可以转派三级接口人")
-    if not attempt.department:
-        raise ValueError("分配尝试缺少二级部门")
-    if operator_contact and operator_contact.id != attempt.contact_id:
-        raise ValueError("只能转派下发给自己的分配尝试")
-    if attempt.contact and not attempt.contact.can_delegate:
-        raise ValueError("当前二级接口人没有转派权限")
+def _secondary_contact_can_view_attempt(contact, attempt):
+    if (
+        not contact
+        or not contact.is_active
+        or contact.contact_level != m.Contact.LEVEL_SECONDARY
+        or not contact.department
+        or contact.department.level != 2
+    ):
+        return False
+    current = attempt.current_department
+    return current.id == contact.department_id or (
+        current.level == 3 and current.parent_id == contact.department_id
+    )
 
-    _assert_tertiary_contact(sub_contact, attempt.department)
-    old_sub_contact = attempt.sub_contact
-    attempt.sub_contact = sub_contact
-    attempt.sub_department = sub_contact.department
-    attempt.status = m.AssignmentAttempt.STATUS_ASSIGNED_L3
-    attempt.assigned_to_sub_at = timezone.now()
+
+def _validate_transfer_actor(attempt, target_department, user, *, is_system_auto):
+    if is_system_auto or user is None:
+        return
+    from apps.accounts.permissions import user_permission_codes
+
+    permissions = user_permission_codes(user)
+    if "attempt.transfer_department" not in permissions:
+        raise ValueError("当前用户没有部门转派权限")
+    if "attempt.view_all" in permissions:
+        return
+    contact = getattr(user, "contact", None)
+    if not _secondary_contact_can_view_attempt(contact, attempt):
+        raise ValueError("只能转派本二级部门可见的简历")
+    if not contact.can_delegate:
+        raise ValueError("当前二级接口人没有转派权限")
+    if target_department.level == 3 and target_department.parent_id != contact.department_id:
+        raise ValueError("二级接口人只能转派到本二级部门下的三级部门")
+
+
+@transaction.atomic
+def transfer_attempt(
+    attempt,
+    target_department,
+    *,
+    user=None,
+    note="",
+    batch_operation_id=None,
+    is_system_auto=False,
+):
+    expected_current_department_id = attempt.current_department_id
+    attempt, _workflow = _lock_attempt_for_manual_write(attempt)
+    if attempt.current_department_id != expected_current_department_id:
+        raise AttemptStateChanged("当前接收部门已变更，请刷新后重试")
+    if attempt.status != m.AssignmentAttempt.STATUS_DISPATCHED:
+        raise AttemptStateChanged("仅已下发且未反馈的尝试可以转派")
+    _secondary_target_department(target_department)
+    _validate_transfer_actor(
+        attempt, target_department, user, is_system_auto=is_system_auto
+    )
+    if target_department.id == attempt.current_department_id:
+        raise ValueError("目标部门与当前接收部门相同")
+    from_department = attempt.current_department
+    attempt.current_department = target_department
     _set_snapshots(attempt)
     attempt.save(
         update_fields=[
-            "sub_contact",
-            "sub_department",
-            "status",
-            "assigned_to_sub_at",
-            "sub_department_name_snapshot",
-            "sub_contact_name_snapshot",
-            "sub_contact_employee_no_snapshot",
-            "created_by_username_snapshot",
+            "current_department",
+            "current_department_name_snapshot",
             "updated_at",
         ]
     )
-    _create_handoff(
-        attempt=attempt,
-        action=(
-            m.AssignmentHandoff.ACTION_SUB_REASSIGN
-            if old_sub_contact
-            else m.AssignmentHandoff.ACTION_SUB_ASSIGN
-        ),
-        from_contact=attempt.contact,
-        to_contact=sub_contact,
-        to_department=sub_contact.department,
-        created_by=user,
+    _record_handling_event(
+        attempt,
+        m.AssignmentHandlingEvent.EVENT_DEPARTMENT_TRANSFERRED,
+        from_department=from_department,
+        to_department=target_department,
+        user=user,
         note=note,
+        batch_operation_id=batch_operation_id,
+        is_system_auto=is_system_auto,
+        metadata=_department_notification_metadata(target_department),
     )
     return attempt
 
 
 @transaction.atomic
-def submit_feedback(attempt, result, note="", *, user=None):
+def submit_feedback(attempt, result, note="", *, reason_code="", user=None):
+    expected_current_department_id = attempt.current_department_id
     attempt, workflow = _lock_attempt_for_manual_write(attempt)
+    if attempt.current_department_id != expected_current_department_id:
+        raise AttemptStateChanged("当前接收部门已变更，请刷新后重试")
     if attempt.feedback_at:
-        raise ValueError("反馈已提交，不允许重复修改")
-    allowed_statuses = {
-        m.AssignmentAttempt.STATUS_DISPATCHED_L2,
-        m.AssignmentAttempt.STATUS_ASSIGNED_L3,
-    }
-    if attempt.status not in allowed_statuses:
-        raise ValueError("仅已下发且未转派的二级尝试或已转派三级尝试可以反馈")
+        raise AttemptStateChanged("反馈已提交，不允许重复修改")
+    if attempt.status != m.AssignmentAttempt.STATUS_DISPATCHED:
+        raise AttemptStateChanged("仅已下发且未反馈的尝试可以反馈")
     if user is not None:
         from apps.accounts.permissions import user_permission_codes
 
         permissions = user_permission_codes(user)
-        contact_id = getattr(user, "contact_id", None)
         if "attempt.feedback" not in permissions:
             raise ValueError("当前用户没有提交反馈权限")
-        is_bound_secondary = (
-            attempt.status == m.AssignmentAttempt.STATUS_DISPATCHED_L2
-            and "attempt.view_received" in permissions
-            and contact_id
-            and attempt.contact_id == contact_id
-        )
-        is_bound_tertiary = (
-            attempt.status == m.AssignmentAttempt.STATUS_ASSIGNED_L3
-            and "attempt.view_assigned" in permissions
-            and contact_id
-            and attempt.sub_contact_id == contact_id
-        )
-        if not (is_bound_secondary or is_bound_tertiary):
-            raise ValueError("当前用户不是该阶段绑定的反馈接口人")
+        contact = getattr(user, "contact", None)
+        if (
+            "attempt.view_department" not in permissions
+            or not contact
+            or not contact.is_active
+            or contact.department_id != attempt.current_department_id
+            or (
+                attempt.current_department.level == 2
+                and contact.contact_level != m.Contact.LEVEL_SECONDARY
+            )
+            or (
+                attempt.current_department.level == 3
+                and contact.contact_level != m.Contact.LEVEL_TERTIARY
+            )
+        ):
+            raise ValueError("只有当前接收部门的启用接口人可以提交反馈")
     if result not in [
         m.AssignmentAttempt.FEEDBACK_PASSED,
         m.AssignmentAttempt.FEEDBACK_REJECTED,
     ]:
         raise ValueError("反馈结果必须是 passed 或 rejected")
 
+    reason_labels = dict(m.AssignmentAttempt.REJECTION_REASON_CHOICES)
+    if result == m.AssignmentAttempt.FEEDBACK_PASSED:
+        if reason_code:
+            raise ValueError("通过反馈不能填写不通过原因")
+    else:
+        if reason_code not in reason_labels:
+            raise ValueError("不通过时必须选择有效的反馈原因")
+        if (
+            reason_code == m.AssignmentAttempt.REJECTION_REASON_OTHER
+            and not str(note or "").strip()
+        ):
+            raise ValueError("选择“其他”时必须填写备注")
+
     now = timezone.now()
     attempt.feedback_result = result
     attempt.feedback_note = note
+    attempt.feedback_reason_code = reason_code
+    attempt.feedback_reason_label_snapshot = reason_labels.get(reason_code, "")
     attempt.feedback_at = now
 
     if result == m.AssignmentAttempt.FEEDBACK_PASSED:
@@ -2293,9 +2283,18 @@ def submit_feedback(attempt, result, note="", *, user=None):
                 "status",
                 "feedback_result",
                 "feedback_note",
+                "feedback_reason_code",
+                "feedback_reason_label_snapshot",
                 "feedback_at",
                 "updated_at",
             ]
+        )
+        _record_handling_event(
+            attempt,
+            m.AssignmentHandlingEvent.EVENT_FEEDBACK_PASSED,
+            from_department=attempt.current_department,
+            user=user,
+            note=note,
         )
         workflow.status = m.CandidateWorkflow.STATUS_PASSED
         workflow.passed_attempt = attempt
@@ -2322,9 +2321,19 @@ def submit_feedback(attempt, result, note="", *, user=None):
             "status",
             "feedback_result",
             "feedback_note",
+            "feedback_reason_code",
+            "feedback_reason_label_snapshot",
             "feedback_at",
             "updated_at",
         ]
+    )
+    _record_handling_event(
+        attempt,
+        m.AssignmentHandlingEvent.EVENT_FEEDBACK_REJECTED,
+        from_department=attempt.current_department,
+        user=user,
+        note=note,
+        metadata={"reason_code": reason_code},
     )
     rules = school_admission.active_rules()
     origin_run = (
@@ -2347,24 +2356,29 @@ def submit_feedback(attempt, result, note="", *, user=None):
 
 
 @transaction.atomic
-def confirm_review(attempt):
+def confirm_review(attempt, *, user=None):
     attempt, _workflow = _lock_attempt_for_manual_write(attempt)
     if attempt.status != m.AssignmentAttempt.STATUS_PENDING_REVIEW:
-        raise ValueError("仅待 HR 复核的 AI 尝试可以确认下发")
+        raise AttemptStateChanged("仅待 HR 复核的 AI 尝试可以确认下发")
     attempt.status = m.AssignmentAttempt.STATUS_PENDING_DISPATCH
     attempt.review_required = False
     attempt.save(update_fields=["status", "review_required", "updated_at"])
+    _record_handling_event(
+        attempt,
+        m.AssignmentHandlingEvent.EVENT_REVIEW_CONFIRMED,
+        user=user,
+    )
     return attempt
 
 
 @transaction.atomic
-def cancel_attempt(attempt, reason="hr_cancelled"):
+def cancel_attempt(attempt, reason="hr_cancelled", *, user=None):
     attempt, workflow = _lock_attempt_for_manual_write(attempt)
     if attempt.status not in [
         m.AssignmentAttempt.STATUS_PENDING_REVIEW,
         m.AssignmentAttempt.STATUS_PENDING_DISPATCH,
     ]:
-        raise ValueError("仅待复核或待下发尝试可以取消")
+        raise AttemptStateChanged("仅待复核或待下发尝试可以取消")
     now = timezone.now()
     _release_attempt_capacity(attempt, released_at=now)
     attempt.status = m.AssignmentAttempt.STATUS_CANCELLED
@@ -2378,6 +2392,14 @@ def cancel_attempt(attempt, reason="hr_cancelled"):
             "capacity_released_at",
             "updated_at",
         ]
+    )
+    _record_handling_event(
+        attempt,
+        m.AssignmentHandlingEvent.EVENT_CANCELLED,
+        from_department=attempt.current_department,
+        user=user,
+        note=reason,
+        metadata={"cancel_reason": reason},
     )
     if not workflow.attempts.filter(status__in=UNFEEDBACKED_STATUSES).exists():
         _archive(

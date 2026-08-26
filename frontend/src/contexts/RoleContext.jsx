@@ -69,9 +69,16 @@ export function RoleProvider({ children }) {
   const permissions = useMemo(() => new Set(user?.permissions || []), [user])
   const hasPermission = (code) => permissions.has(code)
   const role = user?.role || 'hr'
-  const isSecondaryContact = Boolean(user?.contact) && hasPermission('attempt.view_received')
-  const isTertiaryContact = Boolean(user?.contact) && hasPermission('attempt.view_assigned')
-  const isContact = isSecondaryContact || isTertiaryContact
+  const dataScope = user?.data_scope || { type: 'none' }
+  const contactDepartmentLevel = Number(
+    dataScope.department_level
+      ?? dataScope.level
+      ?? user?.contact?.department_level
+      ?? 0,
+  )
+  const isContact = Boolean(user?.contact) && hasPermission('attempt.view_department')
+  const isSecondaryContact = isContact && contactDepartmentLevel === 2
+  const isTertiaryContact = isContact && contactDepartmentLevel === 3
 
   return (
     <RoleContext.Provider
@@ -83,6 +90,7 @@ export function RoleProvider({ children }) {
         roles: user?.roles || [],
         permissions: user?.permissions || [],
         contact: user?.contact || null,
+        dataScope,
         isAuthenticated: Boolean(token && user),
         completeW3OAuth2Login,
         loginWithDevToken,

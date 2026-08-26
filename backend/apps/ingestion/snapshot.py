@@ -13,7 +13,7 @@ _SNAPSHOT_MODELS = [
     m.CandidateWorkflow,
     m.AgentDispatchDecision,
     m.AssignmentAttempt,
-    m.AssignmentHandoff,
+    m.AssignmentHandlingEvent,
 ]
 
 
@@ -35,7 +35,7 @@ def _deserialize_payload(payload):
     workflows = []
     decisions = []
     attempts = []
-    handoffs = []
+    handling_events = []
     others = []
     for item in raw:
         if item.get("model") == "core.candidateworkflow":
@@ -44,11 +44,11 @@ def _deserialize_payload(payload):
             decisions.append(item)
         elif item.get("model") == "core.assignmentattempt":
             attempts.append(item)
-        elif item.get("model") == "core.assignmenthandoff":
-            handoffs.append(item)
+        elif item.get("model") == "core.assignmenthandlingevent":
+            handling_events.append(item)
         else:
             others.append(item)
-    return others, workflows, decisions, attempts, handoffs
+    return others, workflows, decisions, attempts, handling_events
 
 
 @transaction.atomic
@@ -57,9 +57,11 @@ def restore_latest():
     if not snap:
         return False
 
-    others, workflows, decisions, attempts, handoffs = _deserialize_payload(snap.payload)
+    others, workflows, decisions, attempts, handling_events = _deserialize_payload(
+        snap.payload
+    )
 
-    m.AssignmentHandoff.objects.all().delete()
+    m.AssignmentHandlingEvent.objects.all().delete()
     m.AssignmentAttempt.objects.all().delete()
     m.AgentDispatchDecision.objects.all().delete()
     m.ResumeProfile.objects.all().delete()
@@ -85,7 +87,7 @@ def restore_latest():
     for obj in serializers.deserialize("json", json.dumps(attempts)):
         obj.save()
 
-    for obj in serializers.deserialize("json", json.dumps(handoffs)):
+    for obj in serializers.deserialize("json", json.dumps(handling_events)):
         obj.save()
 
     for workflow_pk, attempt_pk in passed_attempts.items():

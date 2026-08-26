@@ -149,15 +149,15 @@ class AgentDispatchDecisionApiTests(TestCase):
             self.assertNotIn(field, response.data)
 
     def test_special_route_attempt_is_presented_as_normal_ai_assignment(self):
-        contact = m.Contact.objects.get(employee_no="L2001")
+        department = m.Department.objects.get(name="技术部")
         attempt = m.AssignmentAttempt.objects.create(
             workflow=self.workflow,
             resume=self.resume,
             attempt_no=1,
             source=m.AssignmentAttempt.SOURCE_AI,
-            status=m.AssignmentAttempt.STATUS_ASSIGNED_L3,
-            department=contact.department,
-            contact=contact,
+            status=m.AssignmentAttempt.STATUS_DISPATCHED,
+            initial_department=department,
+            current_department=department,
             agent_decision=self.decision,
             match_mode="ai",
             match_reason="AI 专项强制分配：内部审计信息",
@@ -171,7 +171,11 @@ class AgentDispatchDecisionApiTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["match_reason"], "AI 自动分配")
+        self.assertEqual(response.data["initial_department"], department.id)
+        self.assertEqual(response.data["current_department"], department.id)
         for field in {
+            "department",
+            "contact",
             "route_code",
             "special_route_confidence",
             "special_route_evidence",
@@ -255,8 +259,8 @@ class AgentDispatchDecisionApiTests(TestCase):
             attempt_no=1,
             source=m.AssignmentAttempt.SOURCE_AI,
             status=m.AssignmentAttempt.STATUS_PENDING_REVIEW,
-            contact=m.Contact.objects.get(employee_no="L2001"),
-            department=m.Department.objects.get(name="技术部"),
+            initial_department=m.Department.objects.get(name="技术部"),
+            current_department=m.Department.objects.get(name="技术部"),
             agent_decision=self.decision,
             confidence_score=0.55,
             review_required=True,
@@ -268,7 +272,7 @@ class AgentDispatchDecisionApiTests(TestCase):
         )
         job = m.Job.objects.get()
         m.JobMajor.objects.create(job=job, major="电气工程")
-        contact = m.Contact.objects.get(employee_no="L2001")
+        department = m.Department.objects.get(name="技术部")
         decision_output = SimpleNamespace(
             recommendation="dispatch",
             summary="结构化 AI 建议",
@@ -283,8 +287,7 @@ class AgentDispatchDecisionApiTests(TestCase):
                 profile=SimpleNamespace(risk_flags=[]),
             ),
             job=job,
-            department=contact.department,
-            contact=contact,
+            department=department,
             confidence=0.78,
             score_breakdown={"major_match": 0.78},
         )
@@ -298,6 +301,8 @@ class AgentDispatchDecisionApiTests(TestCase):
         old_attempt.refresh_from_db()
         self.assertEqual(old_attempt.status, m.AssignmentAttempt.STATUS_CANCELLED)
         self.assertEqual(old_attempt.cancel_reason, m.AssignmentAttempt.CANCEL_RERUN)
+        new_decision = m.AgentDispatchDecision.objects.order_by("-id").first()
+        self.assertEqual(new_decision.recommended_department_id, department.id)
         self.assertEqual(
             m.AssignmentAttempt.objects.filter(
                 status__in=[
@@ -635,17 +640,15 @@ class RbacApiTests(TestCase):
         self.tertiary_user.groups.add(Group.objects.get(name="三级接口人"))
 
         self.attempt_a = self._attempt(
-            "candidate-a", "张三", "A1001", self.dept_a, self.secondary_a
+            "candidate-a", "张三", "A1001", self.dept_a
         )
         self.attempt_b = self._attempt(
-            "candidate-b", "李四", "B1001", self.dept_b, self.secondary_b
+            "candidate-b", "李四", "B1001", self.dept_b
         )
-        self.attempt_a.sub_contact = self.tertiary_a
-        self.attempt_a.sub_department = self.tertiary_a.department
-        self.attempt_a.status = m.AssignmentAttempt.STATUS_ASSIGNED_L3
-        self.attempt_a.save(update_fields=["sub_contact", "sub_department", "status"])
+        self.attempt_a.current_department = self.tertiary_a.department
+        self.attempt_a.save(update_fields=["current_department"])
 
-    def _attempt(self, identity, name, apply_id, department, contact):
+    def _attempt(self, identity, name, apply_id, department):
         candidate = m.Candidate.objects.create(
             identity_hash=identity,
             name=name,
@@ -668,9 +671,9 @@ class RbacApiTests(TestCase):
             resume=resume,
             attempt_no=1,
             source=m.AssignmentAttempt.SOURCE_RULE,
-            status=m.AssignmentAttempt.STATUS_DISPATCHED_L2,
-            department=department,
-            contact=contact,
+            status=m.AssignmentAttempt.STATUS_DISPATCHED,
+            initial_department=department,
+            current_department=department,
         )
 
     def test_local_password_login_route_is_removed(self):
@@ -716,8 +719,8 @@ class RbacApiTests(TestCase):
             attempt_no=1,
             source=m.AssignmentAttempt.SOURCE_AI,
             status=m.AssignmentAttempt.STATUS_PENDING_DISPATCH,
-            department=self.dept_a,
-            contact=self.secondary_a,
+            initial_department=self.dept_a,
+            current_department=self.dept_a,
         )
         m.AssignmentAttempt.objects.create(
             workflow=pending_workflow,
@@ -725,8 +728,8 @@ class RbacApiTests(TestCase):
             attempt_no=2,
             source=m.AssignmentAttempt.SOURCE_AI,
             status=m.AssignmentAttempt.STATUS_PENDING_REVIEW,
-            department=self.dept_a,
-            contact=self.secondary_a,
+            initial_department=self.dept_a,
+            current_department=self.dept_a,
         )
         self.client.force_authenticate(self.secondary_user)
 
@@ -754,12 +757,8 @@ class RbacApiTests(TestCase):
         )
 
     def test_secondary_contact_with_permission_can_feedback_before_transfer(self):
-        self.attempt_a.status = m.AssignmentAttempt.STATUS_DISPATCHED_L2
-        self.attempt_a.sub_contact = None
-        self.attempt_a.sub_department = None
-        self.attempt_a.save(
-            update_fields=["status", "sub_contact", "sub_department"]
-        )
+        self.attempt_a.current_department = self.dept_a
+        self.attempt_a.save(update_fields=["current_department"])
         self._grant_secondary_feedback()
         self.client.force_authenticate(self.secondary_user)
 
@@ -785,7 +784,7 @@ class RbacApiTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("绑定", response.data["detail"])
+        self.assertIn("当前接收部门", response.data["detail"])
 
     def test_tertiary_contact_can_feedback_after_transfer_and_cannot_repeat(self):
         self.client.force_authenticate(self.tertiary_user)
@@ -802,15 +801,16 @@ class RbacApiTests(TestCase):
         )
 
         self.assertEqual(first_response.status_code, 200)
-        self.assertEqual(second_response.status_code, 400)
+        self.assertEqual(second_response.status_code, 409)
         self.assertIn("反馈已提交", second_response.data["detail"])
 
     def test_secondary_contact_without_permission_cannot_feedback(self):
-        self.attempt_a.status = m.AssignmentAttempt.STATUS_DISPATCHED_L2
-        self.attempt_a.sub_contact = None
-        self.attempt_a.sub_department = None
-        self.attempt_a.save(
-            update_fields=["status", "sub_contact", "sub_department"]
+        self.attempt_a.current_department = self.dept_a
+        self.attempt_a.save(update_fields=["current_department"])
+        Group.objects.get(name="二级接口人").permissions.remove(
+            Permission.objects.get(
+                codename=permission_codename("attempt.feedback")
+            )
         )
         self.client.force_authenticate(self.secondary_user)
 
@@ -822,7 +822,7 @@ class RbacApiTests(TestCase):
 
         self.assertEqual(response.status_code, 403)
 
-    def test_feedback_permission_does_not_bypass_contact_binding_or_data_scope(self):
+    def test_feedback_permission_does_not_bypass_department_binding_or_data_scope(self):
         self.client.force_authenticate(self.admin)
         admin_response = self.client.post(
             f"/api/workflow-attempts/{self.attempt_a.id}/feedback/",
@@ -838,7 +838,7 @@ class RbacApiTests(TestCase):
         )
 
         self.assertEqual(admin_response.status_code, 400)
-        self.assertIn("绑定", admin_response.data["detail"])
+        self.assertIn("当前接收部门", admin_response.data["detail"])
         self.assertEqual(other_response.status_code, 404)
 
     def test_secondary_contact_uses_resume_library_with_scoped_safe_fields(self):
@@ -866,7 +866,10 @@ class RbacApiTests(TestCase):
         self.assertEqual([item["id"] for item in response.data["results"]], [self.attempt_a.workflow.candidate_id])
         row = response.data["results"][0]
         self.assertEqual(row["phone"], "")
-        self.assertEqual(row["current_attempt"]["sub_contact"], self.tertiary_a.id)
+        self.assertEqual(
+            row["current_attempt"]["current_department"],
+            self.tertiary_a.department_id,
+        )
         self.assertEqual(len(row["resumes"]), 1)
         self.assertEqual(len(row["attempts"]), 1)
 
@@ -876,7 +879,6 @@ class RbacApiTests(TestCase):
             "王五",
             "C1001",
             self.dept_a,
-            self.secondary_a,
         )
         attempt.status = m.AssignmentAttempt.STATUS_PENDING_DISPATCH
         attempt.save(update_fields=["status"])
@@ -892,12 +894,11 @@ class RbacApiTests(TestCase):
         self.assertEqual(response.data["dispatched"], 1)
         self.assertEqual(response.data["skipped"], 0)
         attempt.refresh_from_db()
-        self.assertEqual(attempt.status, m.AssignmentAttempt.STATUS_DISPATCHED_L2)
+        self.assertEqual(attempt.status, m.AssignmentAttempt.STATUS_DISPATCHED)
 
     def test_bulk_dispatch_validates_scope_and_reports_partial_success(self):
         pending = self._attempt(
             "candidate-bulk-pending", "批量待下发", "BD1001", self.dept_a,
-            self.secondary_a,
         )
         pending.status = m.AssignmentAttempt.STATUS_PENDING_DISPATCH
         pending.save(update_fields=["status"])
@@ -937,14 +938,12 @@ class RbacApiTests(TestCase):
 
         ai_pending = self._attempt(
             "candidate-bulk-ai", "AI 待下发", "BD1002", self.dept_a,
-            self.secondary_a,
         )
         ai_pending.status = m.AssignmentAttempt.STATUS_PENDING_DISPATCH
         ai_pending.source = m.AssignmentAttempt.SOURCE_AI
         ai_pending.save(update_fields=["status", "source"])
         rule_pending = self._attempt(
             "candidate-bulk-rule", "Rule 待下发", "BD1003", self.dept_a,
-            self.secondary_a,
         )
         rule_pending.status = m.AssignmentAttempt.STATUS_PENDING_DISPATCH
         rule_pending.save(update_fields=["status"])
@@ -965,30 +964,29 @@ class RbacApiTests(TestCase):
         self.assertEqual(filtered.data["dispatched"], 1)
         ai_pending.refresh_from_db()
         rule_pending.refresh_from_db()
-        self.assertEqual(ai_pending.status, m.AssignmentAttempt.STATUS_DISPATCHED_L2)
+        self.assertEqual(ai_pending.status, m.AssignmentAttempt.STATUS_DISPATCHED)
         self.assertEqual(rule_pending.status, m.AssignmentAttempt.STATUS_PENDING_DISPATCH)
 
-    def test_secondary_contact_loads_only_eligible_sub_contacts_for_own_attempt(self):
-        other_tertiary = m.Contact.objects.create(
-            name="产品三级接口人",
-            employee_no="T-B",
-            department=m.Department.objects.create(
-                name="产品三级组", level=3, parent=self.dept_b
-            ),
-            contact_level=m.Contact.LEVEL_TERTIARY,
+    def test_secondary_contact_loads_transfer_options_for_own_attempt(self):
+        other_tertiary_department = m.Department.objects.create(
+            name="产品三级组", level=3, parent=self.dept_b
         )
         self.client.force_authenticate(self.secondary_user)
 
         response = self.client.get(
-            f"/api/workflow-attempts/{self.attempt_a.id}/eligible-sub-contacts/"
+            f"/api/workflow-attempts/{self.attempt_a.id}/transfer-options/"
         )
         forbidden_response = self.client.get(
-            f"/api/workflow-attempts/{self.attempt_b.id}/eligible-sub-contacts/"
+            f"/api/workflow-attempts/{self.attempt_b.id}/transfer-options/"
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual([item["id"] for item in response.data], [self.tertiary_a.id])
-        self.assertNotIn(other_tertiary.id, [item["id"] for item in response.data])
+        option_ids = {item["id"] for item in response.data["results"]}
+        self.assertEqual(
+            option_ids,
+            {self.dept_a.id, self.dept_b.id, self.tertiary_a.department_id},
+        )
+        self.assertNotIn(other_tertiary_department.id, option_ids)
         self.assertEqual(forbidden_response.status_code, 404)
 
     def test_rule_and_ai_attempt_lists_return_assignment_reason(self):
@@ -1033,8 +1031,6 @@ class RbacApiTests(TestCase):
                 "apply_id": "A1001",
                 "position_name": "后端",
                 "department_name": "技术",
-                "contact_name": "技术二级",
-                "sub_contact_name": "技术三级",
                 "match_reason": "专业匹配",
             },
         )
@@ -1135,11 +1131,71 @@ class RbacApiTests(TestCase):
         self.assertEqual(response.data["value"], 0.82)
         self.assertEqual(m.Config.objects.get(key="ai_dispatch_threshold").value, 0.82)
 
+    def test_ai_settings_permission_includes_department_options_without_contacts(self):
+        operator = User.objects.create_user(username="ai-settings-only", password="pass")
+        operator.user_permissions.add(
+            Permission.objects.get(
+                codename=permission_codename("settings.manage_ai_connection")
+            )
+        )
+        self.client.force_authenticate(operator)
+
+        response = self.client.get("/api/ai-connection/settings/")
+        generic_departments = self.client.get("/api/departments/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(generic_departments.status_code, 403)
+        self.assertNotIn("contacts", response.data)
+        self.assertNotIn("employee_no", str(response.data))
+        self.assertEqual(
+            {item["id"] for item in response.data["departments"]},
+            {self.dept_a.id, self.dept_b.id, self.tertiary_a.department_id},
+        )
+        self.assertEqual(
+            {item["level"] for item in response.data["departments"]},
+            {2, 3},
+        )
+
+    def test_manual_assignment_permission_has_own_department_options_endpoint(self):
+        operator = User.objects.create_user(username="manual-assign-only", password="pass")
+        operator.user_permissions.add(
+            Permission.objects.get(codename=permission_codename("resume.view")),
+            Permission.objects.get(
+                codename=permission_codename("resume.manual_assign")
+            ),
+        )
+        self.client.force_authenticate(operator)
+
+        options = self.client.get("/api/resumes/manual-assignment-options/")
+        generic_departments = self.client.get("/api/departments/")
+        assignment = self.client.post(
+            f"/api/resumes/{self.attempt_b.resume_id}/manual-assign/",
+            {
+                "target_department_id": self.tertiary_a.department_id,
+                "manual_reason": "权限边界回归",
+            },
+            format="json",
+        )
+
+        self.assertEqual(options.status_code, 200)
+        self.assertEqual(generic_departments.status_code, 403)
+        self.assertEqual(
+            {item["id"] for item in options.data["results"]},
+            {self.dept_a.id, self.dept_b.id, self.tertiary_a.department_id},
+        )
+        self.assertEqual(assignment.status_code, 200)
+        self.assertEqual(
+            assignment.data["current_department"], self.tertiary_a.department_id
+        )
+
     def test_admin_can_enable_valid_ai_special_route_config(self):
         self.client.force_authenticate(self.admin)
         for key, value in [
-            ("ai_special_route_secondary_contact_id", self.secondary_a.id),
-            ("ai_special_route_tertiary_contact_id", self.tertiary_a.id),
+            ("ai_special_route_secondary_department_id", self.dept_a.id),
+            (
+                "ai_special_route_tertiary_department_id",
+                self.tertiary_a.department_id,
+            ),
             ("ai_special_route_threshold", 0.9),
             ("ai_special_route_enabled", True),
         ]:
@@ -1150,22 +1206,22 @@ class RbacApiTests(TestCase):
 
         config = ai_config.get_ai_special_route_config(validate=True)
         self.assertTrue(config.enabled)
-        self.assertEqual(config.secondary_contact_id, self.secondary_a.id)
-        self.assertEqual(config.tertiary_contact_id, self.tertiary_a.id)
+        self.assertEqual(config.secondary_department_id, self.dept_a.id)
+        self.assertEqual(
+            config.tertiary_department_id, self.tertiary_a.department_id
+        )
 
-    def test_special_route_rejects_contacts_outside_same_department_tree(self):
-        wrong_tertiary = m.Contact.objects.create(
-            name="产品三级接口人",
-            employee_no="T-B",
-            department=m.Department.objects.create(
-                name="产品三级组", level=3, parent=self.dept_b
-            ),
-            contact_level=m.Contact.LEVEL_TERTIARY,
+    def test_special_route_rejects_departments_outside_same_department_tree(self):
+        wrong_tertiary_department = m.Department.objects.create(
+            name="产品三级组", level=3, parent=self.dept_b
         )
         self.client.force_authenticate(self.admin)
         for key, value in [
-            ("ai_special_route_secondary_contact_id", self.secondary_a.id),
-            ("ai_special_route_tertiary_contact_id", wrong_tertiary.id),
+            ("ai_special_route_secondary_department_id", self.dept_a.id),
+            (
+                "ai_special_route_tertiary_department_id",
+                wrong_tertiary_department.id,
+            ),
         ]:
             response = self.client.patch(
                 f"/api/ai-connection/settings/{key}/", {"value": value}, format="json"
@@ -1179,7 +1235,7 @@ class RbacApiTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("上下级部门", response.data["detail"])
+        self.assertIn("上下级关系", response.data["detail"])
 
     def test_ai_mode_becomes_available_after_successful_connection_test(self):
         self.client.force_authenticate(self.admin)
@@ -1839,18 +1895,18 @@ class ListFilteringPaginationApiTests(TestCase):
             resume=visible_resume,
             attempt_no=1,
             source=m.AssignmentAttempt.SOURCE_RULE,
-            status=m.AssignmentAttempt.STATUS_DISPATCHED_L2,
-            department=own_department,
-            contact=own_contact,
+            status=m.AssignmentAttempt.STATUS_DISPATCHED,
+            initial_department=own_department,
+            current_department=own_department,
         )
         m.AssignmentAttempt.objects.create(
             workflow=workflow,
             resume=hidden_resume,
             attempt_no=2,
             source=m.AssignmentAttempt.SOURCE_RULE,
-            status=m.AssignmentAttempt.STATUS_DISPATCHED_L2,
-            department=other_department,
-            contact=other_contact,
+            status=m.AssignmentAttempt.STATUS_DISPATCHED,
+            initial_department=other_department,
+            current_department=other_department,
         )
         contact_user = User.objects.create_user(
             username="APPLY-DATE-OWN",
@@ -2334,6 +2390,33 @@ class ListFilteringPaginationApiTests(TestCase):
         self.assertEqual([item["id"] for item in response.data["results"]], [candidate.id])
         self.assertEqual(response.data["results"][0]["school_tag"], "非目标院校")
 
+    def test_candidate_list_exposes_and_filters_multiple_school_tags(self):
+        first = m.SchoolTag.objects.create(code="MULTI_A", name="多学历标签A")
+        second = m.SchoolTag.objects.create(code="MULTI_B", name="多学历标签B")
+        candidate = m.Candidate.objects.create(
+            identity_hash="candidate-multiple-school-tags",
+            name="多学历候选人",
+            phone="13830000101",
+        )
+        candidate.school_tags.add(first, second)
+        m.Resume.objects.create(
+            candidate=candidate,
+            apply_id="MULTI-SCHOOL-TAGS",
+            position_name="后端工程师",
+            volunteer_rank=1,
+        )
+
+        response = self.client.get(
+            "/api/candidates/", {"school_tag_in": "多学历标签B"}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item["id"] for item in response.data["results"]], [candidate.id])
+        self.assertEqual(
+            {item["name"] for item in response.data["results"][0]["school_tags"]},
+            {"多学历标签A", "多学历标签B"},
+        )
+
     def test_candidate_list_exposes_workflow_merge_fields_and_assignment_reason(self):
         department = m.Department.objects.create(name="研发中心", level=2)
         contact = m.Contact.objects.create(
@@ -2348,6 +2431,12 @@ class ListFilteringPaginationApiTests(TestCase):
             name="分配候选人",
             phone="13830000001",
         )
+        job = m.Job.objects.create(
+            department=department,
+            public_name="后端工程师",
+            position_name="后端工程师",
+            responsibilities="负责后端研发。",
+        )
         resume = m.Resume.objects.create(
             candidate=candidate,
             apply_id="MERGE001",
@@ -2355,6 +2444,7 @@ class ListFilteringPaginationApiTests(TestCase):
             volunteer_rank=1,
             job_category="技术类",
             category_reason="岗位名命中",
+            job=job,
         )
         workflow = m.CandidateWorkflow.objects.create(
             candidate=candidate,
@@ -2368,8 +2458,8 @@ class ListFilteringPaginationApiTests(TestCase):
             attempt_no=1,
             source=m.AssignmentAttempt.SOURCE_RULE,
             status=m.AssignmentAttempt.STATUS_PENDING_DISPATCH,
-            department=department,
-            contact=contact,
+            initial_department=department,
+            current_department=department,
             match_reason="院校准入；分配至研发中心/二级接口人",
         )
 
@@ -2445,8 +2535,8 @@ class ListFilteringPaginationApiTests(TestCase):
             status=m.CandidateWorkflow.STATUS_IN_PROGRESS,
             current_resume=keep_resume,
             current_rank=1,
-            block_reason=m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND,
-            block_detail="二级部门研发中心缺少启用接口人",
+            block_reason=m.CandidateWorkflow.BLOCK_JOB_HC_EXHAUSTED,
+            block_detail="研发中心当前任务岗位 HC 容量已用尽",
         )
         drop = m.Candidate.objects.create(
             identity_hash="candidate-merge-drop",
@@ -2567,8 +2657,8 @@ class ListFilteringPaginationApiTests(TestCase):
             status=m.CandidateWorkflow.STATUS_IN_PROGRESS,
             current_resume=current_resume,
             current_rank=2,
-            block_reason=m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND,
-            block_detail="当前志愿缺少新部门接口人",
+            block_reason=m.CandidateWorkflow.BLOCK_JOB_HC_EXHAUSTED,
+            block_detail="新部门当前任务岗位 HC 容量已用尽",
         )
         m.AssignmentAttempt.objects.create(
             workflow=workflow,
@@ -2576,8 +2666,8 @@ class ListFilteringPaginationApiTests(TestCase):
             attempt_no=1,
             source=m.AssignmentAttempt.SOURCE_RULE,
             status=m.AssignmentAttempt.STATUS_REJECTED,
-            department=old_department,
-            contact=old_contact,
+            initial_department=old_department,
+            current_department=old_department,
             match_reason="历史分配至旧部门",
         )
 
@@ -2589,7 +2679,7 @@ class ListFilteringPaginationApiTests(TestCase):
         self.assertEqual(row["job_department_name"], "新部门")
         self.assertEqual(row["reason_type"], "block")
         self.assertIn("新部门", row["reason_text"])
-        self.assertEqual(row["system_status"], "archived")
+        self.assertEqual(row["system_status"], "pending_reallocation")
 
     def test_candidate_list_filters_follow_current_summary_not_history_attempts(self):
         old_department = m.Department.objects.create(name="旧部门", level=2)
@@ -2633,17 +2723,17 @@ class ListFilteringPaginationApiTests(TestCase):
             status=m.CandidateWorkflow.STATUS_IN_PROGRESS,
             current_resume=current_resume,
             current_rank=2,
-            block_reason=m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND,
-            block_detail="当前志愿缺少新部门接口人",
+            block_reason=m.CandidateWorkflow.BLOCK_JOB_HC_EXHAUSTED,
+            block_detail="新部门当前任务岗位 HC 容量已用尽",
         )
-        m.AssignmentAttempt.objects.create(
+        attempt = m.AssignmentAttempt.objects.create(
             workflow=workflow,
             resume=old_resume,
             attempt_no=1,
             source=m.AssignmentAttempt.SOURCE_RULE,
             status=m.AssignmentAttempt.STATUS_REJECTED,
-            department=old_department,
-            contact=old_contact,
+            initial_department=old_department,
+            current_department=old_department,
             match_reason="历史分配至旧部门",
         )
 
@@ -2753,8 +2843,8 @@ class ListFilteringPaginationApiTests(TestCase):
             attempt_no=1,
             source=m.AssignmentAttempt.SOURCE_RULE,
             status=m.AssignmentAttempt.STATUS_PENDING_DISPATCH,
-            department=department,
-            contact=contact,
+            initial_department=department,
+            current_department=department,
         )
 
         response = self.client.get(
@@ -2929,12 +3019,15 @@ class ListFilteringPaginationApiTests(TestCase):
             status=m.CandidateWorkflow.STATUS_ARCHIVED,
             archive_reason=m.CandidateWorkflow.ARCHIVE_JOB_NOT_MATCHED,
         )
+        department = m.Department.objects.create(name="历史工作流部门", level=2)
         m.AssignmentAttempt.objects.create(
             workflow=workflow,
             resume=resume,
             attempt_no=1,
             source=m.AssignmentAttempt.SOURCE_RULE,
             status=m.AssignmentAttempt.STATUS_CANCELLED,
+            initial_department=department,
+            current_department=department,
         )
 
         response = self.client.get("/api/workflows/", {"status": "archived"})
@@ -3090,17 +3183,14 @@ class ListFilteringPaginationApiTests(TestCase):
             [item["id"] for item in filter_response.data["results"]], [keep.id]
         )
 
-    def test_job_hierarchy_serialization_filters_and_legacy_secondary_alias(self):
+    def test_job_hierarchy_serialization_filters_and_secondary_alias(self):
         primary = m.Department.objects.create(name="技术中心", level=1)
         secondary = m.Department.objects.create(
             name="平台部", level=2, parent=primary
         )
-        tertiary = m.Department.objects.create(
-            name="平台研发组", level=3, parent=secondary
-        )
         keep = m.Job.objects.create(
             entity="GW",
-            department=tertiary,
+            department=secondary,
             public_name="后端开发",
             position_name="后端工程师",
             category="技术类",
@@ -3118,19 +3208,18 @@ class ListFilteringPaginationApiTests(TestCase):
         response = self.client.get(f"/api/jobs/{keep.id}/")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["department"], tertiary.id)
+        self.assertEqual(response.data["department"], secondary.id)
         self.assertEqual(response.data["department_name"], "平台部")
         self.assertEqual(response.data["primary_department_id"], primary.id)
         self.assertEqual(response.data["primary_department_name"], "技术中心")
         self.assertEqual(response.data["secondary_department_id"], secondary.id)
         self.assertEqual(response.data["secondary_department_name"], "平台部")
-        self.assertEqual(response.data["tertiary_department_id"], tertiary.id)
-        self.assertEqual(response.data["tertiary_department_name"], "平台研发组")
+        self.assertNotIn("tertiary_department_id", response.data)
+        self.assertNotIn("tertiary_department_name", response.data)
 
         for params in (
             {"primary_department_name_in": "技术中心", "position_name_in": "后端工程师"},
             {"secondary_department_name_in": "平台部", "position_name_in": "后端工程师"},
-            {"tertiary_department_name_in": "平台研发组"},
             {"department_name_in": "平台部", "position_name_in": "后端工程师"},
             {"department_name": "平台", "position_name_in": "后端工程师"},
         ):
@@ -3151,10 +3240,7 @@ class ListFilteringPaginationApiTests(TestCase):
             "平台部",
             [item["value"] for item in options.data["secondary_department_name"]],
         )
-        self.assertIn(
-            "平台研发组",
-            [item["value"] for item in options.data["tertiary_department_name"]],
-        )
+        self.assertNotIn("tertiary_department_name", options.data)
         self.assertEqual(
             options.data["department_name"],
             options.data["secondary_department_name"],
@@ -3264,7 +3350,7 @@ class ListFilteringPaginationApiTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("department", response.data)
 
-    def test_job_create_and_legacy_update_require_responsibilities(self):
+    def test_job_create_requires_responsibilities_and_legacy_update_requires_department(self):
         create_response = self.client.post(
             "/api/jobs/",
             {
@@ -3288,7 +3374,7 @@ class ListFilteringPaginationApiTests(TestCase):
         self.assertEqual(create_response.status_code, 400)
         self.assertIn("responsibilities", create_response.data)
         self.assertEqual(update_response.status_code, 400)
-        self.assertIn("responsibilities", update_response.data)
+        self.assertIn("department", update_response.data)
 
     def test_delete_job_deactivates_instead_of_removing_record(self):
         department = m.Department.objects.create(name="研发中心", level=2)
@@ -3470,14 +3556,8 @@ class ListFilteringPaginationApiTests(TestCase):
         self.assertEqual(contact.name_pinyin, "wangwu")
         self.assertEqual(contact.name_pinyin_initials, "ww")
 
-    def test_candidate_contact_filter_supports_contact_name_pinyin(self):
+    def test_candidate_current_department_filter_and_options_use_department(self):
         department = m.Department.objects.create(name="技术二部", level=2)
-        contact = m.Contact.objects.create(
-            name="王五",
-            employee_no="PINYIN002",
-            department=department,
-            contact_level=m.Contact.LEVEL_SECONDARY,
-        )
         candidate = m.Candidate.objects.create(
             identity_hash="candidate-contact-pinyin",
             name="候选人甲",
@@ -3501,26 +3581,35 @@ class ListFilteringPaginationApiTests(TestCase):
             attempt_no=1,
             source=m.AssignmentAttempt.SOURCE_RULE,
             status=m.AssignmentAttempt.STATUS_PENDING_DISPATCH,
-            department=department,
-            contact=contact,
+            initial_department=department,
+            current_department=department,
         )
 
-        response = self.client.get("/api/candidates/", {"contact_name": "ww"})
+        response = self.client.get(
+            "/api/candidates/", {"current_department_id": department.id}
+        )
+        options_response = self.client.get("/api/candidates/filter-options/")
 
         self.assertEqual([item["id"] for item in response.data["results"]], [candidate.id])
+        options = {
+            item["value"]: item
+            for item in options_response.data["current_department"]
+        }
+        self.assertIn("jishuerbu", options[department.id]["search_text"])
 
-    def test_candidate_filter_options_respect_contact_rbac_scope(self):
-        department = m.Department.objects.create(name="范围二部", level=2)
+    def test_candidate_filter_options_respect_department_rbac_scope(self):
+        own_department = m.Department.objects.create(name="本人范围二部", level=2)
+        other_department = m.Department.objects.create(name="其他范围二部", level=2)
         own_contact = m.Contact.objects.create(
             name="本人接口人",
             employee_no="SCOPE001",
-            department=department,
+            department=own_department,
             contact_level=m.Contact.LEVEL_SECONDARY,
         )
         other_contact = m.Contact.objects.create(
             name="其他接口人",
             employee_no="SCOPE002",
-            department=department,
+            department=other_department,
             contact_level=m.Contact.LEVEL_SECONDARY,
         )
         contact_user = User.objects.create_user(
@@ -3530,8 +3619,9 @@ class ListFilteringPaginationApiTests(TestCase):
             contact=own_contact,
         )
         contact_user.groups.add(Group.objects.get(name="二级接口人"))
-        for index, (contact, position) in enumerate(
-            [(own_contact, "可见岗位"), (other_contact, "不可见岗位")], start=1
+        for index, (department, position) in enumerate(
+            [(own_department, "可见岗位"), (other_department, "不可见岗位")],
+            start=1,
         ):
             candidate = m.Candidate.objects.create(
                 identity_hash=f"candidate-option-scope-{index}",
@@ -3555,9 +3645,9 @@ class ListFilteringPaginationApiTests(TestCase):
                 resume=resume,
                 attempt_no=1,
                 source=m.AssignmentAttempt.SOURCE_RULE,
-                status=m.AssignmentAttempt.STATUS_DISPATCHED_L2,
-                department=department,
-                contact=contact,
+                status=m.AssignmentAttempt.STATUS_DISPATCHED,
+                initial_department=department,
+                current_department=department,
             )
 
         self.client.force_authenticate(contact_user)
@@ -3609,7 +3699,7 @@ class JobExportApiTests(TestCase):
         for index in range(22):
             job = m.Job.objects.create(
                 entity="GW",
-                department=self.tertiary,
+                department=self.secondary,
                 category="技术类",
                 public_name=f"后端开发{index}",
                 is_public=index % 2 == 0,
@@ -3629,7 +3719,7 @@ class JobExportApiTests(TestCase):
         m.JobMajor.objects.create(job=jobs[0], major="软件工程")
         m.Job.objects.create(
             entity="GW",
-            department=self.tertiary,
+            department=self.secondary,
             public_name="停用岗位",
             position_name="停用岗位",
             responsibilities="停用岗位职责",
@@ -3637,7 +3727,7 @@ class JobExportApiTests(TestCase):
         )
         m.Job.objects.create(
             entity="YLS",
-            department=self.tertiary,
+            department=self.secondary,
             public_name="其它主体岗位",
             position_name="其它主体岗位",
             responsibilities="其它主体职责",
@@ -3647,7 +3737,7 @@ class JobExportApiTests(TestCase):
             "/api/jobs/export/",
             {
                 "entity_in": "GW",
-                "tertiary_department_name_in": "平台研发组",
+                "secondary_department_name_in": "平台部",
                 "page": 2,
                 "page_size": 1,
             },
@@ -3664,7 +3754,6 @@ class JobExportApiTests(TestCase):
                 "招聘主体",
                 "一层部门",
                 "二层部门",
-                "三级部门",
                 "岗位类别",
                 "对外发布名称",
                 "是否对外发布",
@@ -3679,14 +3768,13 @@ class JobExportApiTests(TestCase):
         )
         self.assertEqual(sheet.max_row, 23)
         self.assertEqual(sheet.freeze_panes, "A2")
-        self.assertEqual(sheet.auto_filter.ref, "A1:N23")
+        self.assertEqual(sheet.auto_filter.ref, "A1:M23")
         self.assertEqual(
-            [sheet.cell(row=2, column=index).value for index in range(1, 15)],
+            [sheet.cell(row=2, column=index).value for index in range(1, 14)],
             [
                 "GW",
                 "技术中心",
                 "平台部",
-                "平台研发组",
                 "技术类",
                 "后端开发0",
                 "是",
@@ -3734,7 +3822,7 @@ class CandidateExportApiTests(TestCase):
         response = self.client.get("/api/candidates/export-fields/")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["version"], 2)
+        self.assertEqual(response.data["version"], 4)
         self.assertEqual(
             [group["key"] for group in response.data["groups"]],
             ["candidate", "current_resume", "job", "allocation", "status_reason"],
@@ -3755,11 +3843,11 @@ class CandidateExportApiTests(TestCase):
                 "current_apply_id",
                 "current_position_name",
                 "volunteer_rank",
-                "allocation_secondary_department",
-                "secondary_contact",
-                "tertiary_contact",
-                "allocation_source",
+                "initial_department",
+                "current_primary_department",
+                "current_department",
                 "resume_status",
+                "feedback_reason",
             },
         )
         for private_key in {
@@ -3815,10 +3903,10 @@ class CandidateExportApiTests(TestCase):
                 "当前应聘ID",
                 "当前岗位",
                 "当前志愿",
-                "分配来源",
-                "二级部门",
-                "二级接口人",
-                "三级接口人",
+                "首次部门",
+                "当前接收一级部门",
+                "当前接收部门",
+                "不通过原因",
                 "简历状态",
             ],
         )
@@ -3924,16 +4012,25 @@ class CandidateExportApiTests(TestCase):
         )
         fixed_utc = datetime.fromisoformat("2026-07-01T00:00:00+00:00")
         m.Candidate.objects.filter(pk=candidate.pk).update(imported_at=fixed_utc)
-        m.AssignmentAttempt.objects.create(
+        attempt = m.AssignmentAttempt.objects.create(
             workflow=workflow,
             resume=current,
             attempt_no=1,
             source=m.AssignmentAttempt.SOURCE_RULE,
-            status=m.AssignmentAttempt.STATUS_DISPATCHED_L2,
-            department=secondary,
-            contact=contact,
-            department_name_snapshot="当前二级部快照",
+            status=m.AssignmentAttempt.STATUS_DISPATCHED,
+            initial_department=secondary,
+            current_department=secondary,
+            initial_department_name_snapshot="当前二级部快照",
+            current_department_name_snapshot="当前二级部快照",
             dispatched_at=fixed_utc,
+        )
+        dispatch_event = m.AssignmentHandlingEvent.objects.create(
+            attempt=attempt,
+            event_type=m.AssignmentHandlingEvent.EVENT_DEPARTMENT_DISPATCHED,
+            to_department=secondary,
+        )
+        m.AssignmentHandlingEvent.objects.filter(pk=dispatch_event.pk).update(
+            occurred_at=fixed_utc
         )
 
         response = self.client.get(
@@ -3942,9 +4039,9 @@ class CandidateExportApiTests(TestCase):
                 "ids": candidate.id,
                 "fields": (
                     "responsibilities,required_majors,all_resume_filenames,"
-                    "all_apply_ids,allocation_secondary_department,volunteer_rank,"
+                    "all_apply_ids,initial_department,volunteer_rank,"
                     "current_position_name,current_apply_id,candidate_phone,candidate_name,"
-                    "candidate_imported_at,dispatched_at"
+                    "candidate_imported_at,first_dispatched_at"
                 ),
             },
         )
@@ -3962,9 +4059,9 @@ class CandidateExportApiTests(TestCase):
         self.assertEqual(row["全部简历文件名"], "first.pdf、current.pdf")
         self.assertEqual(row["需求专业"], "计算机、软件工程")
         self.assertEqual(row["工作职责"], "'=HYPERLINK(\"bad\")")
-        self.assertEqual(row["二级部门"], "当前二级部快照")
+        self.assertEqual(row["首次部门"], secondary.name)
         self.assertEqual(row["候选人导入时间"], "2026-07-01 08:00:00")
-        self.assertEqual(row["下发时间"], "2026-07-01 08:00:00")
+        self.assertEqual(row["首次下发时间"], "2026-07-01 08:00:00")
         responsibility_column = headers.index("工作职责") + 1
         self.assertTrue(sheet.cell(row=2, column=responsibility_column).alignment.wrap_text)
 
@@ -4011,18 +4108,18 @@ class CandidateExportApiTests(TestCase):
             resume=visible_resume,
             attempt_no=1,
             source=m.AssignmentAttempt.SOURCE_RULE,
-            status=m.AssignmentAttempt.STATUS_DISPATCHED_L2,
-            department=own_department,
-            contact=own_contact,
+            status=m.AssignmentAttempt.STATUS_DISPATCHED,
+            initial_department=own_department,
+            current_department=own_department,
         )
         m.AssignmentAttempt.objects.create(
             workflow=workflow,
             resume=hidden_resume,
             attempt_no=2,
             source=m.AssignmentAttempt.SOURCE_RULE,
-            status=m.AssignmentAttempt.STATUS_DISPATCHED_L2,
-            department=other_department,
-            contact=other_contact,
+            status=m.AssignmentAttempt.STATUS_DISPATCHED,
+            initial_department=other_department,
+            current_department=other_department,
         )
         user = User.objects.create_user(
             username="EXPORT-OWN-L2",
@@ -4237,9 +4334,9 @@ class CandidateExportApiTests(TestCase):
                 resume=resume,
                 attempt_no=1,
                 source=m.AssignmentAttempt.SOURCE_RULE,
-                status=m.AssignmentAttempt.STATUS_DISPATCHED_L2,
-                department=department,
-                contact=contact,
+                status=m.AssignmentAttempt.STATUS_DISPATCHED,
+                initial_department=department,
+                current_department=department,
             )
 
             with self.settings(MEDIA_ROOT=media_root):
@@ -4281,12 +4378,15 @@ class CandidateExportApiTests(TestCase):
             current_resume=resume,
             current_rank=1,
         )
+        department = m.Department.objects.create(name="尝试清单部门", level=2)
         attempt = m.AssignmentAttempt.objects.create(
             workflow=workflow,
             resume=resume,
             attempt_no=1,
             source=m.AssignmentAttempt.SOURCE_RULE,
             status=m.AssignmentAttempt.STATUS_PENDING_DISPATCH,
+            initial_department=department,
+            current_department=department,
         )
 
         with patch(
@@ -4343,7 +4443,8 @@ class CandidateExportApiTests(TestCase):
             attempt_no=1,
             source=m.AssignmentAttempt.SOURCE_RULE,
             status=m.AssignmentAttempt.STATUS_REJECTED,
-            department=first_department,
+            initial_department=first_department,
+            current_department=first_department,
         )
         latest_attempt = m.AssignmentAttempt.objects.create(
             workflow=workflow,
@@ -4351,7 +4452,8 @@ class CandidateExportApiTests(TestCase):
             attempt_no=2,
             source=m.AssignmentAttempt.SOURCE_MANUAL,
             status=m.AssignmentAttempt.STATUS_PENDING_DISPATCH,
-            department=latest_department,
+            initial_department=latest_department,
+            current_department=latest_department,
         )
 
         response = self.client.get(
@@ -4360,7 +4462,7 @@ class CandidateExportApiTests(TestCase):
                 "ids": f"{first_attempt.id},{latest_attempt.id}",
                 "fields": (
                     "current_apply_id,all_apply_ids,allocation_source,"
-                    "allocation_secondary_department"
+                    "current_department"
                 ),
             },
         )
@@ -4377,7 +4479,7 @@ class CandidateExportApiTests(TestCase):
             f"{first_resume.apply_id}、{latest_resume.apply_id}",
         )
         self.assertEqual(row["分配来源"], "手动强制分配")
-        self.assertEqual(row["二级部门"], latest_department.name)
+        self.assertEqual(row["当前接收部门"], latest_department.name)
 
 
 class ResumeResultReportApiTests(TestCase):
@@ -4436,10 +4538,8 @@ class ResumeResultReportApiTests(TestCase):
             attempt_no=attempt_no,
             source=m.AssignmentAttempt.SOURCE_RULE,
             status=status,
-            department=self.department,
-            contact=self.contact,
-            department_name_snapshot="历史研发部",
-            contact_name_snapshot="历史二级接口人",
+            initial_department=self.department,
+            current_department=self.department,
         )
 
     def test_result_report_validates_required_and_ordered_dates(self):
@@ -4484,6 +4584,9 @@ class ResumeResultReportApiTests(TestCase):
         latest_department = m.Department.objects.create(
             name="最新归属部门", level=2, parent=latest_primary_department
         )
+        latest_node = m.Department.objects.create(
+            name="最新三级收件节点", level=3, parent=latest_department
+        )
         latest_contact = m.Contact.objects.create(
             name="最新接口人",
             employee_no="REPORT-LATEST-L2",
@@ -4504,19 +4607,17 @@ class ResumeResultReportApiTests(TestCase):
             attempt_no=1,
             source=m.AssignmentAttempt.SOURCE_RULE,
             status=m.AssignmentAttempt.STATUS_REJECTED,
-            department=self.department,
-            contact=self.contact,
-            department_name_snapshot="旧归属部门快照",
+            initial_department=self.department,
+            current_department=self.department,
         )
         m.AssignmentAttempt.objects.create(
             workflow=moved_workflow,
             resume=moved,
             attempt_no=2,
             source=m.AssignmentAttempt.SOURCE_MANUAL,
-            status=m.AssignmentAttempt.STATUS_DISPATCHED_L2,
-            department=latest_department,
-            contact=latest_contact,
-            department_name_snapshot="最新归属部门快照",
+            status=m.AssignmentAttempt.STATUS_DISPATCHED,
+            initial_department=latest_department,
+            current_department=latest_node,
         )
         m.AssignmentAttempt.objects.create(
             workflow=moved_workflow,
@@ -4524,11 +4625,10 @@ class ResumeResultReportApiTests(TestCase):
             attempt_no=3,
             source=m.AssignmentAttempt.SOURCE_MANUAL,
             status=m.AssignmentAttempt.STATUS_CANCELLED,
-            department=self.department,
-            contact=self.contact,
-            department_name_snapshot="取消尝试部门快照",
+            initial_department=self.department,
+            current_department=self.department,
         )
-        self._attempt(unchanged, m.AssignmentAttempt.STATUS_DISPATCHED_L2)
+        self._attempt(unchanged, m.AssignmentAttempt.STATUS_DISPATCHED)
 
         response = self.client.get(
             "/api/resumes/result-report/",
@@ -4552,7 +4652,8 @@ class ResumeResultReportApiTests(TestCase):
         rows = list(workbook["简历明细"].iter_rows(values_only=True))
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[1][2], moved.apply_id)
-        self.assertEqual(rows[1][7], "最新归属部门快照")
+        self.assertEqual(rows[1][9], latest_department.name)
+        self.assertEqual(rows[1][10], latest_node.name)
         self.assertEqual(primary_response.status_code, 200)
         primary_workbook = load_workbook(BytesIO(primary_response.content))
         primary_rows = list(
@@ -4593,9 +4694,9 @@ class ResumeResultReportApiTests(TestCase):
             resume=historical,
             attempt_no=1,
             source=m.AssignmentAttempt.SOURCE_RULE,
-            status=m.AssignmentAttempt.STATUS_DISPATCHED_L2,
-            department=historical_department,
-            contact=historical_contact,
+            status=m.AssignmentAttempt.STATUS_DISPATCHED,
+            initial_department=historical_department,
+            current_department=historical_department,
         )
         m.AssignmentAttempt.objects.create(
             workflow=workflow,
@@ -4603,8 +4704,8 @@ class ResumeResultReportApiTests(TestCase):
             attempt_no=2,
             source=m.AssignmentAttempt.SOURCE_RULE,
             status=m.AssignmentAttempt.STATUS_PENDING_DISPATCH,
-            department=self.department,
-            contact=self.contact,
+            initial_department=self.department,
+            current_department=self.department,
         )
 
         response = self.client.get(
@@ -4615,34 +4716,48 @@ class ResumeResultReportApiTests(TestCase):
                 "department_id": historical_department.id,
             },
         )
+        current_response = self.client.get(
+            "/api/resumes/result-report/",
+            {
+                "imported_after": "2026-07-01",
+                "imported_before": "2026-07-02",
+                "department_id": self.department.id,
+            },
+        )
 
         self.assertEqual(response.status_code, 200)
         workbook = load_workbook(BytesIO(response.content))
         rows = list(workbook["简历明细"].iter_rows(values_only=True))
         self.assertEqual(len(rows), 1)
+        self.assertEqual(current_response.status_code, 200)
+        current_workbook = load_workbook(BytesIO(current_response.content))
+        current_rows = list(
+            current_workbook["简历明细"].iter_rows(values_only=True)
+        )
+        self.assertEqual(len(current_rows), 3)
+        self.assertEqual(
+            {row[9] for row in current_rows[1:]}, {self.department.name}
+        )
 
     def test_result_report_uses_resume_status_snapshot_and_formula_protection(self):
         unassigned = self._resume("0001", name="=2+2", offset_hours=0)
         pending = self._resume("0002", offset_hours=12)
         passed = self._resume("0003", offset_hours=47)
         excluded = self._resume("0004", offset_hours=48)
-        pending_attempt = self._attempt(
-            pending, m.AssignmentAttempt.STATUS_ASSIGNED_L3
+        pending_attempt = self._attempt(pending, m.AssignmentAttempt.STATUS_DISPATCHED)
+        tertiary_department = m.Department.objects.create(
+            name="历史三级部", level=3, parent=self.department
         )
-        pending_attempt.sub_department_name_snapshot = "历史三级部"
-        pending_attempt.sub_contact_name_snapshot = "历史三级接口人"
-        pending_attempt.save(
-            update_fields=["sub_department_name_snapshot", "sub_contact_name_snapshot"]
-        )
+        pending_attempt.current_department = tertiary_department
+        pending_attempt.save(update_fields=["current_department"])
         m.AssignmentAttempt.objects.create(
             workflow=pending_attempt.workflow,
             resume=pending,
             attempt_no=2,
             source=m.AssignmentAttempt.SOURCE_MANUAL,
             status=m.AssignmentAttempt.STATUS_CANCELLED,
-            department=self.department,
-            contact=self.contact,
-            department_name_snapshot="不应统计的取消部门",
+            initial_department=self.department,
+            current_department=self.department,
         )
         passed_attempt = self._attempt(passed, m.AssignmentAttempt.STATUS_PASSED)
         passed_attempt.feedback_result = m.AssignmentAttempt.FEEDBACK_PASSED
@@ -4661,19 +4776,26 @@ class ResumeResultReportApiTests(TestCase):
             response["Content-Disposition"],
         )
         workbook = load_workbook(BytesIO(response.content))
-        self.assertEqual(workbook.sheetnames, ["部门汇总", "简历明细"])
+        self.assertEqual(
+            workbook.sheetnames,
+            ["部门汇总", "简历明细", "不通过原因汇总"],
+        )
         summary_rows = list(workbook["部门汇总"].iter_rows(values_only=True))
-        summary_by_department = {row[0]: row for row in summary_rows[1:]}
-        self.assertEqual(summary_by_department["历史研发部"][1:4], (2, 2, 0))
-        self.assertEqual(summary_by_department["历史研发部"][8:10], (1, 1))
-        self.assertEqual(summary_by_department["未分配"][1:4], (1, 0, 1))
-        self.assertEqual(summary_by_department["合计"][1], 3)
+        summary_by_department = {(row[0], row[1]): row for row in summary_rows[1:]}
+        self.assertEqual(
+            summary_by_department[("当前一级部门", "当前研发部")][2:4],
+            (2, 2),
+        )
+        self.assertEqual(summary_by_department[("未分配", "未分配")][2:4], (1, 0))
+        self.assertEqual(summary_by_department[("合计", None)][2], 3)
         detail_rows = list(workbook["简历明细"].iter_rows(values_only=True))
         self.assertEqual(len(detail_rows), 4)
         self.assertNotIn("手机号", detail_rows[0])
         self.assertEqual(detail_rows[1][1], "'=2+2")
-        self.assertEqual(detail_rows[2][7], "历史研发部")
-        self.assertEqual(detail_rows[2][9], "历史三级部")
+        self.assertEqual(detail_rows[2][7], "当前研发部")
+        self.assertEqual(detail_rows[2][8], "当前一级部门")
+        self.assertEqual(detail_rows[2][9], "当前研发部")
+        self.assertEqual(detail_rows[2][10], "历史三级部")
         self.assertEqual(detail_rows[3][13], "通过")
         self.assertEqual(unassigned.apply_id, detail_rows[1][2])
 
@@ -4820,9 +4942,9 @@ class ResumePreviewApiTests(TestCase):
                 resume=resume,
                 attempt_no=1,
                 source=m.AssignmentAttempt.SOURCE_RULE,
-                status=m.AssignmentAttempt.STATUS_DISPATCHED_L2,
-                department=department,
-                contact=contact,
+                status=m.AssignmentAttempt.STATUS_DISPATCHED,
+                initial_department=department,
+                current_department=department,
             )
 
             self.client.force_authenticate(user)
@@ -4879,9 +5001,9 @@ class ResumePreviewApiTests(TestCase):
             resume=resume,
             attempt_no=1,
             source=m.AssignmentAttempt.SOURCE_RULE,
-            status=m.AssignmentAttempt.STATUS_DISPATCHED_L2,
-            department=other_department,
-            contact=other_contact,
+            status=m.AssignmentAttempt.STATUS_DISPATCHED,
+            initial_department=other_department,
+            current_department=other_department,
         )
 
         self.client.force_authenticate(user)
@@ -5165,8 +5287,8 @@ class ImportApiTests(TestCase):
             attempt_no=1,
             source=m.AssignmentAttempt.SOURCE_RULE,
             status=m.AssignmentAttempt.STATUS_PENDING_DISPATCH,
-            department=old_department,
-            contact=old_contact,
+            initial_department=old_department,
+            current_department=old_department,
         )
         buf = BytesIO()
         pd.DataFrame(
@@ -5335,7 +5457,7 @@ class MasterDataCrudApiTests(TestCase):
         self.assertEqual(duplicate.status_code, 400)
         self.assertIn("email", duplicate.data)
 
-    def test_job_create_and_update_accepts_valid_tertiary_but_rejects_primary_or_orphan(self):
+    def test_job_create_accepts_secondary_and_rejects_other_levels(self):
         primary = m.Department.objects.create(name="技术中心", level=1)
         secondary = m.Department.objects.create(
             name="平台部", level=2, parent=primary
@@ -5366,10 +5488,8 @@ class MasterDataCrudApiTests(TestCase):
             {"department": tertiary.id},
             format="json",
         )
-        self.assertEqual(updated.status_code, 200)
-        self.assertEqual(updated.data["department"], tertiary.id)
-        self.assertEqual(updated.data["department_name"], "平台部")
-        self.assertEqual(updated.data["tertiary_department_name"], "研发组")
+        self.assertEqual(updated.status_code, 400)
+        self.assertIn("department", updated.data)
 
         primary_response = self.client.patch(
             f"/api/jobs/{created.data['id']}/",
@@ -5434,7 +5554,7 @@ class MasterDataCrudApiTests(TestCase):
         self.assertIsNone(protected_admin.contact_id)
         self.assertTrue(protected_admin.is_superuser)
 
-    def test_create_and_update_school_keeps_platform_in_sync_with_tag(self):
+    def test_school_tag_updates_but_user_province_writes_are_rejected(self):
         first_tag = m.SchoolTag.objects.create(code="FIRST", name="第一标签")
         second_tag = m.SchoolTag.objects.create(code="SECOND", name="第二标签")
 
@@ -5442,7 +5562,6 @@ class MasterDataCrudApiTests(TestCase):
             "/api/schools/",
             {
                 "name": "测试大学",
-                "province": "湖北",
                 "school_tag": first_tag.id,
             },
             format="json",
@@ -5452,16 +5571,25 @@ class MasterDataCrudApiTests(TestCase):
         school = m.School.objects.get(name="测试大学")
         self.assertEqual(school.school_tag_id, first_tag.id)
         self.assertEqual(school.platform, "第一标签")
+        self.assertEqual(school.province, "")
+
+        province_response = self.client.patch(
+            f"/api/schools/{school.id}/",
+            {"province": "湖南"},
+            format="json",
+        )
+        self.assertEqual(province_response.status_code, 400)
+        self.assertIn("province", province_response.data)
 
         update_response = self.client.patch(
             f"/api/schools/{school.id}/",
-            {"province": "湖南", "school_tag": second_tag.id},
+            {"school_tag": second_tag.id},
             format="json",
         )
 
         self.assertEqual(update_response.status_code, 200)
         school.refresh_from_db()
-        self.assertEqual(school.province, "湖南")
+        self.assertEqual(school.province, "")
         self.assertEqual(school.school_tag_id, second_tag.id)
         self.assertEqual(school.platform, "第二标签")
 
@@ -5630,7 +5758,7 @@ class ContactDeleteApiTests(TestCase):
         self.assertFalse(m.Contact.objects.filter(id=contact.id).exists())
         self.assertFalse(User.objects.filter(id=user.id).exists())
 
-    def test_delete_contact_keeps_history_and_clears_contact_references(self):
+    def test_delete_contact_keeps_department_assignment_history(self):
         department = m.Department.objects.create(name="技术二部", level=2)
         contact = m.Contact.objects.create(
             name="有历史接口人",
@@ -5659,31 +5787,26 @@ class ContactDeleteApiTests(TestCase):
             resume=resume,
             attempt_no=1,
             source=m.AssignmentAttempt.SOURCE_RULE,
-            status=m.AssignmentAttempt.STATUS_DISPATCHED_L2,
-            department=department,
-            contact=contact,
-            contact_name_snapshot=contact.name,
-            contact_employee_no_snapshot=contact.employee_no,
+            status=m.AssignmentAttempt.STATUS_DISPATCHED,
+            initial_department=department,
+            current_department=department,
+            initial_department_name_snapshot=department.name,
+            current_department_name_snapshot=department.name,
             created_by=self.admin,
         )
-        handoff = m.AssignmentHandoff.objects.create(
+        event = m.AssignmentHandlingEvent.objects.create(
             attempt=attempt,
-            action=m.AssignmentHandoff.ACTION_HR_DISPATCH,
+            event_type=m.AssignmentHandlingEvent.EVENT_DEPARTMENT_DISPATCHED,
             to_department=department,
-            to_contact=contact,
             to_department_name_snapshot=department.name,
-            to_contact_name_snapshot=contact.name,
-            to_contact_employee_no_snapshot=contact.employee_no,
-            created_by_username_snapshot=self.admin.username,
-            created_by=self.admin,
+            actor_username_snapshot=self.admin.username,
+            actor=self.admin,
         )
         decision = m.AgentDispatchDecision.objects.create(
             workflow=workflow,
             resume=resume,
             recommendation=m.AgentDispatchDecision.RECOMMEND_DISPATCH,
-            recommended_contact=contact,
-            recommended_contact_name_snapshot=contact.name,
-            recommended_contact_employee_no_snapshot=contact.employee_no,
+            recommended_department=department,
         )
 
         response = self.client.delete(f"/api/contacts/{contact.id}/")
@@ -5691,19 +5814,15 @@ class ContactDeleteApiTests(TestCase):
         self.assertEqual(response.status_code, 204)
         self.assertFalse(m.Contact.objects.filter(id=contact.id).exists())
         attempt.refresh_from_db()
-        handoff.refresh_from_db()
+        event.refresh_from_db()
         decision.refresh_from_db()
-        self.assertIsNone(attempt.contact_id)
-        self.assertEqual(attempt.contact_name_snapshot, "有历史接口人")
-        self.assertEqual(attempt.contact_employee_no_snapshot, "DEL002")
-        self.assertIsNone(handoff.to_contact_id)
-        self.assertEqual(handoff.to_contact_name_snapshot, "有历史接口人")
-        self.assertEqual(handoff.to_contact_employee_no_snapshot, "DEL002")
-        self.assertEqual(handoff.to_department_name_snapshot, "技术二部")
-        self.assertEqual(handoff.created_by_username_snapshot, "admin-contact-delete")
-        self.assertIsNone(decision.recommended_contact_id)
-        self.assertEqual(decision.recommended_contact_name_snapshot, "有历史接口人")
-        self.assertEqual(decision.recommended_contact_employee_no_snapshot, "DEL002")
+        self.assertEqual(attempt.initial_department_id, department.id)
+        self.assertEqual(attempt.current_department_id, department.id)
+        self.assertEqual(attempt.current_department_name_snapshot, "技术二部")
+        self.assertEqual(event.to_department_id, department.id)
+        self.assertEqual(event.to_department_name_snapshot, "技术二部")
+        self.assertEqual(event.actor_username_snapshot, "admin-contact-delete")
+        self.assertEqual(decision.recommended_department_id, department.id)
 
     def test_contacts_list_defaults_to_active_contacts(self):
         department = m.Department.objects.create(name="技术二部", level=2)
@@ -5855,24 +5974,21 @@ class UserDeleteApiTests(TestCase):
             resume=resume,
             attempt_no=1,
             source=m.AssignmentAttempt.SOURCE_RULE,
-            status=m.AssignmentAttempt.STATUS_DISPATCHED_L2,
-            department=department,
-            contact=contact,
-            contact_name_snapshot=contact.name,
-            contact_employee_no_snapshot=contact.employee_no,
+            status=m.AssignmentAttempt.STATUS_DISPATCHED,
+            initial_department=department,
+            current_department=department,
+            initial_department_name_snapshot=department.name,
+            current_department_name_snapshot=department.name,
             created_by_username_snapshot=user.username,
             created_by=user,
         )
-        handoff = m.AssignmentHandoff.objects.create(
+        event = m.AssignmentHandlingEvent.objects.create(
             attempt=attempt,
-            action=m.AssignmentHandoff.ACTION_HR_DISPATCH,
+            event_type=m.AssignmentHandlingEvent.EVENT_DEPARTMENT_DISPATCHED,
             to_department=department,
-            to_contact=contact,
             to_department_name_snapshot=department.name,
-            to_contact_name_snapshot=contact.name,
-            to_contact_employee_no_snapshot=contact.employee_no,
-            created_by_username_snapshot=user.username,
-            created_by=user,
+            actor_username_snapshot=user.username,
+            actor=user,
         )
 
         response = self.client.delete(f"/api/users/{user.id}/")
@@ -5881,14 +5997,12 @@ class UserDeleteApiTests(TestCase):
         self.assertFalse(User.objects.filter(id=user.id).exists())
         self.assertFalse(m.Contact.objects.filter(id=contact.id).exists())
         attempt.refresh_from_db()
-        handoff.refresh_from_db()
-        self.assertIsNone(attempt.contact_id)
+        event.refresh_from_db()
         self.assertIsNone(attempt.created_by_id)
-        self.assertEqual(attempt.contact_name_snapshot, "绑定接口人")
-        self.assertEqual(attempt.contact_employee_no_snapshot, "E9003")
+        self.assertEqual(attempt.current_department_id, department.id)
+        self.assertEqual(attempt.current_department_name_snapshot, "技术二部")
         self.assertEqual(attempt.created_by_username_snapshot, "E9003")
-        self.assertIsNone(handoff.to_contact_id)
-        self.assertIsNone(handoff.created_by_id)
-        self.assertEqual(handoff.to_contact_name_snapshot, "绑定接口人")
-        self.assertEqual(handoff.to_contact_employee_no_snapshot, "E9003")
-        self.assertEqual(handoff.created_by_username_snapshot, "E9003")
+        self.assertEqual(event.to_department_id, department.id)
+        self.assertIsNone(event.actor_id)
+        self.assertEqual(event.to_department_name_snapshot, "技术二部")
+        self.assertEqual(event.actor_username_snapshot, "E9003")

@@ -1,4 +1,6 @@
-"""Step2 院校分类：第一/最高学历对照院校清单完整生成院校标签。"""
+"""Step2 院校分类：按当前有效简历的教育经历生成候选人院校标签。"""
+
+from apps.core import candidate_summary
 from apps.core import models as m
 
 
@@ -6,17 +8,18 @@ NON_TARGET_TAG_NAME = "非目标院校"
 NON_TARGET_TAG_CODE = "NON_TARGET"
 
 
-def _normalized(value):
+def normalize_school_name(value):
     return "".join((value or "").lower().split())
 
 
 def _non_target_school_tag():
-    non_target = _normalized(NON_TARGET_TAG_NAME)
+    non_target = normalize_school_name(NON_TARGET_TAG_NAME)
     configured = next(
         (
             tag
             for tag in m.SchoolTag.objects.filter(is_active=True).order_by("id")
-            if _normalized(tag.name) == non_target or tag.code == NON_TARGET_TAG_CODE
+            if normalize_school_name(tag.name) == non_target
+            or tag.code == NON_TARGET_TAG_CODE
         ),
         None,
     )
@@ -57,6 +60,57 @@ def _school_platform_name(tag, school):
     return "非目标院校"
 
 
+def _education_school_names(candidate):
+    """返回当前有效简历中已知的全部院校名称，保留导入字段作为基础兜底。"""
+    names = []
+    seen = set()
+
+    def add(value):
+        text = str(value or "").strip()
+        normalized = normalize_school_name(text)
+        if text and normalized not in seen:
+            seen.add(normalized)
+            names.append(text)
+
+    add(candidate.first_degree_school)
+    add(candidate.highest_degree_school)
+    resume = candidate_summary.current_resume(candidate)
+    try:
+        profile = resume.profile if resume else None
+    except m.ResumeProfile.DoesNotExist:
+        profile = None
+    for experience in getattr(profile, "education_experiences", []) or []:
+        if not isinstance(experience, dict):
+            continue
+        add(
+            experience.get("school_name")
+            or experience.get("school")
+            or experience.get("institution")
+        )
+    return names
+
+
+def sync_candidate_school_tags(candidate, school_map=None):
+    """按所有已知教育经历重建候选人的去重多标签集合。"""
+    if school_map is None:
+        school_map = {
+            normalize_school_name(school.name): school
+            for school in m.School.objects.select_related("school_tag")
+        }
+    non_target_tag = _non_target_school_tag()
+    default_tag = _default_school_tag(non_target_tag)
+    tags = []
+    seen_ids = set()
+    for name in _education_school_names(candidate):
+        school = school_map.get(normalize_school_name(name))
+        tag = _school_tag(school, default_tag, non_target_tag)
+        if tag and tag.id not in seen_ids:
+            seen_ids.add(tag.id)
+            tags.append(tag)
+    candidate.school_tags.set(tags)
+    return tags
+
+
 def classify_candidates(candidates, *, overwrite=True):
     """按当前院校清单为指定候选人完整生成并固化院校标签。
 
@@ -65,15 +119,20 @@ def classify_candidates(candidates, *, overwrite=True):
     兼容内部工具保留，不属于正式处理流程。
     """
     count = 0
-    school_map = {s.name: s for s in m.School.objects.select_related("school_tag")}
+    schools = list(m.School.objects.select_related("school_tag"))
+    school_map = {normalize_school_name(s.name): s for s in schools}
     non_target_tag = _non_target_school_tag()
     default_tag = _default_school_tag(non_target_tag)
     for cand in candidates:
         first_school = (
-            school_map.get(cand.first_degree_school) if cand.first_degree_school else None
+            school_map.get(normalize_school_name(cand.first_degree_school))
+            if cand.first_degree_school
+            else None
         )
         highest_school = (
-            school_map.get(cand.highest_degree_school) if cand.highest_degree_school else None
+            school_map.get(normalize_school_name(cand.highest_degree_school))
+            if cand.highest_degree_school
+            else None
         )
         first_tag = _school_tag(first_school, default_tag, non_target_tag)
         highest_tag = _school_tag(highest_school, default_tag, non_target_tag)
@@ -105,6 +164,7 @@ def classify_candidates(candidates, *, overwrite=True):
             update_fields.append("highest_degree_platform")
         if update_fields:
             cand.save(update_fields=update_fields)
+        sync_candidate_school_tags(cand, school_map)
         count += 1
     return count
 

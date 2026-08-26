@@ -2,6 +2,7 @@ from unittest.mock import patch
 from types import SimpleNamespace
 
 from django.test import TestCase
+from django.db.models.deletion import ProtectedError
 from django.utils import timezone
 
 from apps.accounts.models import User
@@ -23,13 +24,6 @@ class AllocationDesignContractTests(TestCase):
             }
         )
         self.department = m.Department.objects.create(name="技术部", level=2)
-        self.contact = m.Contact.objects.create(
-            name="二级接口人",
-            employee_no="L2001",
-            department=self.department,
-            contact_level=m.Contact.LEVEL_SECONDARY,
-            is_active=True,
-        )
         self.candidate = m.Candidate.objects.create(
             identity_hash="candidate-1",
             name="张三",
@@ -80,10 +74,18 @@ class AllocationDesignContractTests(TestCase):
             ),
             job=self.job,
             department=self.department,
-            contact=self.contact,
             confidence=confidence,
             score_breakdown=breakdown,
         )
+
+    def test_parent_department_with_children_cannot_be_deleted(self):
+        primary_department = m.Department.objects.create(name="研发中心", level=1)
+        m.Department.objects.create(
+            name="研发二部", level=2, parent=primary_department
+        )
+
+        with self.assertRaises(ProtectedError):
+            primary_department.delete()
 
     def test_rule_allocation_passes_school_gate_when_no_active_rules(self):
         message = allocate.run(mode="rule")
@@ -95,7 +97,7 @@ class AllocationDesignContractTests(TestCase):
         self.assertIsNone(attempt.matched_rule)
         self.assertEqual(self.candidate.workflow.status, m.CandidateWorkflow.STATUS_IN_PROGRESS)
 
-    def test_rule_allocation_uses_parent_secondary_contact_for_tertiary_job(self):
+    def test_job_model_rejects_tertiary_department(self):
         primary = m.Department.objects.create(name="研发中心", level=1)
         self.department.parent = primary
         self.department.save(update_fields=["parent"])
@@ -103,17 +105,8 @@ class AllocationDesignContractTests(TestCase):
             name="平台研发组", level=3, parent=self.department
         )
         self.job.department = tertiary
-        self.job.save(update_fields=["department"])
-
-        allocate.run(mode="rule")
-
-        attempt = m.AssignmentAttempt.objects.get()
-        self.resume.refresh_from_db()
-        self.assertEqual(self.resume.job, self.job)
-        self.assertEqual(attempt.department, self.department)
-        self.assertEqual(attempt.contact, self.contact)
-        self.assertIsNone(attempt.sub_department)
-        self.assertIsNone(attempt.sub_contact)
+        with self.assertRaisesRegex(ValueError, "岗位必须绑定二级部门"):
+            self.job.save(update_fields=["department"])
 
     def test_resume_process_freezes_scope_and_exposes_rule_first_stages(self):
         user = User.objects.create_user(username="hr-run-owner", password="pass")
@@ -208,12 +201,6 @@ class AllocationDesignContractTests(TestCase):
             volunteer_rank=2,
         )
         second_department = m.Department.objects.create(name="产品部", level=2)
-        m.Contact.objects.create(
-            name="产品接口人",
-            employee_no="L2002",
-            department=second_department,
-            contact_level=m.Contact.LEVEL_SECONDARY,
-        )
         m.Job.objects.create(
             department=second_department,
             public_name="产品经理",
@@ -280,6 +267,50 @@ class AllocationDesignContractTests(TestCase):
         self.assertEqual(attempt.matched_rule, rule)
         self.assertEqual(self.candidate.workflow.status, m.CandidateWorkflow.STATUS_IN_PROGRESS)
         self.assertIn("已生成 1 条候选人分配尝试", message)
+
+    def test_school_name_normalization_is_consistent_for_admission_and_all_tags(self):
+        target_tag = m.SchoolTag.objects.create(code="TARGET", name="目标院校")
+        m.School.objects.create(name="Example University", school_tag=target_tag)
+        rule = m.SchoolTagRule.objects.create(
+            name="目标院校", priority=1, is_active=True
+        )
+        for degree_type in (
+            m.SchoolTagRuleTag.DEGREE_FIRST,
+            m.SchoolTagRuleTag.DEGREE_HIGHEST,
+        ):
+            m.SchoolTagRuleTag.objects.create(
+                rule=rule,
+                school_tag=target_tag,
+                degree_type=degree_type,
+            )
+        self.candidate.first_degree_school = "  example   university  "
+        self.candidate.highest_degree_school = "EXAMPLE\tUNIVERSITY"
+        self.candidate.first_degree_tag = None
+        self.candidate.highest_degree_tag = None
+        self.candidate.save(
+            update_fields=[
+                "first_degree_school",
+                "highest_degree_school",
+                "first_degree_tag",
+                "highest_degree_tag",
+            ]
+        )
+
+        allocate.run(mode="rule", scope={"system_statuses": ["raw"]})
+
+        self.candidate.refresh_from_db()
+        self.assertEqual(self.candidate.first_degree_tag, target_tag)
+        self.assertEqual(self.candidate.highest_degree_tag, target_tag)
+        self.assertEqual(
+            list(self.candidate.school_tags.values_list("id", flat=True)),
+            [target_tag.id],
+        )
+        attempt = m.AssignmentAttempt.objects.get()
+        self.assertEqual(attempt.matched_rule, rule)
+        self.assertEqual(
+            self.candidate.workflow.status,
+            m.CandidateWorkflow.STATUS_IN_PROGRESS,
+        )
 
     def test_scoped_reprocess_preserves_existing_school_tags_and_platforms(self):
         existing_tag = m.SchoolTag.objects.create(code="MANUAL", name="人工确认标签")
@@ -354,6 +385,33 @@ class AllocationDesignContractTests(TestCase):
         self.assertEqual(self.candidate.first_degree_tag.code, "NON_TARGET")
         self.assertEqual(self.candidate.highest_degree_tag.code, "NON_TARGET")
 
+    def test_candidate_collects_tags_from_all_current_resume_education_experiences(self):
+        target_a = m.SchoolTag.objects.create(code="TARGET_A", name="目标院校A")
+        target_b = m.SchoolTag.objects.create(code="TARGET_B", name="目标院校B")
+        m.School.objects.create(name="本科大学", school_tag=target_a)
+        m.School.objects.create(name="硕士大学", school_tag=target_b)
+        self.candidate.first_degree_school = "本科大学"
+        self.candidate.highest_degree_school = "硕士大学"
+        self.candidate.save(
+            update_fields=["first_degree_school", "highest_degree_school"]
+        )
+        m.ResumeProfile.objects.create(
+            resume=self.resume,
+            education_experiences=[
+                {"school_name": "本科大学", "degree": "本科"},
+                {"school_name": "硕士大学", "degree": "硕士"},
+                {"school_name": "未收录学院", "degree": "交换经历"},
+            ],
+        )
+
+        classify_school.classify_candidates([self.candidate])
+
+        self.assertEqual(m.School.objects.get(name="本科大学").school_tag, target_a)
+        self.assertEqual(
+            set(self.candidate.school_tags.values_list("code", flat=True)),
+            {"TARGET_A", "TARGET_B", "NON_TARGET"},
+        )
+
     def test_rule_allocation_does_not_skip_current_volunteer_on_major_mismatch(self):
         self.candidate.highest_major = "计算机科学与技术"
         self.candidate.save(update_fields=["highest_major"])
@@ -388,17 +446,8 @@ class AllocationDesignContractTests(TestCase):
         self.assertIn("专业", self.candidate.workflow.archive_detail)
         self.assertIsNone(next_resume.job)
 
-    def test_rule_allocation_blocks_current_volunteer_when_secondary_contact_missing(self):
-        self.contact.is_active = False
-        self.contact.save(update_fields=["is_active"])
+    def test_rule_allocation_allows_department_without_active_contacts(self):
         fallback_department = m.Department.objects.create(name="产品部", level=2)
-        m.Contact.objects.create(
-            name="产品接口人",
-            employee_no="L2002",
-            department=fallback_department,
-            contact_level=m.Contact.LEVEL_SECONDARY,
-            is_active=True,
-        )
         fallback_resume = m.Resume.objects.create(
             candidate=self.candidate,
             apply_id="A1002",
@@ -416,7 +465,7 @@ class AllocationDesignContractTests(TestCase):
 
         allocate.run(mode="rule")
 
-        self.assertFalse(m.AssignmentAttempt.objects.exists())
+        attempt = m.AssignmentAttempt.objects.get()
         self.candidate.workflow.refresh_from_db()
         self.resume.refresh_from_db()
         fallback_resume.refresh_from_db()
@@ -426,15 +475,19 @@ class AllocationDesignContractTests(TestCase):
         )
         self.assertEqual(self.candidate.workflow.current_resume, self.resume)
         self.assertEqual(self.candidate.workflow.current_rank, 1)
-        self.assertEqual(
-            self.candidate.workflow.block_reason,
-            m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND,
-        )
-        self.assertIn("技术部", self.candidate.workflow.block_detail)
-        self.assertIn("后端工程师", self.candidate.workflow.block_detail)
-        self.assertIn("二级接口人", self.candidate.workflow.block_detail)
+        self.assertEqual(attempt.initial_department, self.department)
+        self.assertEqual(attempt.current_department, self.department)
+        self.assertEqual(attempt.status, m.AssignmentAttempt.STATUS_PENDING_DISPATCH)
+        self.assertEqual(self.candidate.workflow.block_reason, "")
+        self.assertEqual(self.candidate.workflow.block_detail, "")
         self.assertEqual(self.resume.job, self.job)
         self.assertIsNone(fallback_resume.job)
+        created_event = attempt.handling_events.get(
+            event_type=m.AssignmentHandlingEvent.EVENT_ATTEMPT_CREATED
+        )
+        self.assertEqual(
+            created_event.metadata["initial_department_id"], self.department.id
+        )
 
     def test_rule_archive_detail_identifies_missing_job_requirement(self):
         self.job.is_active = False
@@ -465,20 +518,20 @@ class AllocationDesignContractTests(TestCase):
         self.assertIn("后端工程师", self.candidate.workflow.archive_detail)
         self.assertIn("未配置有效二级部门", self.candidate.workflow.archive_detail)
 
-    def test_rule_allocation_clears_contact_block_when_valid_attempt_is_created(self):
+    def test_rule_allocation_clears_previous_block_when_valid_attempt_is_created(self):
         workflow = m.CandidateWorkflow.objects.create(
             candidate=self.candidate,
             status=m.CandidateWorkflow.STATUS_IN_PROGRESS,
             current_resume=self.resume,
             current_rank=1,
-            block_reason=m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND,
+            block_reason=m.CandidateWorkflow.BLOCK_JOB_HC_EXHAUSTED,
             block_detail="旧阻塞原因",
         )
 
         allocate._create_attempt(
             workflow=workflow,
             resume=self.resume,
-            contact=self.contact,
+            initial_department=self.department,
             source=m.AssignmentAttempt.SOURCE_RULE,
             mode="rule",
             match_reason="测试分配",
@@ -626,7 +679,7 @@ class AllocationDesignContractTests(TestCase):
         self.assertIn("第1志愿", attempt.match_reason)
         self.assertIn("岗位名精确命中", attempt.match_reason)
         self.assertIn("专业匹配", attempt.match_reason)
-        self.assertIn("分配至技术部/二级接口人", attempt.match_reason)
+        self.assertIn("分配至技术部", attempt.match_reason)
 
     def test_rule_allocation_matches_school_tag_rule_links(self):
         first_tag = m.SchoolTag.objects.create(code="A", name="平台A")
@@ -793,8 +846,7 @@ class AllocationDesignContractTests(TestCase):
         self.assertEqual(decision.recommendation, m.AgentDispatchDecision.RECOMMEND_REVIEW)
         self.assertGreaterEqual(decision.confidence_score, 0.5)
         self.assertLess(decision.confidence_score, 0.8)
-        self.assertEqual(decision.recommended_contact_name_snapshot, "二级接口人")
-        self.assertEqual(decision.recommended_contact_employee_no_snapshot, "L2001")
+        self.assertEqual(decision.recommended_department, self.department)
 
     def test_ai_allocation_only_passes_current_volunteer_job_to_model(self):
         unrelated_job = m.Job.objects.create(
@@ -909,18 +961,20 @@ class AllocationDesignContractTests(TestCase):
         self.assertIn("后端工程师", decision.error_message)
         self.assertIn("岗位需求中未配置", self.candidate.workflow.archive_detail)
 
-    def test_ai_archive_detail_identifies_missing_secondary_contact(self):
-        self.contact.is_active = False
-        self.contact.save(update_fields=["is_active"])
-        with patch("apps.pipeline.services.allocate.ai_service.screen_resume") as mocked:
+    def test_ai_allocation_allows_department_without_active_contacts(self):
+        with patch(
+            "apps.pipeline.services.allocate.ai_service.screen_resume",
+            return_value=self._ai_result(),
+        ) as mocked:
             allocate.run(mode="ai")
 
-        self.candidate.workflow.refresh_from_db()
+        attempt = m.AssignmentAttempt.objects.get()
         decision = m.AgentDispatchDecision.objects.get()
-        mocked.assert_not_called()
-        self.assertEqual(decision.error_code, "reference_not_found")
-        self.assertIn("技术部", decision.error_message)
-        self.assertIn("没有启用的二级接口人", self.candidate.workflow.archive_detail)
+        mocked.assert_called_once()
+        self.assertEqual(attempt.initial_department, self.department)
+        self.assertEqual(attempt.current_department, self.department)
+        self.assertEqual(decision.recommended_department, self.department)
+        self.assertEqual(decision.error_code, "")
 
     def test_cancel_ai_review_archives_when_no_other_active_attempt(self):
         m.Config.objects.create(key="ai_dispatch_threshold", value=0.8)
@@ -941,37 +995,35 @@ class AllocationDesignContractTests(TestCase):
             m.CandidateWorkflow.ARCHIVE_AGENT_NO_RECOMMENDATION,
         )
 
-    def test_manual_direct_to_tertiary_requires_secondary_when_multiple(self):
-        other_secondary = m.Contact.objects.create(
-            name="另一二级接口人",
-            employee_no="L2002",
-            department=self.department,
-            contact_level=m.Contact.LEVEL_SECONDARY,
-            is_active=True,
-        )
-        sub_department = m.Department.objects.create(
+    def test_manual_direct_to_tertiary_records_two_department_events(self):
+        tertiary_department = m.Department.objects.create(
             name="平台组", level=3, parent=self.department
         )
-        tertiary = m.Contact.objects.create(
-            name="三级接口人",
-            employee_no="L3001",
-            department=sub_department,
-            contact_level=m.Contact.LEVEL_TERTIARY,
-            is_active=True,
+        user = User.objects.create_user(username="hr-direct", password="pass")
+
+        attempt = allocate.manual_assign(self.resume, tertiary_department, user=user)
+
+        self.assertEqual(attempt.status, m.AssignmentAttempt.STATUS_DISPATCHED)
+        self.assertEqual(attempt.initial_department, self.department)
+        self.assertEqual(attempt.current_department, tertiary_department)
+        self.assertEqual(attempt.initial_department_name_snapshot, "技术部")
+        self.assertEqual(attempt.current_department_name_snapshot, "平台组")
+        events = list(attempt.handling_events.all())
+        self.assertEqual(
+            [event.event_type for event in events],
+            [
+                m.AssignmentHandlingEvent.EVENT_ATTEMPT_CREATED,
+                m.AssignmentHandlingEvent.EVENT_DEPARTMENT_DISPATCHED,
+                m.AssignmentHandlingEvent.EVENT_DEPARTMENT_TRANSFERRED,
+            ],
         )
-        with self.assertRaisesMessage(ValueError, "请明确 secondary_contact_id"):
-            allocate.manual_assign(self.resume, tertiary)
+        self.assertEqual(events[1].to_department, self.department)
+        self.assertFalse(events[1].is_system_auto)
+        self.assertEqual(events[2].from_department, self.department)
+        self.assertEqual(events[2].to_department, tertiary_department)
+        self.assertTrue(events[2].is_system_auto)
 
-        attempt = allocate.manual_assign(
-            self.resume, tertiary, secondary_contact=other_secondary
-        )
-
-        self.assertEqual(attempt.status, m.AssignmentAttempt.STATUS_ASSIGNED_L3)
-        self.assertEqual(attempt.contact, other_secondary)
-        self.assertEqual(attempt.sub_contact, tertiary)
-        self.assertEqual(attempt.handoffs.count(), 2)
-
-    def test_dispatch_attempt_records_handoff_snapshots(self):
+    def test_dispatch_attempt_records_department_event_snapshots(self):
         allocate.run(mode="rule")
         attempt = m.AssignmentAttempt.objects.get()
         user = User.objects.create_user(username="hr-snapshot", password="pass")
@@ -979,15 +1031,125 @@ class AllocationDesignContractTests(TestCase):
         allocate.dispatch_attempt(attempt, user=user)
 
         attempt.refresh_from_db()
-        handoff = m.AssignmentHandoff.objects.get()
-        self.assertEqual(attempt.contact_name_snapshot, "二级接口人")
-        self.assertEqual(attempt.contact_employee_no_snapshot, "L2001")
-        self.assertEqual(handoff.to_department_name_snapshot, "技术部")
-        self.assertEqual(handoff.to_contact_name_snapshot, "二级接口人")
-        self.assertEqual(handoff.to_contact_employee_no_snapshot, "L2001")
-        self.assertEqual(handoff.created_by_username_snapshot, "hr-snapshot")
+        dispatch_event = attempt.handling_events.get(
+            event_type=m.AssignmentHandlingEvent.EVENT_DEPARTMENT_DISPATCHED
+        )
+        self.assertEqual(attempt.initial_department_name_snapshot, "技术部")
+        self.assertEqual(attempt.current_department_name_snapshot, "技术部")
+        self.assertEqual(dispatch_event.to_department_name_snapshot, "技术部")
+        self.assertEqual(dispatch_event.actor_username_snapshot, "hr-snapshot")
+        self.assertEqual(
+            dispatch_event.metadata["welink"]["skipped_reason"],
+            "welink_disabled",
+        )
 
-    def test_secondary_stage_rejection_advances_to_next_volunteer(self):
+    def test_dispatch_to_department_without_active_contact_is_not_blocked(self):
+        m.Config.objects.update_or_create(
+            key="welink_enabled", defaults={"value": True}
+        )
+        allocate.run(mode="rule")
+        attempt = m.AssignmentAttempt.objects.get()
+
+        allocate.dispatch_attempt(attempt)
+
+        attempt.refresh_from_db()
+        dispatch_event = attempt.handling_events.get(
+            event_type=m.AssignmentHandlingEvent.EVENT_DEPARTMENT_DISPATCHED
+        )
+        self.assertEqual(attempt.status, m.AssignmentAttempt.STATUS_DISPATCHED)
+        self.assertEqual(dispatch_event.metadata["welink"]["recipient_count"], 0)
+        self.assertEqual(
+            dispatch_event.metadata["welink"]["skipped_reason"],
+            "no_active_recipient",
+        )
+
+    def test_transfer_attempt_updates_current_department_and_preserves_initial(self):
+        target_department = m.Department.objects.create(name="产品部", level=2)
+        allocate.run(mode="rule")
+        attempt = m.AssignmentAttempt.objects.get()
+        allocate.dispatch_attempt(attempt)
+
+        allocate.transfer_attempt(attempt, target_department, note="业务调整")
+
+        attempt.refresh_from_db()
+        self.assertEqual(attempt.status, m.AssignmentAttempt.STATUS_DISPATCHED)
+        self.assertEqual(attempt.initial_department, self.department)
+        self.assertEqual(attempt.current_department, target_department)
+        self.assertEqual(attempt.current_department_name_snapshot, "产品部")
+        transfer_event = attempt.handling_events.get(
+            event_type=m.AssignmentHandlingEvent.EVENT_DEPARTMENT_TRANSFERRED
+        )
+        self.assertEqual(transfer_event.from_department, self.department)
+        self.assertEqual(transfer_event.to_department, target_department)
+        self.assertEqual(transfer_event.note, "业务调整")
+
+    def test_stale_transfer_loses_after_current_department_changes(self):
+        first_target = m.Department.objects.create(name="产品部", level=2)
+        stale_target = m.Department.objects.create(name="市场部", level=2)
+        allocate.run(mode="rule")
+        attempt = m.AssignmentAttempt.objects.get()
+        allocate.dispatch_attempt(attempt)
+        first_writer = m.AssignmentAttempt.objects.get(pk=attempt.pk)
+        stale_writer = m.AssignmentAttempt.objects.get(pk=attempt.pk)
+
+        allocate.transfer_attempt(first_writer, first_target)
+        with self.assertRaisesRegex(
+            allocate.AttemptStateChanged, "当前接收部门已变更"
+        ):
+            allocate.transfer_attempt(stale_writer, stale_target)
+
+        attempt.refresh_from_db()
+        self.assertEqual(attempt.current_department, first_target)
+        self.assertEqual(
+            attempt.handling_events.filter(
+                event_type=m.AssignmentHandlingEvent.EVENT_DEPARTMENT_TRANSFERRED
+            ).count(),
+            1,
+        )
+
+    def test_stale_feedback_loses_after_department_transfer(self):
+        target_department = m.Department.objects.create(name="产品部", level=2)
+        allocate.run(mode="rule")
+        attempt = m.AssignmentAttempt.objects.get()
+        allocate.dispatch_attempt(attempt)
+        transfer_writer = m.AssignmentAttempt.objects.get(pk=attempt.pk)
+        stale_feedback_writer = m.AssignmentAttempt.objects.get(pk=attempt.pk)
+
+        allocate.transfer_attempt(transfer_writer, target_department)
+        with self.assertRaisesRegex(
+            allocate.AttemptStateChanged, "当前接收部门已变更"
+        ):
+            allocate.submit_feedback(
+                stale_feedback_writer,
+                m.AssignmentAttempt.FEEDBACK_PASSED,
+            )
+
+        attempt.refresh_from_db()
+        self.assertEqual(attempt.current_department, target_department)
+        self.assertEqual(attempt.status, m.AssignmentAttempt.STATUS_DISPATCHED)
+        self.assertIsNone(attempt.feedback_at)
+        self.assertFalse(
+            attempt.handling_events.filter(
+                event_type__in=[
+                    m.AssignmentHandlingEvent.EVENT_FEEDBACK_PASSED,
+                    m.AssignmentHandlingEvent.EVENT_FEEDBACK_REJECTED,
+                ]
+            ).exists()
+        )
+
+    def test_intermediate_event_department_cannot_be_deleted(self):
+        intermediate_department = m.Department.objects.create(name="中间部门", level=2)
+        final_department = m.Department.objects.create(name="最终部门", level=2)
+        allocate.run(mode="rule")
+        attempt = m.AssignmentAttempt.objects.get()
+        attempt = allocate.dispatch_attempt(attempt)
+        attempt = allocate.transfer_attempt(attempt, intermediate_department)
+        allocate.transfer_attempt(attempt, final_department)
+
+        with self.assertRaises(ProtectedError):
+            intermediate_department.delete()
+
+    def test_department_rejection_advances_to_next_volunteer(self):
         second_resume = m.Resume.objects.create(
             candidate=self.candidate,
             apply_id="A1002",
@@ -1003,14 +1165,52 @@ class AllocationDesignContractTests(TestCase):
             first_attempt,
             m.AssignmentAttempt.FEEDBACK_REJECTED,
             "二级判断不匹配",
+            reason_code=m.AssignmentAttempt.REJECTION_REASON_KEY_CAPABILITY_MISMATCH,
         )
 
         first_attempt.refresh_from_db()
         next_attempt = m.AssignmentAttempt.objects.exclude(pk=first_attempt.pk).get()
         self.assertEqual(first_attempt.status, m.AssignmentAttempt.STATUS_REJECTED)
         self.assertEqual(first_attempt.feedback_note, "二级判断不匹配")
+        self.assertEqual(
+            first_attempt.feedback_reason_code,
+            m.AssignmentAttempt.REJECTION_REASON_KEY_CAPABILITY_MISMATCH,
+        )
+        self.assertEqual(first_attempt.feedback_reason_label_snapshot, "关键能力不匹配")
+        feedback_event = first_attempt.handling_events.get(
+            event_type=m.AssignmentHandlingEvent.EVENT_FEEDBACK_REJECTED
+        )
+        self.assertEqual(
+            feedback_event.metadata["reason_code"],
+            m.AssignmentAttempt.REJECTION_REASON_KEY_CAPABILITY_MISMATCH,
+        )
         self.assertEqual(next_attempt.resume, second_resume)
         self.assertEqual(next_attempt.status, m.AssignmentAttempt.STATUS_PENDING_DISPATCH)
+
+    def test_rejected_feedback_requires_reason_and_other_requires_note(self):
+        allocate.run(mode="rule")
+        attempt = m.AssignmentAttempt.objects.get()
+        allocate.dispatch_attempt(attempt)
+
+        with self.assertRaisesMessage(ValueError, "必须选择有效的反馈原因"):
+            allocate.submit_feedback(
+                attempt,
+                m.AssignmentAttempt.FEEDBACK_REJECTED,
+            )
+        with self.assertRaisesMessage(ValueError, "必须填写备注"):
+            allocate.submit_feedback(
+                attempt,
+                m.AssignmentAttempt.FEEDBACK_REJECTED,
+                reason_code=m.AssignmentAttempt.REJECTION_REASON_OTHER,
+            )
+
+        attempt.refresh_from_db()
+        self.assertEqual(attempt.status, m.AssignmentAttempt.STATUS_DISPATCHED)
+        self.assertFalse(
+            attempt.handling_events.filter(
+                event_type=m.AssignmentHandlingEvent.EVENT_FEEDBACK_REJECTED
+            ).exists()
+        )
 
     def test_ai_model_versions_come_from_backend_config(self):
         ai_config.save_ai_connection_config(
@@ -1122,14 +1322,7 @@ class AllocationDesignContractTests(TestCase):
         tertiary_department = m.Department.objects.create(
             name="技术三部", level=3, parent=self.department
         )
-        tertiary_contact = m.Contact.objects.create(
-            name="三级接口人",
-            employee_no="T2001",
-            department=tertiary_department,
-            contact_level=m.Contact.LEVEL_TERTIARY,
-            is_active=True,
-        )
-        allocate.assign_sub_contact(passed_attempt, tertiary_contact)
+        passed_attempt = allocate.transfer_attempt(passed_attempt, tertiary_department)
         allocate.submit_feedback(passed_attempt, m.AssignmentAttempt.FEEDBACK_PASSED)
         self.candidate.workflow.refresh_from_db()
         self.assertEqual(self.candidate.workflow.status, m.CandidateWorkflow.STATUS_PASSED)
@@ -1261,8 +1454,8 @@ class AllocationDesignContractTests(TestCase):
                 attempt_no=1,
                 source=m.AssignmentAttempt.SOURCE_RULE,
                 status=status,
-                department=self.department,
-                contact=self.contact,
+                initial_department=self.department,
+                current_department=self.department,
             )
             if workflow_status == m.CandidateWorkflow.STATUS_PASSED:
                 workflow.passed_attempt = attempt
@@ -1298,7 +1491,7 @@ class AllocationDesignContractTests(TestCase):
         create_attempt(
             pending_screening,
             pending_screening_resume,
-            m.AssignmentAttempt.STATUS_DISPATCHED_L2,
+            m.AssignmentAttempt.STATUS_DISPATCHED,
         )
         create_attempt(
             passed,
@@ -1354,7 +1547,7 @@ class AllocationDesignContractTests(TestCase):
         workflow = self.candidate.workflow
         workflow.archive_reason = m.CandidateWorkflow.ARCHIVE_ALL_REJECTED
         workflow.archive_detail = "旧归档原因"
-        workflow.block_reason = m.CandidateWorkflow.BLOCK_CONTACT_NOT_FOUND
+        workflow.block_reason = m.CandidateWorkflow.BLOCK_JOB_HC_EXHAUSTED
         workflow.block_detail = "旧阻塞原因"
         workflow.completed_at = timezone.now()
         workflow.save(
@@ -1378,8 +1571,8 @@ class AllocationDesignContractTests(TestCase):
             attempt_no=2,
             source=m.AssignmentAttempt.SOURCE_AI,
             status=m.AssignmentAttempt.STATUS_PENDING_REVIEW,
-            department=self.department,
-            contact=self.contact,
+            initial_department=self.department,
+            current_department=self.department,
         )
         manual_attempt = m.AssignmentAttempt.objects.create(
             workflow=workflow,
@@ -1387,8 +1580,8 @@ class AllocationDesignContractTests(TestCase):
             attempt_no=3,
             source=m.AssignmentAttempt.SOURCE_MANUAL,
             status=m.AssignmentAttempt.STATUS_PENDING_DISPATCH,
-            department=self.department,
-            contact=self.contact,
+            initial_department=self.department,
+            current_department=self.department,
         )
 
         allocate.run(
@@ -1443,14 +1636,6 @@ class JobCapacityAllocationTests(TestCase):
     def setUp(self):
         self.department_a = m.Department.objects.create(name="研发一部", level=2)
         self.department_b = m.Department.objects.create(name="研发二部", level=2)
-        self.contact_a = m.Contact.objects.create(
-            name="一部接口人", employee_no="HC-L2-A", department=self.department_a,
-            contact_level=m.Contact.LEVEL_SECONDARY,
-        )
-        self.contact_b = m.Contact.objects.create(
-            name="二部接口人", employee_no="HC-L2-B", department=self.department_b,
-            contact_level=m.Contact.LEVEL_SECONDARY,
-        )
         self.job_a = m.Job.objects.create(
             entity="GW", department=self.department_a,
             public_name="软件开发工程师", position_name="软件开发",
@@ -1537,7 +1722,7 @@ class JobCapacityAllocationTests(TestCase):
         self.assertIsNotNone(attempt.capacity_released_at)
 
         _second, second_resume = self._candidate(11)
-        manual_attempt = allocate.manual_assign(second_resume, self.contact_a)
+        manual_attempt = allocate.manual_assign(second_resume, self.department_a)
         self.assertIsNone(manual_attempt.capacity_reservation_id)
 
     def test_ambiguous_and_missing_internal_position_are_archived_with_codes(self):

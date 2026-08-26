@@ -15,6 +15,16 @@ class ExperienceItem(BaseModel):
     evidence: str
 
 
+class EducationItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    school_name: str = ""
+    degree: str = ""
+    major: str = ""
+    period: str = ""
+    evidence: str = ""
+
+
 class ScoreBreakdown(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -29,6 +39,7 @@ class ResumeProfileOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     major_direction: str
+    educations: list[EducationItem] = Field(default_factory=list)
     projects: list[ExperienceItem]
     internships: list[ExperienceItem]
     skills: list[str]

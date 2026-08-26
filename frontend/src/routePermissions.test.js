@@ -9,11 +9,11 @@ describe('route permissions', () => {
 
   it('falls back to the first accessible navigation item', () => {
     expect(getDefaultAuthenticatedPath((code) => code === 'pipeline.view')).toBe('/processing-tasks')
-    expect(getDefaultAuthenticatedPath((code) => code === 'attempt.view_assigned')).toBe('/resumes')
+    expect(getDefaultAuthenticatedPath((code) => code === 'attempt.view_department')).toBe('/resumes')
   })
 
   it('allows a route when any configured permission is available', () => {
-    const hasPermission = vi.fn((code) => code === 'attempt.view_assigned')
+    const hasPermission = vi.fn((code) => code === 'attempt.view_department')
 
     expect(canAccessRoute('/resumes', hasPermission)).toBe(true)
     expect(canAccessRoute('/jobs', hasPermission)).toBe(false)

@@ -141,17 +141,7 @@ def current_rank(candidate):
 
 
 def job_department_name(candidate):
-    workflow = workflow_or_none(candidate)
     resume = current_resume(candidate)
-    attempt = latest_effective_attempt(
-        workflow, resume_id=resume.id if resume else None
-    )
-    if attempt:
-        return (
-            attempt.department_name_snapshot
-            or (attempt.department.name if attempt.department else "")
-        )
-
     department = resume.job.department if resume and resume.job_id else None
     department = secondary_department(department)
     return department.name if department else ""
@@ -171,7 +161,10 @@ def reason(candidate):
     if attempt:
         return (
             REASON_ASSIGNMENT,
-            attempt.manual_reason or attempt.match_reason or attempt.feedback_note,
+            attempt.feedback_reason_label_snapshot
+            or attempt.feedback_note
+            or attempt.manual_reason
+            or attempt.match_reason,
         )
 
     if resume and resume.category_reason:

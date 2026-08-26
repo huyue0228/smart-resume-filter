@@ -57,7 +57,29 @@ const payload = {
   school_tag_ranking: [],
   education_distribution: [],
   archive_reason_distribution: [],
-  rejection_reason_distribution: [],
+  rejection_reason_distribution: [
+    { key: 'major_background_mismatch', label: '专业背景不匹配', count: 2 },
+  ],
+  handling_speed: {
+    overall: {
+      hr_dispatch_hours: { avg: 2, median: 1.5, p90: 3, sample_count: 7 },
+      department_processing_hours: { avg: 8, median: 6, p90: 14, sample_count: 6 },
+      total_feedback_hours: { avg: 26, median: 24, p90: 40, sample_count: 6 },
+      pending_count: 1,
+      max_pending_age_hours: 12,
+    },
+    departments: [
+      {
+        department_id: 1,
+        department_name: '算法平台部',
+        primary_department_id: 10,
+        primary_department_name: '研究院',
+        processing_hours: { avg: 8, median: 6, p90: 14, sample_count: 6 },
+        pending_count: 1,
+        max_pending_age_hours: 12,
+      },
+    ],
+  },
   filter_options: {
     entities: ['GW'],
     jobs: [],
@@ -112,6 +134,10 @@ describe('AnalyticsPage', () => {
     expect(screen.queryByText('按日趋势')).toBeNull()
     expect(screen.queryByText('最近候选人')).toBeNull()
     expect(screen.getByText('处理效率')).toBeTruthy()
+    expect(screen.getByText('人工处理时效')).toBeTruthy()
+    expect(screen.getByText('HR 下发时长')).toBeTruthy()
+    expect(screen.getByText('部门处理时效')).toBeTruthy()
+    expect(screen.getByText('算法平台部')).toBeTruthy()
     expect(screen.getByText('人工复核')).toBeTruthy()
     expect(screen.getByRole('img', { name: /分配来源：规则分配 6/ })).toBeTruthy()
     expect(screen.getByRole('img', { name: /AI 建议分布：人工复核 1/ })).toBeTruthy()
@@ -273,6 +299,20 @@ describe('AnalyticsPage', () => {
     expect(params.get('analytics_dimension')).toBe('source')
     expect(JSON.parse(params.get('analytics_values'))).toEqual(['rule'])
     expect(params.get('analytics_title')).toBe('分配来源 · 规则分配')
+  })
+
+  it('drills a rejection reason with its stable reason code', async () => {
+    const user = userEvent.setup()
+    renderAnalytics()
+    await screen.findByText('招聘概览')
+
+    await user.click(screen.getByRole('button', { name: /专业背景不匹配/ }))
+
+    const location = await screen.findByTestId('location')
+    const [, query = ''] = location.textContent.split('?')
+    const params = new URLSearchParams(query)
+    expect(params.get('analytics_dimension')).toBe('rejection_reason')
+    expect(JSON.parse(params.get('analytics_values'))).toEqual(['major_background_mismatch'])
   })
 
   it('hides result report export without resume.view', async () => {

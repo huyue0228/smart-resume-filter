@@ -1,5 +1,20 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { reportUsagePageView } from './services'
+import client from './client'
+import {
+  bulkTransferCandidates,
+  fetchFeedbackReasons,
+  fetchManualAssignmentOptions,
+  fetchTransferOptions,
+  reportUsagePageView,
+  transferAllocation,
+} from './services'
+
+vi.mock('./client', () => ({
+  default: {
+    get: vi.fn(),
+    post: vi.fn(),
+  },
+}))
 
 describe('reportUsagePageView', () => {
   afterEach(() => {
@@ -26,6 +41,28 @@ describe('reportUsagePageView', () => {
         Authorization: 'Token dev-token',
       },
       body: JSON.stringify(body),
+    })
+  })
+})
+
+describe('department inbox workflow services', () => {
+  it('uses the department transfer and feedback option contracts', () => {
+    transferAllocation(12, { target_department_id: 8, note: '转专业组' })
+    fetchTransferOptions(12)
+    fetchManualAssignmentOptions()
+    fetchFeedbackReasons()
+    bulkTransferCandidates({ candidate_ids: [1, 2], target_department_id: 8 })
+
+    expect(client.post).toHaveBeenCalledWith('/workflow-attempts/12/transfer/', {
+      target_department_id: 8,
+      note: '转专业组',
+    })
+    expect(client.get).toHaveBeenCalledWith('/workflow-attempts/12/transfer-options/')
+    expect(client.get).toHaveBeenCalledWith('/resumes/manual-assignment-options/')
+    expect(client.get).toHaveBeenCalledWith('/workflow-attempts/feedback-reasons/')
+    expect(client.post).toHaveBeenCalledWith('/candidates/bulk-transfer/', {
+      candidate_ids: [1, 2],
+      target_department_id: 8,
     })
   })
 })

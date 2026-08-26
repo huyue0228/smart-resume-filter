@@ -57,9 +57,9 @@ class CandidateSerializerCachingTests(TestCase):
             resume=resume,
             attempt_no=1,
             source=m.AssignmentAttempt.SOURCE_RULE,
-            status=m.AssignmentAttempt.STATUS_DISPATCHED_L2,
-            department=self.department,
-            contact=self.contact,
+            status=m.AssignmentAttempt.STATUS_DISPATCHED,
+            initial_department=self.department,
+            current_department=self.department,
         )
         return candidate
 
@@ -80,7 +80,7 @@ class CandidateSerializerCachingTests(TestCase):
             ).data
 
         self.assertEqual(data["phone"], "")
-        self.assertEqual(data["current_attempt"]["status"], "dispatched_l2")
+        self.assertEqual(data["current_attempt"]["status"], "dispatched")
         self.assertEqual(permission_codes.call_count, 1)
         self.assertEqual(visible_attempt.call_count, 1)
 

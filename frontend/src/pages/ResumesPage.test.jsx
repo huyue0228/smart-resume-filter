@@ -10,6 +10,13 @@ import {
   fetchCandidateExportFields,
   fetchCandidateFilterOptions,
   bulkDispatchCandidates,
+  bulkTransferCandidates,
+  fetchFeedbackReasons,
+  fetchManualAssignmentOptions,
+  fetchTransferOptions,
+  manualAssignResume,
+  submitAllocationFeedback,
+  transferAllocation,
 } from '../api/services'
 import { downloadBlobFromResponse } from '../utils/download'
 
@@ -22,9 +29,17 @@ const candidate = vi.hoisted(() => ({
   first_degree_platform: '平台A',
   highest_degree_school: '浙江大学',
   highest_degree_platform: '平台B',
+  school_tags: [
+    { id: 1, code: 'PLATFORM_A', name: '平台A' },
+    { id: 2, code: 'PLATFORM_B', name: '平台B' },
+  ],
   current_rank: 1,
   current_apply_id: 'A001',
   current_apply_date: '2026-07-15',
+  current_primary_department_id: 1,
+  current_primary_department_name: '研发中心',
+  current_department_id: 2,
+  current_department_name: '平台研发部',
   workflow_status: 'in_progress',
   system_status_label: '待处理',
   reason_type: 'none',
@@ -141,6 +156,7 @@ vi.mock('../components/SmartDataTable', () => ({
         data-columns={columns.map((column) => column.title).join(',')}
         data-params={JSON.stringify(params || {})}
         data-default-columns-state={JSON.stringify(defaultColumnsState || {})}
+        data-selectable={Boolean(rowSelection)}
       >
         {tableId === 'candidates' && (
           <>
@@ -153,10 +169,20 @@ vi.mock('../components/SmartDataTable', () => ({
               {columns.find((column) => column.dataIndex === 'current_apply_date')
                 ?.render?.(candidate.current_apply_date, candidate)}
             </span>
+            <span data-testid="school-tags-cell">
+              {columns.find((column) => column.dataIndex === 'school_tag')
+                ?.render?.(candidate.school_tag, candidate)}
+            </span>
             <button type="button" onClick={() => rowSelection?.onChange?.([1, 2])}>
               选择两名候选人
             </button>
-            <button type="button" onClick={() => rowSelection?.onChange?.([3])}>
+            <button type="button" onClick={() => rowSelection?.onChange?.(
+              [1, 2],
+              [candidate, { ...candidate, id: 2 }],
+            )}>
+              选择两名可转派候选人
+            </button>
+            <button type="button" onClick={() => rowSelection?.onChange?.([3], [{ ...candidate, id: 3 }])}>
               改选一名候选人
             </button>
             {rowSelection?.selectedRowKeys?.length ? batchActions?.({
@@ -214,6 +240,7 @@ vi.mock('../api/services', () => ({
   fetchUndoStatus: vi.fn(),
   undoLastImport: vi.fn(),
   fetchContacts: vi.fn(),
+  fetchManualAssignmentOptions: vi.fn(),
   manualAssignResume: vi.fn(),
   fetchAgentDecisions: vi.fn().mockResolvedValue({ data: { results: [] } }),
   retryAgentDecision: vi.fn(),
@@ -224,8 +251,10 @@ vi.mock('../api/services', () => ({
   cancelReviewAllocation: vi.fn(),
   transferAllocationToManual: vi.fn(),
   bulkDispatchCandidates: vi.fn(),
-  assignSubContact: vi.fn(),
-  fetchEligibleSubContacts: vi.fn(),
+  bulkTransferCandidates: vi.fn(),
+  transferAllocation: vi.fn(),
+  fetchTransferOptions: vi.fn(),
+  fetchFeedbackReasons: vi.fn(),
   submitAllocationFeedback: vi.fn(),
   exportAllocations: vi.fn(),
   exportResumeResultReport: vi.fn(),
@@ -300,6 +329,35 @@ describe('ResumesPage detail', () => {
     bulkDispatchCandidates.mockResolvedValue({
       data: { detail: '已下发 2 条，跳过 0 条，失败 0 条' },
     })
+    bulkTransferCandidates.mockReset()
+    bulkTransferCandidates.mockResolvedValue({
+      data: { transferred: 2, skipped: 0, failed: 0, batch_operation_id: 'batch-1' },
+    })
+    fetchTransferOptions.mockReset()
+    fetchTransferOptions.mockResolvedValue({
+      data: {
+        results: [
+          { id: 2, name: '平台研发部', level: 2, primary_department_name: '研发中心' },
+          { id: 3, name: '后端开发组', level: 3, primary_department_name: '研发中心' },
+        ],
+      },
+    })
+    fetchFeedbackReasons.mockReset()
+    fetchFeedbackReasons.mockResolvedValue({ data: { results: [
+      { value: 'major_background_mismatch', label: '专业背景不匹配' },
+      { value: 'other', label: '其他' },
+    ] } })
+    submitAllocationFeedback.mockReset()
+    submitAllocationFeedback.mockResolvedValue({ data: {} })
+    fetchManualAssignmentOptions.mockReset()
+    fetchManualAssignmentOptions.mockResolvedValue({ data: { results: [
+      { id: 2, name: '平台研发部', level: 2, parent_name: '研发中心' },
+      { id: 3, name: '后端开发组', level: 3, parent_name: '平台研发部' },
+    ] } })
+    manualAssignResume.mockReset()
+    manualAssignResume.mockResolvedValue({ data: {} })
+    transferAllocation.mockReset()
+    transferAllocation.mockResolvedValue({ data: {} })
     fetchCandidates.mockReset()
     fetchCandidates.mockResolvedValue({ data: { count: 0, results: [] } })
   })
@@ -315,17 +373,20 @@ describe('ResumesPage detail', () => {
     }
     expect(screen.getByTestId('table-candidate-resumes').dataset.columns).not.toContain('预览')
     expect(screen.getByTestId('table-candidates').dataset.columns).not.toContain('处理结果')
-    expect(screen.getByTestId('table-candidates').dataset.columns).toContain(
-      '当前志愿,投递时间,当前应聘ID',
-    )
+    const candidateColumns = screen.getByTestId('table-candidates').dataset.columns
+    expect(candidateColumns).not.toContain('当前志愿')
+    expect(candidateColumns).toContain('投递时间,当前应聘ID,当前主体,当前投递岗位,岗位部门,当前接收一级部门,当前接收部门')
     expect(screen.getByTestId('current-apply-date-cell').textContent).toBe('2026-07-15')
-    expect(
-      JSON.parse(screen.getByTestId('table-candidates').dataset.defaultColumnsState),
-    ).not.toHaveProperty('current_apply_date')
+    expect(JSON.parse(screen.getByTestId('table-candidates').dataset.defaultColumnsState)).toEqual({
+      current_apply_id: { show: false },
+      current_entity: { show: false },
+      allocation_source: { show: false },
+    })
     expect(screen.queryByText('第一学历标签')).toBeNull()
     expect(screen.queryByText('最高学历标签')).toBeNull()
-    expect(screen.getByText('平台A').classList.contains('ant-tag')).toBe(true)
-    expect(screen.getByText('平台B').classList.contains('ant-tag')).toBe(true)
+    expect(screen.getAllByText('平台A').every((item) => item.classList.contains('ant-tag'))).toBe(true)
+    expect(screen.getAllByText('平台B').every((item) => item.classList.contains('ant-tag'))).toBe(true)
+    expect(screen.getByTestId('school-tags-cell').textContent).toBe('平台A平台B')
     const entityATag = screen.getByTestId('entity-11').querySelector('.ant-tag')
     const entityBTag = screen.getByTestId('entity-12').querySelector('.ant-tag')
     expect(entityATag.textContent).toBe('主体A')
@@ -336,17 +397,17 @@ describe('ResumesPage detail', () => {
     expect(screen.getByTestId('resume-preview').textContent).toBe('missing:A002')
   })
 
-  it('shows feedback to the bound secondary contact before transfer', async () => {
+  it('shows feedback to a contact in the current receiving department', async () => {
     candidate.current_attempt = {
       id: 21,
-      status: 'dispatched_l2',
-      contact: 10,
-      sub_contact: null,
+      status: 'dispatched',
+      current_department: 2,
+      current_department_name: '平台研发部',
       feedback_at: null,
     }
     candidate.attempts = [candidate.current_attempt]
-    roleState.permissions = new Set(['attempt.feedback', 'attempt.view_received'])
-    roleState.contact = { id: 10 }
+    roleState.permissions = new Set(['attempt.feedback', 'attempt.view_department'])
+    roleState.contact = { id: 10, department: 2, department_level: 2 }
     roleState.isContact = true
     roleState.isSecondaryContact = true
 
@@ -356,17 +417,36 @@ describe('ResumesPage detail', () => {
     expect(screen.getByRole('button', { name: '提交反馈' })).not.toBeNull()
   })
 
-  it('hides feedback from the secondary contact after transfer', async () => {
+  it('loads manual assignment targets without the generic department API', async () => {
+    roleState.permissions = new Set(['resume.view', 'resume.manual_assign'])
+    const user = userEvent.setup()
+
+    render(<MemoryRouter><ResumesPage /></MemoryRouter>)
+    await user.click(screen.getByRole('button', { name: '打开候选人' }))
+    await user.click(screen.getByRole('button', { name: '手动强制分配当前志愿' }))
+
+    await waitFor(() => expect(fetchManualAssignmentOptions).toHaveBeenCalledTimes(1))
+    await user.click(screen.getByRole('combobox', { name: '手动分配目标部门' }))
+    await user.click(await screen.findByText('研发中心 / 平台研发部'))
+    await user.click(screen.getByRole('button', { name: /确认分配/ }))
+
+    await waitFor(() => expect(manualAssignResume).toHaveBeenCalledWith(11, {
+      target_department_id: 2,
+      manual_reason: 'HR 手动强制分配',
+    }))
+  })
+
+  it('hides feedback from a parent department contact after transfer to a child department', async () => {
     candidate.current_attempt = {
       id: 22,
-      status: 'assigned_l3',
-      contact: 10,
-      sub_contact: 11,
+      status: 'dispatched',
+      current_department: 3,
+      current_department_name: '后端开发组',
       feedback_at: null,
     }
     candidate.attempts = [candidate.current_attempt]
-    roleState.permissions = new Set(['attempt.feedback', 'attempt.view_received'])
-    roleState.contact = { id: 10 }
+    roleState.permissions = new Set(['attempt.feedback', 'attempt.view_department'])
+    roleState.contact = { id: 10, department: 2, department_level: 2 }
     roleState.isContact = true
     roleState.isSecondaryContact = true
 
@@ -374,6 +454,187 @@ describe('ResumesPage detail', () => {
     await userEvent.click(screen.getByRole('button', { name: '打开候选人' }))
 
     expect(screen.queryByRole('button', { name: '提交反馈' })).toBeNull()
+  })
+
+  it('submits a structured rejection reason for the current department', async () => {
+    candidate.current_attempt = {
+      id: 23,
+      status: 'dispatched',
+      current_department: 2,
+      current_department_name: '平台研发部',
+      feedback_at: null,
+    }
+    candidate.attempts = [candidate.current_attempt]
+    roleState.permissions = new Set(['attempt.feedback', 'attempt.view_department'])
+    roleState.contact = { id: 10, department: 2, department_level: 2 }
+    roleState.isContact = true
+    const user = userEvent.setup()
+
+    render(<MemoryRouter><ResumesPage /></MemoryRouter>)
+    await user.click(screen.getByRole('button', { name: '打开候选人' }))
+    await user.click(screen.getAllByRole('button', { name: /提交反馈/ }).at(-1))
+    await waitFor(() => expect(fetchFeedbackReasons).toHaveBeenCalled())
+
+    const resultSelect = screen.getAllByRole('combobox')[0]
+    await user.click(resultSelect)
+    await user.click(await screen.findByText('不通过'))
+    const reasonSelect = screen.getAllByRole('combobox')[1]
+    await user.click(reasonSelect)
+    await user.click(await screen.findByText('专业背景不匹配'))
+    await user.click(screen.getAllByRole('button', { name: /提交反馈/ }).at(-1))
+
+    await waitFor(() => expect(submitAllocationFeedback).toHaveBeenCalledWith(23, {
+      result: 'rejected',
+      reason_code: 'major_background_mismatch',
+      note: '',
+    }))
+  })
+
+  it('freezes selected candidates and only offers secondary departments for bulk transfer', async () => {
+    candidate.current_attempt = {
+      id: 24,
+      status: 'dispatched',
+      current_department: 2,
+      current_department_name: '平台研发部',
+      feedback_at: null,
+    }
+    candidate.attempts = [candidate.current_attempt]
+    roleState.permissions = new Set(['attempt.transfer_department', 'attempt.view_department'])
+    roleState.contact = { id: 10, department: 2, department_level: 2, can_delegate: true }
+    roleState.isContact = true
+    const user = userEvent.setup()
+
+    render(<MemoryRouter><ResumesPage /></MemoryRouter>)
+    await user.click(screen.getByRole('button', { name: '选择两名可转派候选人' }))
+    await user.click(screen.getByRole('button', { name: '批量转派' }))
+
+    expect(await screen.findByText('批量转派（冻结 2 人）')).toBeTruthy()
+    await waitFor(() => expect(fetchTransferOptions).toHaveBeenCalledWith(24))
+    const targetSelect = screen.getByRole('combobox')
+    await user.click(targetSelect)
+    expect(screen.queryByText(/后端开发组/)).toBeNull()
+    await user.click(await screen.findByText('研发中心 / 平台研发部'))
+    await user.click(screen.getByRole('button', { name: /确认转派/ }))
+
+    await waitFor(() => expect(bulkTransferCandidates).toHaveBeenCalledWith({
+      candidate_ids: [1, 2],
+      target_department_id: 2,
+      note: '',
+    }))
+  })
+
+  it('allows a secondary contact to transfer one resume to an eligible tertiary department', async () => {
+    candidate.current_attempt = {
+      id: 26,
+      status: 'dispatched',
+      current_department: 2,
+      current_department_name: '平台研发部',
+      feedback_at: null,
+    }
+    candidate.attempts = [candidate.current_attempt]
+    roleState.permissions = new Set(['attempt.transfer_department', 'attempt.view_department'])
+    roleState.contact = { id: 10, department: 2, department_level: 2, can_delegate: true }
+    roleState.isContact = true
+    const user = userEvent.setup()
+
+    render(<MemoryRouter><ResumesPage /></MemoryRouter>)
+    await user.click(screen.getByRole('button', { name: '打开候选人' }))
+    await user.click(screen.getByRole('button', { name: '转派部门' }))
+    await waitFor(() => expect(fetchTransferOptions).toHaveBeenCalledWith(26))
+    await user.click(screen.getByRole('combobox'))
+    await user.click(await screen.findByText('研发中心 / 后端开发组'))
+    await user.click(screen.getAllByRole('button', { name: /转.?派/ }).at(-1))
+
+    await waitFor(() => expect(transferAllocation).toHaveBeenCalledWith(26, {
+      target_department_id: 3,
+      note: '',
+    }))
+  })
+
+  it('hides transfer selection and bulk transfer when the secondary contact cannot delegate', () => {
+    roleState.permissions = new Set(['attempt.transfer_department', 'attempt.view_department'])
+    roleState.contact = { id: 10, department: 2, department_level: 2, can_delegate: false }
+    roleState.isContact = true
+
+    render(<MemoryRouter><ResumesPage /></MemoryRouter>)
+
+    expect(screen.queryByRole('button', { name: '批量转派' })).toBeNull()
+    expect(screen.getByTestId('table-candidates').dataset.selectable).toBe('false')
+  })
+
+  it('shows department handling events and elapsed time in the detail timeline', async () => {
+    candidate.current_attempt = {
+      id: 25,
+      status: 'dispatched',
+      current_department: 2,
+      current_department_name: '平台研发部',
+      handling_events: [
+        {
+          id: 100,
+          event_type: 'attempt_created',
+          duration_since_previous_seconds: null,
+          occurred_at: '2026-08-23T23:00:00Z',
+        },
+        {
+          id: 101,
+          event_type: 'department_dispatched',
+          to_department_name: '平台研发部',
+          actor_username_snapshot: 'HR001',
+          duration_since_previous_seconds: 7200,
+          occurred_at: '2026-08-24T01:00:00Z',
+        },
+      ],
+    }
+    candidate.attempts = [candidate.current_attempt]
+
+    render(<MemoryRouter><ResumesPage /></MemoryRouter>)
+    await userEvent.click(screen.getByRole('button', { name: '打开候选人' }))
+
+    expect(screen.getByText('处理时间线')).toBeTruthy()
+    expect(screen.getByText('下发部门')).toBeTruthy()
+    expect(screen.getByText('距上一步 2.0 小时')).toBeTruthy()
+    expect(screen.getByText(/操作人 HR001/)).toBeTruthy()
+  })
+
+  it('recalculates elapsed time across assignment attempts in the candidate timeline', async () => {
+    candidate.current_attempt = {
+      id: 28,
+      attempt_no: 2,
+      status: 'dispatched',
+      current_department: 2,
+      current_department_name: '平台研发部',
+    }
+    candidate.attempts = [
+      {
+        id: 27,
+        attempt_no: 1,
+        handling_events: [
+          {
+            id: 201,
+            event_type: 'feedback_rejected',
+            duration_since_previous_seconds: null,
+            occurred_at: '2026-08-24T01:00:00Z',
+          },
+        ],
+      },
+      {
+        ...candidate.current_attempt,
+        handling_events: [
+          {
+            id: 202,
+            event_type: 'attempt_created',
+            duration_since_previous_seconds: null,
+            occurred_at: '2026-08-24T04:00:00Z',
+          },
+        ],
+      },
+    ]
+
+    render(<MemoryRouter><ResumesPage /></MemoryRouter>)
+    await userEvent.click(screen.getByRole('button', { name: '打开候选人' }))
+
+    expect(screen.getByText('距上一步 3.0 小时')).toBeTruthy()
+    expect(screen.getByText('第 2 次尝试')).toBeTruthy()
   })
 
   it('always shows the fixed processing choices and disables an empty current selection', async () => {
@@ -652,9 +913,8 @@ describe('ResumesPage detail', () => {
   it('opens the same field chooser for an attempt-scoped detail export', async () => {
     candidate.current_attempt = {
       id: 31,
-      status: 'dispatched_l2',
-      contact: 10,
-      sub_contact: null,
+      status: 'dispatched',
+      current_department: 2,
       feedback_at: null,
     }
     candidate.attempts = [candidate.current_attempt]

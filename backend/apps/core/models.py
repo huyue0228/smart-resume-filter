@@ -9,7 +9,7 @@ class Department(models.Model):
     name = models.CharField(max_length=128)
     level = models.PositiveSmallIntegerField(default=2, help_text="1=一层, 2=二层, 3=三级")
     parent = models.ForeignKey(
-        "self", null=True, blank=True, on_delete=models.SET_NULL, related_name="children"
+        "self", null=True, blank=True, on_delete=models.PROTECT, related_name="children"
     )
     entity = models.CharField(max_length=64, blank=True, help_text="招聘主体")
 
@@ -153,6 +153,14 @@ class Job(models.Model):
     def __str__(self):
         return self.public_name or self.position_name or f"Job#{self.pk}"
 
+    def save(self, *args, **kwargs):
+        if self.department_id and not Department.objects.filter(
+            pk=self.department_id,
+            level=2,
+        ).exists():
+            raise ValueError("岗位必须绑定二级部门")
+        super().save(*args, **kwargs)
+
 
 class JobMajor(models.Model):
     """岗位需求专业（多值）。"""
@@ -289,6 +297,12 @@ class Candidate(models.Model):
         blank=True,
         on_delete=models.SET_NULL,
         related_name="highest_degree_candidates",
+    )
+    school_tags = models.ManyToManyField(
+        SchoolTag,
+        blank=True,
+        related_name="candidates",
+        help_text="当前有效简历全部教育经历映射出的去重院校标签",
     )
 
     imported_at = models.DateTimeField(auto_now_add=True, help_text="导入时间（时间标签）")
@@ -480,10 +494,8 @@ class CandidateWorkflow(models.Model):
         (ARCHIVE_ALL_REJECTED, "全部志愿未通过"),
     ]
 
-    BLOCK_CONTACT_NOT_FOUND = "contact_not_found"
     BLOCK_JOB_HC_EXHAUSTED = "job_hc_exhausted"
     BLOCK_REASON_CHOICES = [
-        (BLOCK_CONTACT_NOT_FOUND, "当前志愿无可用二级接口人"),
         (BLOCK_JOB_HC_EXHAUSTED, "当前任务岗位 HC 容量已用尽"),
     ]
 
@@ -564,16 +576,14 @@ class AssignmentAttempt(models.Model):
 
     STATUS_PENDING_DISPATCH = "pending_dispatch"
     STATUS_PENDING_REVIEW = "pending_review"
-    STATUS_DISPATCHED_L2 = "dispatched_l2"
-    STATUS_ASSIGNED_L3 = "assigned_l3"
+    STATUS_DISPATCHED = "dispatched"
     STATUS_PASSED = "passed"
     STATUS_REJECTED = "rejected"
     STATUS_CANCELLED = "cancelled"
     STATUS_CHOICES = [
         (STATUS_PENDING_DISPATCH, "待下发"),
         (STATUS_PENDING_REVIEW, "待 HR 复核"),
-        (STATUS_DISPATCHED_L2, "已下发二级"),
-        (STATUS_ASSIGNED_L3, "已转派三级"),
+        (STATUS_DISPATCHED, "已下发部门"),
         (STATUS_PASSED, "已通过"),
         (STATUS_REJECTED, "未通过"),
         (STATUS_CANCELLED, "已取消"),
@@ -584,6 +594,21 @@ class AssignmentAttempt(models.Model):
     FEEDBACK_CHOICES = [
         (FEEDBACK_PASSED, "通过"),
         (FEEDBACK_REJECTED, "未通过"),
+    ]
+
+    REJECTION_REASON_MAJOR_BACKGROUND_MISMATCH = "major_background_mismatch"
+    REJECTION_REASON_RESEARCH_EXPERIENCE_MISMATCH = "research_experience_mismatch"
+    REJECTION_REASON_KEY_CAPABILITY_MISMATCH = "key_capability_mismatch"
+    REJECTION_REASON_PROJECT_INTERNSHIP_MISMATCH = "project_internship_mismatch"
+    REJECTION_REASON_POSITION_DIRECTION_MISMATCH = "position_direction_mismatch"
+    REJECTION_REASON_OTHER = "other"
+    REJECTION_REASON_CHOICES = [
+        (REJECTION_REASON_MAJOR_BACKGROUND_MISMATCH, "专业背景不匹配"),
+        (REJECTION_REASON_RESEARCH_EXPERIENCE_MISMATCH, "科研经历不符合"),
+        (REJECTION_REASON_KEY_CAPABILITY_MISMATCH, "关键能力不匹配"),
+        (REJECTION_REASON_PROJECT_INTERNSHIP_MISMATCH, "项目/实习经历不匹配"),
+        (REJECTION_REASON_POSITION_DIRECTION_MISMATCH, "岗位方向不匹配"),
+        (REJECTION_REASON_OTHER, "其他"),
     ]
 
     CANCEL_RERUN = "rerun"
@@ -601,33 +626,17 @@ class AssignmentAttempt(models.Model):
     status = models.CharField(
         max_length=32, choices=STATUS_CHOICES, default=STATUS_PENDING_DISPATCH
     )
-    department = models.ForeignKey(
+    initial_department = models.ForeignKey(
         Department,
-        null=True,
-        blank=True,
         on_delete=models.PROTECT,
-        related_name="assignment_attempts",
+        related_name="initial_assignment_attempts",
+        help_text="首次分配的二级部门，创建后不可变更",
     )
-    contact = models.ForeignKey(
-        Contact,
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="assignment_attempts",
-    )
-    sub_department = models.ForeignKey(
+    current_department = models.ForeignKey(
         Department,
-        null=True,
-        blank=True,
         on_delete=models.PROTECT,
-        related_name="sub_assignment_attempts",
-    )
-    sub_contact = models.ForeignKey(
-        Contact,
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="sub_assignment_attempts",
+        related_name="current_assignment_attempts",
+        help_text="当前接收部门，可在有效转派时变更",
     )
     matched_rule = models.ForeignKey(
         SchoolTagRule,
@@ -647,13 +656,15 @@ class AssignmentAttempt(models.Model):
     review_required = models.BooleanField(default=False)
     match_mode = models.CharField(max_length=8, blank=True, help_text="rule/ai")
     match_reason = models.TextField(blank=True)
-    welink_message_id = models.CharField(max_length=128, blank=True)
     dispatched_at = models.DateTimeField(null=True, blank=True)
-    assigned_to_sub_at = models.DateTimeField(null=True, blank=True)
     feedback_result = models.CharField(
         max_length=16, choices=FEEDBACK_CHOICES, blank=True
     )
     feedback_note = models.TextField(blank=True)
+    feedback_reason_code = models.CharField(
+        max_length=64, choices=REJECTION_REASON_CHOICES, blank=True, db_index=True
+    )
+    feedback_reason_label_snapshot = models.CharField(max_length=64, blank=True)
     feedback_at = models.DateTimeField(null=True, blank=True)
     cancelled_at = models.DateTimeField(null=True, blank=True)
     cancel_reason = models.CharField(max_length=64, blank=True)
@@ -667,12 +678,8 @@ class AssignmentAttempt(models.Model):
     special_route_confidence = models.FloatField(null=True, blank=True)
     special_route_evidence = models.JSONField(default=list, blank=True)
     special_route_config_snapshot = models.JSONField(default=dict, blank=True)
-    department_name_snapshot = models.CharField(max_length=128, blank=True)
-    contact_name_snapshot = models.CharField(max_length=64, blank=True)
-    contact_employee_no_snapshot = models.CharField(max_length=32, blank=True)
-    sub_department_name_snapshot = models.CharField(max_length=128, blank=True)
-    sub_contact_name_snapshot = models.CharField(max_length=64, blank=True)
-    sub_contact_employee_no_snapshot = models.CharField(max_length=32, blank=True)
+    initial_department_name_snapshot = models.CharField(max_length=128, blank=True)
+    current_department_name_snapshot = models.CharField(max_length=128, blank=True)
     resume_apply_id_snapshot = models.CharField(max_length=64, blank=True)
     position_name_snapshot = models.CharField(max_length=128, blank=True)
     created_by_username_snapshot = models.CharField(max_length=150, blank=True)
@@ -699,8 +706,8 @@ class AssignmentAttempt(models.Model):
         unique_together = ("workflow", "attempt_no")
         indexes = [
             models.Index(fields=["status"]),
-            models.Index(fields=["contact", "status"]),
-            models.Index(fields=["sub_contact", "status"]),
+            models.Index(fields=["current_department", "status"]),
+            models.Index(fields=["initial_department", "status"]),
             models.Index(fields=["workflow", "status"]),
             models.Index(fields=["source", "status"]),
             models.Index(fields=["created_at", "source"]),
@@ -711,62 +718,100 @@ class AssignmentAttempt(models.Model):
     def __str__(self):
         return f"Attempt#{self.pk} {self.status}"
 
+    def save(self, *args, **kwargs):
+        if not self.initial_department_id or not Department.objects.filter(
+            pk=self.initial_department_id, level=2
+        ).exists():
+            raise ValueError("首次分配部门必须是有效的二级部门")
+        if not self.current_department_id or not Department.objects.filter(
+            pk=self.current_department_id, level__in=[2, 3]
+        ).exists():
+            raise ValueError("当前接收部门必须是有效的二级或三级部门")
+        if self.pk:
+            original_initial_department_id = (
+                type(self)
+                .objects.filter(pk=self.pk)
+                .values_list("initial_department_id", flat=True)
+                .first()
+            )
+            if (
+                original_initial_department_id is not None
+                and original_initial_department_id != self.initial_department_id
+            ):
+                raise ValueError("首次分配部门创建后不可变更")
+        super().save(*args, **kwargs)
 
-class AssignmentHandoff(models.Model):
-    """分配下发/转派审计记录，当前状态仍以 AssignmentAttempt 字段为准。"""
 
-    ACTION_HR_DISPATCH = "hr_dispatch"
-    ACTION_SUB_ASSIGN = "sub_assign"
-    ACTION_SUB_REASSIGN = "sub_reassign"
-    ACTION_CHOICES = [
-        (ACTION_HR_DISPATCH, "HR 下发二级"),
-        (ACTION_SUB_ASSIGN, "二级转派三级"),
-        (ACTION_SUB_REASSIGN, "二级改派三级"),
+class AssignmentHandlingEvent(models.Model):
+    """分配尝试的追加式处理事件，用于审计和人工时效统计。"""
+
+    EVENT_ATTEMPT_CREATED = "attempt_created"
+    EVENT_REVIEW_CONFIRMED = "review_confirmed"
+    EVENT_DEPARTMENT_DISPATCHED = "department_dispatched"
+    EVENT_DEPARTMENT_TRANSFERRED = "department_transferred"
+    EVENT_FEEDBACK_PASSED = "feedback_passed"
+    EVENT_FEEDBACK_REJECTED = "feedback_rejected"
+    EVENT_CANCELLED = "cancelled"
+    EVENT_TYPE_CHOICES = [
+        (EVENT_ATTEMPT_CREATED, "尝试创建"),
+        (EVENT_REVIEW_CONFIRMED, "HR 确认复核"),
+        (EVENT_DEPARTMENT_DISPATCHED, "下发部门"),
+        (EVENT_DEPARTMENT_TRANSFERRED, "部门转派"),
+        (EVENT_FEEDBACK_PASSED, "反馈通过"),
+        (EVENT_FEEDBACK_REJECTED, "反馈不通过"),
+        (EVENT_CANCELLED, "取消"),
     ]
 
     attempt = models.ForeignKey(
-        AssignmentAttempt, on_delete=models.CASCADE, related_name="handoffs"
+        AssignmentAttempt, on_delete=models.CASCADE, related_name="handling_events"
     )
-    action = models.CharField(max_length=32, choices=ACTION_CHOICES)
-    from_contact = models.ForeignKey(
-        Contact,
+    event_type = models.CharField(max_length=32, choices=EVENT_TYPE_CHOICES)
+    from_department = models.ForeignKey(
+        Department,
         null=True,
         blank=True,
-        on_delete=models.SET_NULL,
-        related_name="handoffs_from",
+        on_delete=models.PROTECT,
+        related_name="assignment_events_from",
     )
     to_department = models.ForeignKey(
         Department,
         null=True,
         blank=True,
-        on_delete=models.SET_NULL,
-        related_name="handoffs_to",
+        on_delete=models.PROTECT,
+        related_name="assignment_events_to",
     )
-    to_contact = models.ForeignKey(
-        Contact,
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="handoffs_to",
-    )
-    from_contact_name_snapshot = models.CharField(max_length=64, blank=True)
-    from_contact_employee_no_snapshot = models.CharField(max_length=32, blank=True)
+    from_department_name_snapshot = models.CharField(max_length=128, blank=True)
     to_department_name_snapshot = models.CharField(max_length=128, blank=True)
-    to_contact_name_snapshot = models.CharField(max_length=64, blank=True)
-    to_contact_employee_no_snapshot = models.CharField(max_length=32, blank=True)
-    note = models.TextField(blank=True)
-    created_by_username_snapshot = models.CharField(max_length=150, blank=True)
-    created_by = models.ForeignKey(
+    actor_username_snapshot = models.CharField(max_length=150, blank=True)
+    actor = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,
         blank=True,
         on_delete=models.SET_NULL,
-        related_name="assignment_handoffs_created",
+        related_name="assignment_handling_events",
     )
-    created_at = models.DateTimeField(auto_now_add=True)
+    note = models.TextField(blank=True)
+    batch_operation_id = models.UUIDField(null=True, blank=True, db_index=True)
+    is_system_auto = models.BooleanField(default=False)
+    metadata = models.JSONField(default=dict, blank=True)
+    occurred_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        indexes = [models.Index(fields=["attempt", "created_at"])]
+        ordering = ["occurred_at", "id"]
+        default_permissions = ("view",)
+        indexes = [
+            models.Index(fields=["attempt", "occurred_at"]),
+            models.Index(fields=["event_type", "occurred_at"]),
+            models.Index(fields=["to_department", "occurred_at"]),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            raise ValueError("处理事件是不可修改的审计记录")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValueError("处理事件是不可删除的审计记录")
 
 
 class AgentDispatchDecision(models.Model):
@@ -826,15 +871,6 @@ class AgentDispatchDecision(models.Model):
         on_delete=models.SET_NULL,
         related_name="agent_decisions",
     )
-    recommended_contact = models.ForeignKey(
-        Contact,
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="agent_decisions",
-    )
-    recommended_contact_name_snapshot = models.CharField(max_length=64, blank=True)
-    recommended_contact_employee_no_snapshot = models.CharField(max_length=32, blank=True)
     confidence_score = models.FloatField(null=True, blank=True)
     score_breakdown = models.JSONField(default=dict, blank=True)
     summary = models.TextField(blank=True)
@@ -1134,13 +1170,6 @@ class ProcessingRunScopeItem(models.Model):
     )
     prepared_department = models.ForeignKey(
         Department,
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="prepared_processing_items",
-    )
-    prepared_contact = models.ForeignKey(
-        Contact,
         null=True,
         blank=True,
         on_delete=models.SET_NULL,

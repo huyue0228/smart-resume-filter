@@ -309,7 +309,6 @@ class ScreeningResult:
     output: ResumeScreeningOutput
     job: Optional[m.Job]
     department: Optional[m.Department]
-    contact: Optional[m.Contact]
     confidence: float
     score_breakdown: dict
     model_name: str
@@ -637,7 +636,6 @@ def screen_resume(
     job,
     *,
     department=None,
-    contact=None,
     force=False,
     processing_run_id=None,
     cancelled=None,
@@ -648,16 +646,10 @@ def screen_resume(
     # 工作职责是 AI 深度匹配的必需上下文；缺失时不读取 PDF，也不调用模型。
     job_context = _current_job_context(job)
 
-    # 生产链路由 Step3 显式传入冻结引用；保留确定性推导仅供内部调用与旧测试兼容，
-    # 但这些引用不会进入模型提示词，也不会由模型选择。
+    # 生产链路由 Step3 显式传入冻结部门引用；部门不进入模型提示词，
+    # 也不由模型选择。
     if department is None:
         department = secondary_department(job.department)
-    if contact is None and department:
-        contact = m.Contact.objects.filter(
-            department=department,
-            contact_level=m.Contact.LEVEL_SECONDARY,
-            is_active=True,
-        ).order_by("id").first()
 
     extracted = _extract_pdf(resume)
     checksum, text = extracted[:2]
@@ -708,8 +700,8 @@ def screen_resume(
         raise
 
     data = output.profile
-    # 学历和院校已经由 Step2 固化；AI 不再解析或覆盖这类规则数据。
-    profile.education_experiences = []
+    # AI 仅提取教育经历供候选人多标签展示；第一/最高学历及准入结论仍由 Step2 固化。
+    profile.education_experiences = [item.model_dump() for item in data.educations]
     profile.project_experiences = [item.model_dump() for item in data.projects]
     profile.internship_experiences = [item.model_dump() for item in data.internships]
     profile.skills = data.skills
@@ -728,12 +720,14 @@ def screen_resume(
     profile.parse_error = ""
     profile.parsed_at = timezone.now()
     profile.save()
+    from apps.pipeline.services.classify_school import sync_candidate_school_tags
+
+    sync_candidate_school_tags(resume.candidate)
     return ScreeningResult(
         profile=profile,
         output=output,
         job=job,
         department=department,
-        contact=contact,
         confidence=confidence,
         score_breakdown=breakdown,
         model_name=model_config.model_name,

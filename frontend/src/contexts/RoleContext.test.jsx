@@ -17,6 +17,10 @@ function Consumer() {
     completeW3OAuth2Login: complete,
     loginWithDevToken,
     user,
+    dataScope,
+    isContact,
+    isSecondaryContact,
+    isTertiaryContact,
   } = useRole()
   return (
     <>
@@ -30,6 +34,9 @@ function Consumer() {
         使用开发令牌
       </button>
       <span>{user?.username || '未登录'}</span>
+      <span data-testid="department-scope">
+        {`${dataScope?.type || 'none'}:${isContact}:${isSecondaryContact}:${isTertiaryContact}`}
+      </span>
     </>
   )
 }
@@ -95,5 +102,30 @@ describe('RoleProvider W3 OAuth2', () => {
     })
     expect(localStorage.getItem('srf_token')).toBeNull()
     expect(screen.getByText('未登录')).toBeTruthy()
+  })
+
+  it('derives the contact level from the department data scope', async () => {
+    localStorage.setItem('srf_token', 'department-token')
+    fetchMe.mockResolvedValue({
+      data: {
+        username: 'E20001',
+        permissions: ['attempt.view_department'],
+        contact: { id: 5, department: 20, department_level: 2 },
+        data_scope: {
+          type: 'department',
+          department_id: 20,
+          department_level: 2,
+          include_descendants: true,
+        },
+      },
+    })
+
+    render(
+      <RoleProvider>
+        <Consumer />
+      </RoleProvider>,
+    )
+
+    expect(await screen.findByText('department:true:true:false')).toBeTruthy()
   })
 })

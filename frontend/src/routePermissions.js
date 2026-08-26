@@ -1,7 +1,7 @@
 export const DEFAULT_AUTHENTICATED_PATH = '/analytics'
 
 export const ROUTE_PERMISSIONS = {
-  '/resumes': ['resume.view', 'attempt.view_received', 'attempt.view_assigned'],
+  '/resumes': ['resume.view', 'attempt.view_department'],
   '/jobs': ['job.view'],
   '/schools': ['school.view'],
   '/departments': ['department.view'],

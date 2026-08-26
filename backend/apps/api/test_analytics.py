@@ -66,8 +66,10 @@ class RecruitmentAnalyticsApiTests(TestCase):
             attempt_no=1,
             source=m.AssignmentAttempt.SOURCE_RULE,
             status=m.AssignmentAttempt.STATUS_PASSED,
-            department=self.department,
-            department_name_snapshot="产品研发（历史快照）",
+            initial_department=self.department,
+            current_department=self.department,
+            initial_department_name_snapshot="产品研发",
+            current_department_name_snapshot="产品研发",
             dispatched_at=imported_at + timedelta(hours=4),
             feedback_at=imported_at + timedelta(hours=10),
             feedback_result=m.AssignmentAttempt.FEEDBACK_PASSED,
@@ -75,6 +77,25 @@ class RecruitmentAnalyticsApiTests(TestCase):
         m.AssignmentAttempt.objects.filter(pk=attempt.pk).update(
             created_at=imported_at + timedelta(hours=2)
         )
+        attempt.refresh_from_db()
+        self._create_event(
+            attempt,
+            m.AssignmentHandlingEvent.EVENT_ATTEMPT_CREATED,
+            imported_at + timedelta(hours=2),
+        )
+        self._create_event(
+            attempt,
+            m.AssignmentHandlingEvent.EVENT_DEPARTMENT_DISPATCHED,
+            imported_at + timedelta(hours=4),
+            to_department=self.department,
+        )
+        self._create_event(
+            attempt,
+            m.AssignmentHandlingEvent.EVENT_FEEDBACK_PASSED,
+            imported_at + timedelta(hours=10),
+            from_department=self.department,
+        )
+        self.passed_attempt = attempt
 
         candidate_2 = m.Candidate.objects.create(
             identity_hash="analytics-candidate-2",
@@ -125,6 +146,18 @@ class RecruitmentAnalyticsApiTests(TestCase):
             imported_at=now - timedelta(days=60)
         )
 
+    def _create_event(self, attempt, event_type, occurred_at, **kwargs):
+        event = m.AssignmentHandlingEvent.objects.create(
+            attempt=attempt,
+            event_type=event_type,
+            **kwargs,
+        )
+        m.AssignmentHandlingEvent.objects.filter(pk=event.pk).update(
+            occurred_at=occurred_at
+        )
+        event.refresh_from_db()
+        return event
+
     def test_requires_analytics_permission(self):
         self.client.force_authenticate(self.no_access)
         response = self.client.get("/api/analytics/recruitment-overview/")
@@ -156,7 +189,7 @@ class RecruitmentAnalyticsApiTests(TestCase):
                 }
             ],
         )
-        self.assertEqual(payload["department_ranking"][0]["label"], "产品研发（历史快照）")
+        self.assertEqual(payload["department_ranking"][0]["label"], "产品研发")
         self.assertEqual(payload["ai_error_distribution"][0]["key"], "llm_timeout")
         self.assertEqual(
             payload["ai_recommendation_distribution"],
@@ -177,6 +210,150 @@ class RecruitmentAnalyticsApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["summary"]["candidate_count"], 1)
         self.assertEqual(response.json()["source_distribution"][0]["key"], "rule")
+
+    def test_returns_overall_and_department_handling_speed(self):
+        self.client.force_authenticate(self.hr)
+
+        response = self.client.get("/api/analytics/recruitment-overview/")
+
+        self.assertEqual(response.status_code, 200)
+        speed = response.json()["handling_speed"]
+        self.assertEqual(
+            speed["overall"]["hr_dispatch_hours"],
+            {"avg": 2.0, "median": 2.0, "p90": 2.0, "sample_count": 1},
+        )
+        self.assertEqual(
+            speed["overall"]["department_processing_hours"],
+            {"avg": 6.0, "median": 6.0, "p90": 6.0, "sample_count": 1},
+        )
+        self.assertEqual(
+            speed["overall"]["total_feedback_hours"],
+            {"avg": 6.0, "median": 6.0, "p90": 6.0, "sample_count": 1},
+        )
+        self.assertEqual(speed["overall"]["pending_count"], 0)
+        self.assertIsNone(speed["overall"]["max_pending_age_hours"])
+        self.assertEqual(speed["departments"][0]["department_id"], self.department.id)
+        self.assertEqual(
+            speed["departments"][0]["processing_hours"]["sample_count"], 1
+        )
+
+    def test_automatic_transfer_excludes_the_outgoing_instant_segment(self):
+        sub_department = m.Department.objects.create(
+            name="平台研发组", level=3, parent=self.department
+        )
+        dispatch_event = self.passed_attempt.handling_events.get(
+            event_type=m.AssignmentHandlingEvent.EVENT_DEPARTMENT_DISPATCHED
+        )
+        transfer_at = dispatch_event.occurred_at + timedelta(minutes=1)
+        self._create_event(
+            self.passed_attempt,
+            m.AssignmentHandlingEvent.EVENT_DEPARTMENT_TRANSFERRED,
+            transfer_at,
+            from_department=self.department,
+            to_department=sub_department,
+            is_system_auto=True,
+        )
+        m.AssignmentAttempt.objects.filter(pk=self.passed_attempt.pk).update(
+            current_department=sub_department,
+            current_department_name_snapshot=sub_department.name,
+        )
+        cache.clear()
+        self.client.force_authenticate(self.hr)
+
+        response = self.client.get("/api/analytics/recruitment-overview/")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        departments = payload["handling_speed"]["departments"]
+        self.assertEqual(
+            [item["department_id"] for item in departments], [sub_department.id]
+        )
+        self.assertEqual(departments[0]["processing_hours"]["sample_count"], 1)
+        self.assertEqual(
+            departments[0]["primary_department_id"], self.primary_department.id
+        )
+        self.assertEqual(
+            payload["primary_department_ranking"][0]["key"],
+            self.primary_department.id,
+        )
+        self.assertEqual(
+            payload["department_ranking"],
+            [
+                {
+                    "key": self.department.id,
+                    "label": self.department.name,
+                    "count": 1,
+                }
+            ],
+        )
+        self.assertNotIn(
+            sub_department.id,
+            {
+                item["value"]
+                for item in payload["filter_options"]["departments"]
+            },
+        )
+
+        secondary_filtered = self.client.get(
+            "/api/analytics/recruitment-overview/",
+            {"department_id": self.department.id},
+        )
+        tertiary_filtered = self.client.get(
+            "/api/analytics/recruitment-overview/",
+            {"department_id": sub_department.id},
+        )
+        self.assertEqual(
+            secondary_filtered.json()["summary"]["candidate_count"], 1
+        )
+        self.assertEqual(
+            tertiary_filtered.json()["summary"]["candidate_count"], 0
+        )
+
+        drilldown = self.client.get(
+            "/api/candidates/",
+            self._drilldown_params("department", [str(self.department.id)]),
+        )
+        self.assertEqual(
+            {item["name"] for item in drilldown.json()["results"]},
+            {"候选人一"},
+        )
+
+    def test_dispatched_attempt_contributes_pending_age(self):
+        workflow = m.CandidateWorkflow.objects.get(
+            candidate__identity_hash="analytics-candidate-2"
+        )
+        resume = m.Resume.objects.get(apply_id="AN-002")
+        attempt = m.AssignmentAttempt.objects.create(
+            workflow=workflow,
+            resume=resume,
+            attempt_no=1,
+            source=m.AssignmentAttempt.SOURCE_MANUAL,
+            status=m.AssignmentAttempt.STATUS_DISPATCHED,
+            initial_department=self.department,
+            current_department=self.department,
+        )
+        entered_at = timezone.now() - timedelta(hours=3)
+        self._create_event(
+            attempt,
+            m.AssignmentHandlingEvent.EVENT_DEPARTMENT_DISPATCHED,
+            entered_at,
+            to_department=self.department,
+        )
+        self.client.force_authenticate(self.hr)
+
+        response = self.client.get("/api/analytics/recruitment-overview/")
+
+        self.assertEqual(response.status_code, 200)
+        overall = response.json()["handling_speed"]["overall"]
+        self.assertEqual(overall["pending_count"], 1)
+        self.assertGreaterEqual(overall["max_pending_age_hours"], 3.0)
+        self.assertLess(overall["max_pending_age_hours"], 3.1)
+        department = next(
+            item
+            for item in response.json()["handling_speed"]["departments"]
+            if item["department_id"] == self.department.id
+        )
+        self.assertEqual(department["pending_count"], 1)
 
     def _drilldown_params(self, dimension, values=None, **filters):
         params = {
@@ -263,25 +440,31 @@ class RecruitmentAnalyticsApiTests(TestCase):
             ],
         )
 
-    def test_rejection_reason_drilldown_uses_a_short_non_sensitive_key(self):
+    def test_rejection_reason_drilldown_uses_stable_reason_code(self):
         candidate = m.Candidate.objects.get(identity_hash="analytics-candidate-2")
         workflow = m.CandidateWorkflow.objects.get(candidate=candidate)
         resume = m.Resume.objects.get(apply_id="AN-002")
-        note = "业务反馈中的完整未通过原因，不应进入下钻 URL"
+        note = "补充说明不会作为下钻条件"
+        reason_code = m.AssignmentAttempt.REJECTION_REASON_KEY_CAPABILITY_MISMATCH
         m.AssignmentAttempt.objects.create(
             workflow=workflow,
             resume=resume,
             attempt_no=1,
             source=m.AssignmentAttempt.SOURCE_MANUAL,
             status=m.AssignmentAttempt.STATUS_REJECTED,
+            initial_department=self.department,
+            current_department=self.department,
             feedback_result=m.AssignmentAttempt.FEEDBACK_REJECTED,
+            feedback_reason_code=reason_code,
+            feedback_reason_label_snapshot="关键能力不匹配",
             feedback_note=note,
         )
         self.client.force_authenticate(self.hr)
         overview = self.client.get("/api/analytics/recruitment-overview/").json()
         row = overview["rejection_reason_distribution"][0]
 
-        self.assertTrue(row["key"].startswith("sha256:"))
+        self.assertEqual(row["key"], reason_code)
+        self.assertEqual(row["label"], "关键能力不匹配")
         self.assertNotIn(note, row["key"])
         response = self.client.get(
             "/api/candidates/",
@@ -358,9 +541,11 @@ class RecruitmentAnalyticsApiTests(TestCase):
             resume=resume,
             attempt_no=2,
             source=m.AssignmentAttempt.SOURCE_MANUAL,
-            status=m.AssignmentAttempt.STATUS_DISPATCHED_L2,
-            department=latest_department,
-            department_name_snapshot="最新统计归属部门快照",
+            status=m.AssignmentAttempt.STATUS_DISPATCHED,
+            initial_department=latest_department,
+            current_department=latest_department,
+            initial_department_name_snapshot="最新统计归属部门",
+            current_department_name_snapshot="最新统计归属部门",
         )
         m.AssignmentAttempt.objects.create(
             workflow=workflow,
@@ -368,8 +553,10 @@ class RecruitmentAnalyticsApiTests(TestCase):
             attempt_no=3,
             source=m.AssignmentAttempt.SOURCE_RULE,
             status=m.AssignmentAttempt.STATUS_CANCELLED,
-            department=self.department,
-            department_name_snapshot="取消尝试部门快照",
+            initial_department=self.department,
+            current_department=self.department,
+            initial_department_name_snapshot="产品研发",
+            current_department_name_snapshot="产品研发",
         )
         self.client.force_authenticate(self.hr)
 
@@ -400,7 +587,7 @@ class RecruitmentAnalyticsApiTests(TestCase):
             [
                 {
                     "key": latest_department.id,
-                    "label": "最新统计归属部门快照",
+                    "label": "最新统计归属部门",
                     "count": 1,
                 }
             ],
@@ -440,6 +627,111 @@ class RecruitmentAnalyticsApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["summary"]["candidate_count"], 1)
         self.assertEqual(response.json()["job_ranking"][0]["label"], "当前有效岗位")
+
+    def test_only_current_volunteer_attempt_contributes_to_assignment_metrics(self):
+        candidate = m.Candidate.objects.get(identity_hash="analytics-candidate-1")
+        workflow = m.CandidateWorkflow.objects.get(candidate=candidate)
+        historical_resume = m.Resume.objects.get(apply_id="AN-001")
+        current_primary = m.Department.objects.create(name="当前志愿一级", level=1)
+        current_department = m.Department.objects.create(
+            name="当前志愿二级", level=2, parent=current_primary
+        )
+        current_resume = m.Resume.objects.create(
+            candidate=candidate,
+            apply_id="AN-NEW-CURRENT",
+            entity="GW",
+            position_name="当前志愿岗位",
+            job_category="技术",
+            volunteer_rank=2,
+        )
+        m.Resume.objects.filter(pk=current_resume.pk).update(
+            imported_at=historical_resume.imported_at
+        )
+        workflow.current_resume = current_resume
+        workflow.save(update_fields=["current_resume"])
+        attempt = m.AssignmentAttempt.objects.create(
+            workflow=workflow,
+            resume=current_resume,
+            attempt_no=2,
+            source=m.AssignmentAttempt.SOURCE_MANUAL,
+            status=m.AssignmentAttempt.STATUS_PASSED,
+            initial_department=current_department,
+            current_department=current_department,
+        )
+        created_at = historical_resume.imported_at + timedelta(hours=3)
+        m.AssignmentAttempt.objects.filter(pk=attempt.pk).update(created_at=created_at)
+        attempt.refresh_from_db()
+        self._create_event(
+            attempt,
+            m.AssignmentHandlingEvent.EVENT_ATTEMPT_CREATED,
+            created_at,
+        )
+        self._create_event(
+            attempt,
+            m.AssignmentHandlingEvent.EVENT_DEPARTMENT_DISPATCHED,
+            created_at + timedelta(hours=1),
+            to_department=current_department,
+        )
+        self._create_event(
+            attempt,
+            m.AssignmentHandlingEvent.EVENT_FEEDBACK_PASSED,
+            created_at + timedelta(hours=3),
+            from_department=current_department,
+        )
+        self.client.force_authenticate(self.hr)
+
+        response = self.client.get("/api/analytics/recruitment-overview/")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["summary"]["resume_count"], 3)
+        self.assertEqual(payload["summary"]["allocated_count"], 1)
+        self.assertEqual(
+            payload["source_distribution"],
+            [{"key": "manual", "label": "手动强制分配", "count": 1}],
+        )
+        self.assertEqual(
+            payload["department_ranking"],
+            [
+                {
+                    "key": current_department.id,
+                    "label": current_department.name,
+                    "count": 1,
+                }
+            ],
+        )
+        self.assertEqual(
+            payload["handling_speed"]["overall"]["hr_dispatch_hours"][
+                "sample_count"
+            ],
+            1,
+        )
+        self.assertEqual(
+            payload["handling_speed"]["overall"]["department_processing_hours"][
+                "sample_count"
+            ],
+            1,
+        )
+
+    def test_missing_current_resume_uses_existing_volunteer_fallback(self):
+        workflow = m.CandidateWorkflow.objects.get(
+            candidate__identity_hash="analytics-candidate-1"
+        )
+        workflow.current_resume = None
+        workflow.save(update_fields=["current_resume"])
+        self.client.force_authenticate(self.hr)
+
+        response = self.client.get("/api/analytics/recruitment-overview/")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(
+            payload["source_distribution"],
+            [{"key": "rule", "label": "规则分配", "count": 1}],
+        )
+        self.assertEqual(
+            payload["department_ranking"][0]["key"], self.department.id
+        )
 
     def test_school_tag_filter_uses_highest_tag_then_first_tag_fallback(self):
         candidate = m.Candidate.objects.get(identity_hash="analytics-candidate-1")

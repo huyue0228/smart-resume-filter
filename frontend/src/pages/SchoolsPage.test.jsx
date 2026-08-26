@@ -21,7 +21,6 @@ vi.mock('@ant-design/pro-components', () => ({
           type="button"
           onClick={() => onFinish({
             name: '测试大学',
-            province: '湖北',
             school_tag: 5,
           })}
         >
@@ -94,7 +93,6 @@ describe('SchoolsPage', () => {
 
     await waitFor(() => expect(mocks.createSchool).toHaveBeenCalledWith({
       name: '测试大学',
-      province: '湖北',
       school_tag: 5,
     }))
     expect(mocks.reload).toHaveBeenCalledOnce()
@@ -109,7 +107,6 @@ describe('SchoolsPage', () => {
 
     await waitFor(() => expect(mocks.updateSchool).toHaveBeenCalledWith(9, {
       name: '测试大学',
-      province: '湖北',
       school_tag: 5,
     }))
   })

@@ -19,6 +19,7 @@ import {
   updateUser,
 } from '../api/services'
 import SmartDataTable from '../components/SmartDataTable'
+import { useRole } from '../contexts/roleState'
 
 const ROLE_VALUE_ENUM = {
   admin: { text: '管理员' },
@@ -44,6 +45,7 @@ function leafCodes(permissionTree) {
 }
 
 export default function UsersPage() {
+  const { refreshMe } = useRole()
   const userActionRef = useRef()
   const roleActionRef = useRef()
   const [roles, setRoles] = useState([])
@@ -216,9 +218,9 @@ export default function UsersPage() {
         permission_codes: checkedPermissions.filter((code) => allLeafCodes.includes(code)),
       })
       setActiveRole(data)
-      message.success('角色权限已保存')
       roleActionRef.current?.reload()
-      await loadOptions()
+      await Promise.all([loadOptions(), refreshMe()])
+      message.success('角色权限已保存')
       setPermissionModalOpen(false)
     } finally {
       setSavingPermissions(false)

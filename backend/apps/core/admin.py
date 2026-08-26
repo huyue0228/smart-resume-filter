@@ -18,7 +18,7 @@ for model in (
     models.SchoolTagRuleTag,
     models.CandidateWorkflow,
     models.AssignmentAttempt,
-    models.AssignmentHandoff,
+    models.AssignmentHandlingEvent,
     models.AgentDispatchDecision,
     models.ProcessingRun,
     models.Config,

@@ -42,6 +42,10 @@ class CandidateDeleteApiTests(TestCase):
             current_resume=resume,
             current_rank=1,
         )
+        department = m.Department.objects.create(
+            name=f"删除测试部门{suffix}", level=2
+        )
+        workflow._test_department = department
         return candidate, resume, workflow
 
     def test_delete_candidate_without_protected_history(self):
@@ -60,6 +64,8 @@ class CandidateDeleteApiTests(TestCase):
             attempt_no=1,
             source=m.AssignmentAttempt.SOURCE_RULE,
             status=m.AssignmentAttempt.STATUS_PENDING_DISPATCH,
+            initial_department=workflow._test_department,
+            current_department=workflow._test_department,
         )
 
         response = self.client.delete(f"/api/candidates/{candidate.id}/")
@@ -129,9 +135,9 @@ class ContactCandidateExportApiTests(TestCase):
             resume=resume,
             attempt_no=1,
             source=m.AssignmentAttempt.SOURCE_RULE,
-            status=m.AssignmentAttempt.STATUS_DISPATCHED_L2,
-            department=self.contact.department,
-            contact=self.contact,
+            status=m.AssignmentAttempt.STATUS_DISPATCHED,
+            initial_department=self.contact.department,
+            current_department=self.contact.department,
         )
         return candidate
 

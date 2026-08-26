@@ -38,7 +38,7 @@ export default function SchoolsPage() {
       filter: { type: 'text', param: 'name', pinyin: true, placeholder: '筛选学校/拼音' },
     },
     {
-      title: '平台标签',
+      title: '院校标签',
       dataIndex: 'platform',
       width: 160,
       filter: { type: 'select', param: 'platform_in', multiple: true, options: 'platform' },
@@ -67,7 +67,10 @@ export default function SchoolsPage() {
     },
   ].filter(Boolean)
   return (
-    <PageContainer title="院校清单" content="维护院校与院校标签，可导入更新。">
+    <PageContainer
+      title="院校清单"
+      content="维护院校与单个院校标签；所在省份由 AI 自动补全。"
+    >
       <SmartDataTable
         tableId="schools"
         stickyPagination
@@ -114,7 +117,6 @@ export default function SchoolsPage() {
           onFinish={async (values) => {
             const body = {
               name: values.name?.trim(),
-              province: values.province?.trim() || '',
               school_tag: values.school_tag || null,
             }
             if (schoolModal.record) {
@@ -144,7 +146,6 @@ export default function SchoolsPage() {
               return data?.school_tag || []
             }}
           />
-          <ProFormText name="province" label="所在省份" />
         </ModalForm>
       )}
     </PageContainer>

@@ -100,7 +100,7 @@ class AIResumeScreeningServiceTests(TestCase):
             result = service.screen_resume(self.resume, self.job)
 
         self.assertEqual(result.job, self.job)
-        self.assertEqual(result.contact, self.contact)
+        self.assertEqual(result.department, self.department)
         self.assertAlmostEqual(result.confidence, 0.795)
         self.assertEqual(result.profile.parse_status, "parsed")
         self.assertEqual(result.profile.skills, ["Python", "Django"])

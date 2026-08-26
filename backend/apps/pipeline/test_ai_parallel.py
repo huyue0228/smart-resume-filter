@@ -93,12 +93,6 @@ class AIParallelPipelineTests(TestCase):
             }
         )
         self.department = m.Department.objects.create(name="并发技术部", level=2)
-        self.contact = m.Contact.objects.create(
-            name="并发接口人",
-            employee_no="PAR-L2",
-            department=self.department,
-            contact_level=m.Contact.LEVEL_SECONDARY,
-        )
         self.job = m.Job.objects.create(
             department=self.department,
             public_name="后端工程师",
@@ -151,7 +145,6 @@ class AIParallelPipelineTests(TestCase):
             output=output,
             job=self.job,
             department=self.department,
-            contact=self.contact,
             confidence=0.9,
             score_breakdown={},
         )
@@ -371,18 +364,11 @@ class AIParallelPipelineTests(TestCase):
         tertiary_department = m.Department.objects.create(
             name="AI 专项组", level=3, parent=self.department
         )
-        tertiary_contact = m.Contact.objects.create(
-            name="AI 专项三级接口人",
-            employee_no="PAR-L3",
-            department=tertiary_department,
-            contact_level=m.Contact.LEVEL_TERTIARY,
-            is_active=True,
-        )
         for key, value in {
             "ai_special_route_enabled": True,
             "ai_special_route_threshold": 0.9,
-            "ai_special_route_secondary_contact_id": self.contact.id,
-            "ai_special_route_tertiary_contact_id": tertiary_contact.id,
+            "ai_special_route_secondary_department_id": self.department.id,
+            "ai_special_route_tertiary_department_id": tertiary_department.id,
         }.items():
             m.Config.objects.update_or_create(key=key, defaults={"value": value})
 
@@ -420,11 +406,26 @@ class AIParallelPipelineTests(TestCase):
         self.assertEqual(routed_attempt.route_code, "ai_special_route")
         self.assertEqual(routed_attempt.source, m.AssignmentAttempt.SOURCE_AI)
         self.assertEqual(
-            routed_attempt.status, m.AssignmentAttempt.STATUS_ASSIGNED_L3
+            routed_attempt.status, m.AssignmentAttempt.STATUS_DISPATCHED
         )
-        self.assertEqual(routed_attempt.contact, self.contact)
-        self.assertEqual(routed_attempt.sub_contact, tertiary_contact)
-        self.assertEqual(routed_attempt.handoffs.count(), 2)
+        self.assertEqual(routed_attempt.initial_department, self.department)
+        self.assertEqual(routed_attempt.current_department, tertiary_department)
+        self.assertEqual(
+            list(
+                routed_attempt.handling_events.values_list("event_type", flat=True)
+            ),
+            [
+                m.AssignmentHandlingEvent.EVENT_ATTEMPT_CREATED,
+                m.AssignmentHandlingEvent.EVENT_DEPARTMENT_DISPATCHED,
+                m.AssignmentHandlingEvent.EVENT_DEPARTMENT_TRANSFERRED,
+            ],
+        )
+        routed_event = routed_attempt.handling_events.get(
+            event_type=m.AssignmentHandlingEvent.EVENT_DEPARTMENT_TRANSFERRED
+        )
+        self.assertEqual(routed_event.from_department, self.department)
+        self.assertEqual(routed_event.to_department, tertiary_department)
+        self.assertTrue(routed_event.is_system_auto)
         self.assertEqual(
             routed_attempt.special_route_config_snapshot["version"],
             ai_config.get_ai_special_route_config().snapshot()["version"],
@@ -443,8 +444,8 @@ class AIParallelPipelineTests(TestCase):
         for key, value in {
             "ai_special_route_enabled": True,
             "ai_special_route_threshold": 0.9,
-            "ai_special_route_secondary_contact_id": self.contact.id,
-            "ai_special_route_tertiary_contact_id": 999999,
+            "ai_special_route_secondary_department_id": self.department.id,
+            "ai_special_route_tertiary_department_id": 999999,
         }.items():
             m.Config.objects.update_or_create(key=key, defaults={"value": value})
 
