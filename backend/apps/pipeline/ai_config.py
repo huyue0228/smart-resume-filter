@@ -70,7 +70,7 @@ PUBLIC_AI_CONFIG_REGISTRY = {
     },
     "ai_special_route_enabled": {
         "label": "AI 专项强制分配",
-        "description": "命中 AI 专项人才条件后，自动强制分配至配置的三级接口人。",
+        "description": "命中 AI 专项人才条件后，自动分流至配置的三级部门。",
         "section": "special_route",
         "value_type": "boolean",
         "default": False,
@@ -84,17 +84,17 @@ PUBLIC_AI_CONFIG_REGISTRY = {
         "min": 0.9,
         "max": 1,
     },
-    "ai_special_route_secondary_contact_id": {
-        "label": "AI 专项父级二级接口人",
-        "description": "专项强制分配写入的父级二级接口人；0 表示未配置。",
+    "ai_special_route_secondary_department_id": {
+        "label": "AI 专项父级二级部门",
+        "description": "专项分流首先进入的二级部门；0 表示未配置。",
         "section": "special_route",
         "value_type": "integer",
         "default": 0,
         "min": 0,
     },
-    "ai_special_route_tertiary_contact_id": {
-        "label": "AI 专项目标三级接口人",
-        "description": "专项强制分配的固定三级接口人；0 表示未配置。",
+    "ai_special_route_tertiary_department_id": {
+        "label": "AI 专项目标三级部门",
+        "description": "专项分流的固定三级部门；0 表示未配置。",
         "section": "special_route",
         "value_type": "integer",
         "default": 0,
@@ -140,15 +140,15 @@ class AIRuntimeConfig:
 class AISpecialRouteConfig:
     enabled: bool
     threshold: float
-    secondary_contact_id: int
-    tertiary_contact_id: int
+    secondary_department_id: int
+    tertiary_department_id: int
 
     def snapshot(self):
         payload = {
             "enabled": self.enabled,
             "threshold": self.threshold,
-            "secondary_contact_id": self.secondary_contact_id,
-            "tertiary_contact_id": self.tertiary_contact_id,
+            "secondary_department_id": self.secondary_department_id,
+            "tertiary_department_id": self.tertiary_department_id,
         }
         payload["version"] = hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -430,7 +430,7 @@ def get_ai_runtime_config():
 
 
 def get_ai_special_route_config(*, overrides=None, validate=False):
-    """读取专项强制分配配置，并在启用时校验接口人层级和部门关系。"""
+    """读取专项部门分流配置，并在启用时校验部门层级关系。"""
     overrides = overrides or {}
 
     def value(key):
@@ -441,36 +441,30 @@ def get_ai_special_route_config(*, overrides=None, validate=False):
     config = AISpecialRouteConfig(
         enabled=bool(value("ai_special_route_enabled")),
         threshold=float(value("ai_special_route_threshold")),
-        secondary_contact_id=int(value("ai_special_route_secondary_contact_id") or 0),
-        tertiary_contact_id=int(value("ai_special_route_tertiary_contact_id") or 0),
+        secondary_department_id=int(
+            value("ai_special_route_secondary_department_id") or 0
+        ),
+        tertiary_department_id=int(
+            value("ai_special_route_tertiary_department_id") or 0
+        ),
     )
     if not validate or not config.enabled:
         return config
 
     from apps.core import models as m
 
-    secondary = m.Contact.objects.select_related("department").filter(
-        pk=config.secondary_contact_id,
-        contact_level=m.Contact.LEVEL_SECONDARY,
-        is_active=True,
+    secondary = m.Department.objects.filter(
+        pk=config.secondary_department_id, level=2
     ).first()
-    tertiary = m.Contact.objects.select_related("department__parent").filter(
-        pk=config.tertiary_contact_id,
-        contact_level=m.Contact.LEVEL_TERTIARY,
-        is_active=True,
+    tertiary = m.Department.objects.select_related("parent").filter(
+        pk=config.tertiary_department_id, level=3
     ).first()
     if not secondary:
-        raise ValueError("AI 专项分流的二级接口人不存在、未启用或层级不正确")
+        raise ValueError("AI 专项分流的二级部门不存在或层级不正确")
     if not tertiary:
-        raise ValueError("AI 专项分流的三级接口人不存在、未启用或层级不正确")
-    if (
-        not secondary.department
-        or secondary.department.level != 2
-        or not tertiary.department
-        or tertiary.department.level != 3
-        or tertiary.department.parent_id != secondary.department_id
-    ):
-        raise ValueError("AI 专项分流的二级、三级接口人不属于同一上下级部门")
+        raise ValueError("AI 专项分流的三级部门不存在或层级不正确")
+    if tertiary.parent_id != secondary.id:
+        raise ValueError("AI 专项分流的二级、三级部门不属于同一上下级关系")
     return config
 
 

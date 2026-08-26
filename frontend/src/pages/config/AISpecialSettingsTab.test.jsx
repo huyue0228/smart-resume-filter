@@ -13,49 +13,58 @@ vi.mock('../../api/services', () => ({
   updateAIConnectionSetting: vi.fn(),
 }))
 
-const settingsResponse = {
-  settings: [
-    { key: 'ai_special_route_enabled', section: 'special_route', value: false },
-    { key: 'ai_special_route_threshold', section: 'special_route', value: 0.9 },
-    { key: 'ai_special_route_secondary_contact_id', section: 'special_route', value: 11 },
-    { key: 'ai_special_route_tertiary_contact_id', section: 'special_route', value: 21 },
-  ],
-  contacts: [
-    {
-      id: 11,
-      name: '研发二级接口人',
-      employee_no: 'S11',
-      contact_level: 'secondary',
-      department: 101,
-      department_name: '研发部',
-      parent_department: null,
-    },
-    {
-      id: 21,
-      name: '算法三级接口人',
-      employee_no: 'T21',
-      contact_level: 'tertiary',
-      department: 201,
-      department_name: '算法组',
-      parent_department: 101,
-    },
-    {
-      id: 22,
-      name: '产品三级接口人',
-      employee_no: 'T22',
-      contact_level: 'tertiary',
-      department: 202,
-      department_name: '产品组',
-      parent_department: 102,
-    },
-  ],
+const configValues = {
+  ai_special_route_enabled: false,
+  ai_special_route_threshold: 0.9,
+  ai_special_route_secondary_department_id: 11,
+  ai_special_route_tertiary_department_id: 21,
 }
+
+const departments = [
+  {
+    id: 11,
+    name: '研发部',
+    level: 2,
+    parent: 1,
+    entity: '总部',
+  },
+  {
+    id: 21,
+    name: '算法组',
+    level: 3,
+    parent: 11,
+    entity: '总部',
+  },
+  {
+    id: 12,
+    name: '产品部',
+    level: 2,
+    parent: 1,
+    entity: '总部',
+  },
+  {
+    id: 22,
+    name: '产品组',
+    level: 3,
+    parent: 12,
+    entity: '总部',
+  },
+]
 
 describe('AISpecialSettingsTab', () => {
   beforeEach(() => {
     fetchAIConnectionSettings.mockReset()
     updateAIConnectionSetting.mockReset()
-    fetchAIConnectionSettings.mockResolvedValue({ data: settingsResponse })
+    fetchAIConnectionSettings.mockResolvedValue({
+      data: {
+        settings: Object.entries(configValues).map(([key, value]) => ({
+          key,
+          value,
+          section: 'special_route',
+        })),
+        departments,
+      },
+    })
     updateAIConnectionSetting.mockResolvedValue({ data: {} })
   })
 
@@ -70,10 +79,27 @@ describe('AISpecialSettingsTab', () => {
     await user.click(enabled)
     await user.click(screen.getByRole('button', { name: '保存 AI 专项配置' }))
 
+    expect(fetchAIConnectionSettings).toHaveBeenCalledTimes(2)
+    expect(screen.getByText('父级二级部门')).toBeTruthy()
+    expect(screen.getByText('目标三级部门')).toBeTruthy()
     await waitFor(() => expect(updateAIConnectionSetting).toHaveBeenCalledWith(
       'ai_special_route_enabled',
       true,
     ))
+  })
+
+  it('only offers tertiary departments under the selected secondary department', async () => {
+    const user = userEvent.setup()
+    render(<AISpecialSettingsTab />)
+
+    const secondarySelect = await screen.findByRole('combobox', { name: 'AI 专项父级二级部门' })
+    await user.click(secondarySelect)
+    await user.click(await screen.findByText('产品部（总部）'))
+
+    const tertiarySelect = screen.getByRole('combobox', { name: 'AI 专项目标三级部门' })
+    await user.click(tertiarySelect)
+    expect(await screen.findByText('产品组（总部）')).toBeTruthy()
+    expect(screen.queryByText('算法组（总部）')).toBeNull()
   })
 
   it('safely disables an enabled route before changing its targets', async () => {
@@ -81,21 +107,21 @@ describe('AISpecialSettingsTab', () => {
     const persisted = {
       ai_special_route_enabled: true,
       ai_special_route_threshold: 0.9,
-      ai_special_route_secondary_contact_id: 11,
-      ai_special_route_tertiary_contact_id: 21,
+      ai_special_route_secondary_department_id: 11,
+      ai_special_route_tertiary_department_id: 21,
     }
     const drafts = {
       ...persisted,
-      ai_special_route_secondary_contact_id: 12,
-      ai_special_route_tertiary_contact_id: 22,
+      ai_special_route_secondary_department_id: 12,
+      ai_special_route_tertiary_department_id: 22,
     }
 
     await saveAISpecialSettings({ persisted, drafts, update })
 
     expect(update.mock.calls).toEqual([
       ['ai_special_route_enabled', false],
-      ['ai_special_route_secondary_contact_id', 12],
-      ['ai_special_route_tertiary_contact_id', 22],
+      ['ai_special_route_secondary_department_id', 12],
+      ['ai_special_route_tertiary_department_id', 22],
       ['ai_special_route_enabled', true],
     ])
   })

@@ -16,6 +16,7 @@ import {
   Input,
   Popconfirm,
   Alert,
+  Timeline,
 } from 'antd'
 import {
   DeleteOutlined,
@@ -31,7 +32,7 @@ import {
   fetchCandidateFilterOptions,
   fetchUndoStatus,
   undoLastImport,
-  fetchContacts,
+  fetchManualAssignmentOptions,
   manualAssignResume,
   fetchAgentDecisions,
   retryAgentDecision,
@@ -42,8 +43,10 @@ import {
   cancelReviewAllocation,
   transferAllocationToManual,
   bulkDispatchCandidates,
-  assignSubContact,
-  fetchEligibleSubContacts,
+  bulkTransferCandidates,
+  transferAllocation,
+  fetchTransferOptions,
+  fetchFeedbackReasons,
   submitAllocationFeedback,
   exportAllocations,
 } from '../api/services'
@@ -88,7 +91,7 @@ const REASON_CODE_OPTIONS = {
   job_not_found: '缺少匹配岗位',
   job_responsibility_missing: '岗位缺少工作职责',
   secondary_department_missing: '缺少岗位二级部门',
-  secondary_contact_missing: '缺少二级接口人',
+  department_missing: '缺少接收部门',
   major_not_matched: '专业不匹配',
   job_mapping_ambiguous: '职位映射歧义',
   internal_position_name_missing: '内部职位缺失',
@@ -170,7 +173,7 @@ const SYSTEM_STATUS_OPTIONS = {
     text: '待业务反馈',
     color: 'processing',
     status: 'Processing',
-    description: '存在已下发二级/已转派三级尝试，已给业务部门但尚未反馈',
+    description: '存在已下发部门的尝试，业务部门尚未反馈',
   },
   screening_passed: {
     text: '通过',
@@ -189,8 +192,7 @@ const SYSTEM_STATUS_OPTIONS = {
 const ATTEMPT_STATUS = {
   pending_review: { color: 'warning', text: '待复核' },
   pending_dispatch: { color: 'default', text: '待下发' },
-  dispatched_l2: { color: 'processing', text: '已下发二级' },
-  assigned_l3: { color: 'processing', text: '已转派三级' },
+  dispatched: { color: 'processing', text: '部门处理中' },
   passed: { color: 'success', text: '已通过' },
   rejected: { color: 'error', text: '未通过' },
   cancelled: { color: 'default', text: '已取消' },
@@ -200,6 +202,82 @@ const SOURCE_TEXT = {
   rule: '规则',
   ai: 'AI',
   manual: '手动',
+}
+
+const FEEDBACK_REASON_OPTIONS = [
+  { value: 'major_background_mismatch', label: '专业背景不匹配' },
+  { value: 'research_experience_mismatch', label: '科研经历不符合' },
+  { value: 'key_capability_mismatch', label: '关键能力不匹配' },
+  { value: 'project_internship_mismatch', label: '项目/实习经历不匹配' },
+  { value: 'position_direction_mismatch', label: '岗位方向不匹配' },
+  { value: 'other', label: '其他' },
+]
+
+const HANDLING_EVENT_TEXT = {
+  attempt_created: '创建分配尝试',
+  review_confirmed: 'HR 确认复核',
+  department_dispatched: '下发部门',
+  department_transferred: '部门转派',
+  feedback_passed: '反馈通过',
+  feedback_rejected: '反馈不通过',
+  cancelled: '取消处理',
+}
+
+function departmentLabel(department) {
+  if (!department) return '-'
+  const name = department.name || department.label || '-'
+  const parent = department.parent_name || department.primary_department_name
+  return parent && parent !== name ? `${parent} / ${name}` : name
+}
+
+function formatDuration(seconds) {
+  const value = Number(seconds)
+  if (!Number.isFinite(value) || value < 0) return ''
+  if (value < 60) return `${Math.round(value)} 秒`
+  if (value < 3600) return `${Math.round(value / 60)} 分钟`
+  if (value < 86400) return `${(value / 3600).toFixed(value < 36000 ? 1 : 0)} 小时`
+  return `${(value / 86400).toFixed(value < 864000 ? 1 : 0)} 天`
+}
+
+function eventDepartmentName(event, direction) {
+  const key = direction === 'from' ? 'from_department' : 'to_department'
+  return event?.[`${key}_name`] || event?.[key]?.name || ''
+}
+
+function formatEventTime(value) {
+  if (!value) return '-'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(date)
+}
+
+function candidateHandlingEvents(record) {
+  const events = (record?.attempts || [])
+    .flatMap((attempt) => (attempt.handling_events || []).map((event) => ({
+      ...event,
+      attemptNo: attempt.attempt_no,
+    })))
+    .sort((left, right) => new Date(left.occurred_at) - new Date(right.occurred_at))
+  return events.map((event, index) => {
+    if (index === 0) return { ...event, duration_since_previous_seconds: null }
+    const occurredAt = new Date(event.occurred_at).getTime()
+    const previousAt = new Date(events[index - 1].occurred_at).getTime()
+    return {
+      ...event,
+      duration_since_previous_seconds: Number.isFinite(occurredAt) && Number.isFinite(previousAt)
+        ? Math.max(0, Math.round((occurredAt - previousAt) / 1000))
+        : null,
+    }
+  })
 }
 
 const WORKFLOW_STATUS = {
@@ -235,13 +313,15 @@ const ANALYTICS_REQUEST_PARAM_KEYS = [
 export default function ResumesPage() {
   const actionRef = useRef()
   const [searchParams, setSearchParams] = useSearchParams()
-  const { hasPermission, contact, isContact, isSecondaryContact, user } = useRole()
+  const { hasPermission, contact, isContact, user } = useRole()
   const canViewAgentDecisions = hasPermission('attempt.view_all')
   const canRunPipeline = hasPermission('pipeline.run')
   const canImport = hasPermission('resume.import')
   const canDispatch = hasPermission('attempt.dispatch')
+  const canTransfer = hasPermission('attempt.transfer_department')
+    && (!contact || contact.can_delegate !== false)
   const canExport = hasPermission('resume.view') || hasPermission('attempt.export')
-  const canSelectCandidates = canDispatch || canExport || canImport
+  const canSelectCandidates = canDispatch || canTransfer || canExport || canImport
   const { run } = useProcessRunner()
   const [undo, setUndo] = useState({ available: false })
   const [detailRecord, setDetailRecord] = useState(null)
@@ -261,6 +341,7 @@ export default function ResumesPage() {
   const [processMode, setProcessMode] = useState('rule')
   const [lastQuery, setLastQuery] = useState({})
   const [selectedRowKeys, setSelectedRowKeys] = useState([])
+  const [selectedCandidates, setSelectedCandidates] = useState([])
   const [bulkDispatching, setBulkDispatching] = useState(false)
   const [bulkDispatchModal, setBulkDispatchModal] = useState({
     open: false,
@@ -275,49 +356,56 @@ export default function ResumesPage() {
     open: false,
     resume: null,
     attempt: null,
-    contacts: [],
-    contactId: undefined,
-    secondaryId: undefined,
+    departments: [],
+    departmentId: undefined,
     reason: '',
     loading: false,
   })
-  const [assignModal, setAssignModal] = useState({
+  const [transferModal, setTransferModal] = useState({
     open: false,
     record: null,
-    contacts: [],
+    departments: [],
     selected: undefined,
+    note: '',
+    loading: false,
+  })
+  const [bulkTransferModal, setBulkTransferModal] = useState({
+    open: false,
+    candidateIds: [],
+    departments: [],
+    selected: undefined,
+    note: '',
     loading: false,
   })
   const [feedbackModal, setFeedbackModal] = useState({
     open: false,
     record: null,
     result: 'passed',
+    reasonCode: undefined,
+    reasonOptions: FEEDBACK_REASON_OPTIONS,
     note: '',
     loading: false,
   })
   const openManualAssign = async (resume, attempt = null) => {
     setManualModal((prev) => ({ ...prev, open: true, resume, attempt, loading: true }))
     try {
-      const { data } = await fetchContacts({
-        is_active: 'true',
-        page_size: 500,
-      })
-      setManualModal((prev) => ({ ...prev, contacts: data?.results || [], loading: false }))
+      const { data } = await fetchManualAssignmentOptions()
+      const departments = data?.results || []
+      setManualModal((prev) => ({ ...prev, departments, loading: false }))
     } catch {
       setManualModal((prev) => ({ ...prev, loading: false }))
     }
   }
 
   const handleManualAssign = async () => {
-    if (!manualModal.contactId) {
-      message.warning('请选择二级接口人')
+    if (!manualModal.departmentId) {
+      message.warning('请选择目标部门')
       return
     }
     setManualModal((prev) => ({ ...prev, loading: true }))
     try {
       const payload = {
-        contact_id: manualModal.contactId,
-        secondary_contact_id: manualModal.secondaryId,
+        target_department_id: manualModal.departmentId,
         manual_reason: manualModal.reason || 'HR 手动强制分配',
       }
       if (manualModal.attempt) {
@@ -326,7 +414,7 @@ export default function ResumesPage() {
         await manualAssignResume(manualModal.resume.id, payload)
       }
       message.success('已创建人工分配尝试')
-      setManualModal({ open: false, resume: null, attempt: null, contacts: [], contactId: undefined, secondaryId: undefined, reason: '', loading: false })
+      setManualModal({ open: false, resume: null, attempt: null, departments: [], departmentId: undefined, reason: '', loading: false })
       setDetailRecord(null)
       actionRef.current?.reload?.()
     } catch {
@@ -499,6 +587,7 @@ export default function ResumesPage() {
       message.success(data?.detail || '批量下发完成')
       setBulkDispatchModal((previous) => ({ ...previous, open: false }))
       setSelectedRowKeys([])
+      setSelectedCandidates([])
       actionRef.current?.reload?.()
     } finally {
       setBulkDispatching(false)
@@ -512,47 +601,139 @@ export default function ResumesPage() {
     }))
   }
 
-  const openAssignModal = async (attempt) => {
-    setAssignModal({
+  const openTransferModal = async (attempt) => {
+    setTransferModal({
       open: true,
       record: attempt,
-      contacts: [],
-      selected: attempt.sub_contact || undefined,
+      departments: [],
+      selected: undefined,
+      note: '',
       loading: true,
     })
     try {
-      const { data } = await fetchEligibleSubContacts(attempt.id)
-      setAssignModal((previous) => ({ ...previous, contacts: data || [], loading: false }))
+      const { data } = await fetchTransferOptions(attempt.id)
+      setTransferModal((previous) => ({
+        ...previous,
+        departments: data?.results || [],
+        loading: false,
+      }))
     } catch {
-      setAssignModal((previous) => ({ ...previous, loading: false }))
+      setTransferModal((previous) => ({ ...previous, loading: false }))
     }
   }
 
-  const handleAssignSubContact = async () => {
-    if (!assignModal.selected) {
-      message.warning('请选择三级接口人')
+  const handleTransfer = async () => {
+    if (!transferModal.selected) {
+      message.warning('请选择目标部门')
       return
     }
-    setAssignModal((previous) => ({ ...previous, loading: true }))
+    setTransferModal((previous) => ({ ...previous, loading: true }))
     try {
-      await assignSubContact(assignModal.record.id, { sub_contact_id: assignModal.selected })
-      message.success('已转派给三级接口人')
-      setAssignModal({ open: false, record: null, contacts: [], selected: undefined, loading: false })
+      await transferAllocation(transferModal.record.id, {
+        target_department_id: transferModal.selected,
+        note: transferModal.note.trim(),
+      })
+      message.success('已转派到目标部门')
+      setTransferModal({ open: false, record: null, departments: [], selected: undefined, note: '', loading: false })
       reloadCandidates()
     } catch {
-      setAssignModal((previous) => ({ ...previous, loading: false }))
+      setTransferModal((previous) => ({ ...previous, loading: false }))
+    }
+  }
+
+  const openBulkTransfer = async () => {
+    if (!selectedRowKeys.length) {
+      message.warning('请先选择候选人')
+      return
+    }
+    const optionSource = selectedCandidates.find((candidate) => candidate.current_attempt?.id)
+    if (!optionSource) {
+      message.warning('当前选中项中没有可用于加载转派部门的处理记录')
+      return
+    }
+    const candidateIds = [...selectedRowKeys]
+    setBulkTransferModal({
+      open: true,
+      candidateIds,
+      departments: [],
+      selected: undefined,
+      note: '',
+      loading: true,
+    })
+    try {
+      const { data } = await fetchTransferOptions(optionSource.current_attempt.id)
+      const departments = (data?.results || []).filter((item) => Number(item.level) === 2)
+      setBulkTransferModal((previous) => ({ ...previous, departments, loading: false }))
+    } catch {
+      setBulkTransferModal((previous) => ({ ...previous, loading: false }))
+    }
+  }
+
+  const handleBulkTransfer = async () => {
+    if (!bulkTransferModal.selected) {
+      message.warning('请选择目标二级部门')
+      return
+    }
+    setBulkTransferModal((previous) => ({ ...previous, loading: true }))
+    try {
+      const { data } = await bulkTransferCandidates({
+        candidate_ids: bulkTransferModal.candidateIds,
+        target_department_id: bulkTransferModal.selected,
+        note: bulkTransferModal.note.trim(),
+      })
+      message.success(
+        `批量转派完成：成功 ${data?.transferred || 0}，跳过 ${data?.skipped || 0}，失败 ${data?.failed || 0}`,
+      )
+      setBulkTransferModal({ open: false, candidateIds: [], departments: [], selected: undefined, note: '', loading: false })
+      setSelectedRowKeys([])
+      setSelectedCandidates([])
+      actionRef.current?.reload?.()
+    } catch {
+      setBulkTransferModal((previous) => ({ ...previous, loading: false }))
+    }
+  }
+
+  const openFeedbackModal = async (attempt) => {
+    setFeedbackModal({
+      open: true,
+      record: attempt,
+      result: 'passed',
+      reasonCode: undefined,
+      reasonOptions: FEEDBACK_REASON_OPTIONS,
+      note: '',
+      loading: true,
+    })
+    try {
+      const { data } = await fetchFeedbackReasons()
+      setFeedbackModal((previous) => ({
+        ...previous,
+        reasonOptions: data?.results?.length ? data.results : FEEDBACK_REASON_OPTIONS,
+        loading: false,
+      }))
+    } catch {
+      setFeedbackModal((previous) => ({ ...previous, loading: false }))
     }
   }
 
   const handleFeedback = async () => {
+    const rejected = feedbackModal.result === 'rejected'
+    if (rejected && !feedbackModal.reasonCode) {
+      message.warning('请选择不通过原因')
+      return
+    }
+    if (rejected && feedbackModal.reasonCode === 'other' && !feedbackModal.note.trim()) {
+      message.warning('选择“其他”时必须填写反馈备注')
+      return
+    }
     setFeedbackModal((previous) => ({ ...previous, loading: true }))
     try {
       await submitAllocationFeedback(feedbackModal.record.id, {
         result: feedbackModal.result,
+        ...(rejected ? { reason_code: feedbackModal.reasonCode } : {}),
         note: feedbackModal.note,
       })
       message.success('反馈已提交，简历状态已更新')
-      setFeedbackModal({ open: false, record: null, result: 'passed', note: '', loading: false })
+      setFeedbackModal({ open: false, record: null, result: 'passed', reasonCode: undefined, reasonOptions: FEEDBACK_REASON_OPTIONS, note: '', loading: false })
       reloadCandidates()
     } catch {
       setFeedbackModal((previous) => ({ ...previous, loading: false }))
@@ -601,6 +782,7 @@ export default function ResumesPage() {
           message.success('已删除')
           setDetailRecord(null)
           setSelectedRowKeys((keys) => keys.filter((key) => key !== record.id))
+          setSelectedCandidates((rows) => rows.filter((row) => row.id !== record.id))
           await actionRef.current?.reloadOptions()
           actionRef.current?.reload()
         } catch (error) {
@@ -635,6 +817,7 @@ export default function ResumesPage() {
             }
           }
           setSelectedRowKeys(failed.map((item) => item.id))
+          setSelectedCandidates((rows) => rows.filter((row) => failed.some((item) => item.id === row.id)))
           if (deleted) {
             await actionRef.current?.reloadOptions()
             actionRef.current?.reload()
@@ -748,6 +931,7 @@ export default function ResumesPage() {
         setProcessModalOpen(false)
         if (processCurrentSelected) {
           setSelectedRowKeys([])
+          setSelectedCandidates([])
           actionRef.current?.clearSelected?.()
         }
       }
@@ -760,11 +944,13 @@ export default function ResumesPage() {
     const attempt = record.current_attempt
     const canDispatchAttempt = canDispatch && attempt?.status === 'pending_dispatch'
     const canReview = hasPermission('attempt.dispatch') && attempt?.status === 'pending_review'
-    const canAssign = isSecondaryContact && attempt && ['dispatched_l2', 'assigned_l3'].includes(attempt.status) && !attempt.feedback_at
-    const canFeedback = hasPermission('attempt.feedback') && !attempt?.feedback_at && (
-      (attempt?.status === 'dispatched_l2' && hasPermission('attempt.view_received') && attempt.contact === contact?.id)
-      || (attempt?.status === 'assigned_l3' && hasPermission('attempt.view_assigned') && attempt.sub_contact === contact?.id)
-    )
+    const canTransferAttempt = canTransfer
+      && attempt?.status === 'dispatched'
+      && !attempt.feedback_at
+    const canFeedback = hasPermission('attempt.feedback')
+      && attempt?.status === 'dispatched'
+      && !attempt.feedback_at
+      && Number(attempt.current_department) === Number(contact?.department)
     return (
       <Space wrap className="resume-detail-actions">
         {hasPermission('resume.manual_assign') && record.current_resume && (
@@ -794,8 +980,8 @@ export default function ResumesPage() {
           <Button type="link" size="small" style={{ padding: 0 }} onClick={() => openManualAssign(record.current_resume, attempt)}>转人工</Button>
         )}
         {canDispatchAttempt && (
-          <Popconfirm title="确认下发该简历到二级接口人？" onConfirm={() => handleDispatch(attempt)}>
-            <Button type="link" size="small" style={{ padding: 0 }} loading={dispatchingId === attempt.id}>下发二级</Button>
+          <Popconfirm title="确认下发该简历到部门收件箱？" onConfirm={() => handleDispatch(attempt)}>
+            <Button type="link" size="small" style={{ padding: 0 }} loading={dispatchingId === attempt.id}>下发部门</Button>
           </Popconfirm>
         )}
         {(canReview || canDispatchAttempt) && (
@@ -803,9 +989,9 @@ export default function ResumesPage() {
             <Button type="link" danger size="small" style={{ padding: 0 }}>取消</Button>
           </Popconfirm>
         )}
-        {canAssign && (
-          <Button type="link" size="small" style={{ padding: 0 }} onClick={() => openAssignModal(attempt)}>
-            {attempt.sub_contact ? '改派' : '转派'}
+        {canTransferAttempt && (
+          <Button type="link" size="small" style={{ padding: 0 }} onClick={() => openTransferModal(attempt)}>
+            转派部门
           </Button>
         )}
         {canFeedback && (
@@ -813,7 +999,7 @@ export default function ResumesPage() {
             type="link"
             size="small"
             style={{ padding: 0 }}
-            onClick={() => setFeedbackModal({ open: true, record: attempt, result: 'passed', note: '', loading: false })}
+            onClick={() => openFeedbackModal(attempt)}
           >
             提交反馈
           </Button>
@@ -892,13 +1078,6 @@ export default function ResumesPage() {
       render: (_, record) => record.highest_major || '-',
     },
     {
-      title: '当前志愿',
-      dataIndex: 'current_rank',
-      width: 90,
-      filter: { type: 'select', param: 'current_rank_in', multiple: true, options: 'current_rank' },
-      render: (_, record) => record.current_rank || '-',
-    },
-    {
       title: '投递时间',
       dataIndex: 'current_apply_date',
       width: 120,
@@ -940,6 +1119,30 @@ export default function ResumesPage() {
       render: (value) => value || '-',
     },
     {
+      title: '当前接收一级部门',
+      dataIndex: 'current_primary_department_name',
+      width: 150,
+      ellipsis: true,
+      filter: {
+        type: 'select',
+        param: 'current_primary_department_id',
+        options: 'current_primary_department',
+      },
+      render: (value) => value || '-',
+    },
+    {
+      title: '当前接收部门',
+      dataIndex: 'current_department_name',
+      width: 150,
+      ellipsis: true,
+      filter: {
+        type: 'select',
+        param: 'current_department_id',
+        options: 'current_department',
+      },
+      render: (value) => value || '-',
+    },
+    {
       title: '岗位类别',
       dataIndex: 'current_job_category',
       width: 110,
@@ -954,26 +1157,16 @@ export default function ResumesPage() {
       render: (_, record) => SOURCE_TEXT[record.allocation_source] || '-',
     },
     {
-      title: '二级接口人',
-      dataIndex: 'contact_name',
-      width: 120,
-      filter: { type: 'text', param: 'contact_name', pinyin: true, placeholder: '筛选二级接口人/拼音' },
-      render: (_, record) => record.current_attempt?.contact_name || record.current_attempt?.contact_name_snapshot || '-',
-    },
-    {
-      title: '三级接口人',
-      dataIndex: 'sub_contact_name',
-      width: 120,
-      filter: { type: 'text', param: 'sub_contact_name', pinyin: true, placeholder: '筛选三级接口人/拼音' },
-      render: (_, record) => record.current_attempt?.sub_contact_name || record.current_attempt?.sub_contact_name_snapshot || '-',
-    },
-    {
       title: '院校标签',
       dataIndex: 'school_tag',
       width: 110,
       filter: { type: 'select', param: 'school_tag_in', multiple: true, options: 'school_tag' },
       render: (_, record) =>
-        record.school_tag ? <SchoolTagBadge value={record.school_tag} /> : '-',
+        record.school_tags?.length
+          ? record.school_tags.map((tag) => (
+              <SchoolTagBadge key={tag.id || tag.code || tag.name} value={tag.name || tag} />
+            ))
+          : (record.school_tag ? <SchoolTagBadge value={record.school_tag} /> : '-'),
     },
     {
       title: '简历状态',
@@ -1011,18 +1204,19 @@ export default function ResumesPage() {
       ),
       filter: {
         type: 'select',
-        param: 'reason_code',
-        options: Object.entries(REASON_CODE_OPTIONS).map(([value, label]) => ({ value, label })),
+        param: 'feedback_reason_code',
+        options: FEEDBACK_REASON_OPTIONS,
       },
       render: (_, record) => {
         const type = record.reason_type || 'none'
         const item = REASON_TYPE[type] || REASON_TYPE.none
         const reasonText = record.reason_text || '-'
+        const feedbackReasonLabel = record.current_attempt?.feedback_reason_label_snapshot
         return (
           <Tooltip title={reasonText}>
             <Space size={4}>
               <Tag color={item.color}>
-                {REASON_CODE_OPTIONS[record.reason_code] || item.text}
+                {feedbackReasonLabel || REASON_CODE_OPTIONS[record.reason_code] || item.text}
               </Tag>
               <Typography.Text ellipsis style={{ maxWidth: 150 }}>
                 {reasonText}
@@ -1066,14 +1260,18 @@ export default function ResumesPage() {
         columns={baseColumns}
         defaultColumnsState={{
           current_apply_id: { show: false },
-          sub_contact_name: { show: false },
+          current_entity: { show: false },
+          allocation_source: { show: false },
         }}
         filterOptionsRequest={fetchCandidateFilterOptions}
         rowSelection={
           canSelectCandidates
             ? {
                 selectedRowKeys,
-                onChange: (keys) => setSelectedRowKeys(keys),
+                onChange: (keys, rows = []) => {
+                  setSelectedRowKeys(keys)
+                  setSelectedCandidates(rows)
+                },
                 preserveSelectedRowKeys: true,
               }
             : false
@@ -1149,6 +1347,13 @@ export default function ResumesPage() {
             onClick={openBulkDispatch}
           >
             下发
+          </Button>,
+          canTransfer && <Button
+            key="bulk-transfer"
+            disabled={!selectedRowKeys.length}
+            onClick={openBulkTransfer}
+          >
+            批量转派
           </Button>,
           canImport && <Button
             key="undo"
@@ -1230,6 +1435,46 @@ export default function ResumesPage() {
           )}
         </Space>
       </Modal>
+      <Modal
+        title={`批量转派（冻结 ${bulkTransferModal.candidateIds.length} 人）`}
+        open={bulkTransferModal.open}
+        okText="确认转派"
+        cancelText="取消"
+        confirmLoading={bulkTransferModal.loading}
+        okButtonProps={{ disabled: !bulkTransferModal.selected }}
+        onOk={handleBulkTransfer}
+        onCancel={() => {
+          if (!bulkTransferModal.loading) {
+            setBulkTransferModal({ open: false, candidateIds: [], departments: [], selected: undefined, note: '', loading: false })
+          }
+        }}
+      >
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Alert
+            type="info"
+            showIcon
+            message="仅转派打开弹窗时冻结的候选人；已结束或状态已变化的记录将被跳过。"
+          />
+          <Select
+            showSearch
+            optionFilterProp="label"
+            style={{ width: '100%' }}
+            placeholder="选择目标二级部门"
+            value={bulkTransferModal.selected}
+            options={bulkTransferModal.departments.map((department) => ({
+              value: department.id,
+              label: departmentLabel(department),
+            }))}
+            onChange={(value) => setBulkTransferModal((previous) => ({ ...previous, selected: value }))}
+          />
+          <Input.TextArea
+            rows={3}
+            placeholder="转派备注（可选）"
+            value={bulkTransferModal.note}
+            onChange={(event) => setBulkTransferModal((previous) => ({ ...previous, note: event.target.value }))}
+          />
+        </Space>
+      </Modal>
       <ResumeExportModal
         open={Boolean(exportTarget)}
         userKey={user?.id || user?.username}
@@ -1283,6 +1528,18 @@ export default function ResumesPage() {
                   <SchoolTagBadge value={detailRecord.highest_degree_platform} />
                 </Space>
               </Descriptions.Item>
+              <Descriptions.Item label="全部院校标签" span={2}>
+                <Space size={6} wrap>
+                  {detailRecord.school_tags?.length
+                    ? detailRecord.school_tags.map((tag) => (
+                        <SchoolTagBadge
+                          key={tag.id || tag.code || tag.name}
+                          value={tag.name || tag}
+                        />
+                      ))
+                    : '-'}
+                </Space>
+              </Descriptions.Item>
               <Descriptions.Item label="当前志愿">
                 {detailRecord.current_rank || '-'}
               </Descriptions.Item>
@@ -1291,6 +1548,12 @@ export default function ResumesPage() {
               </Descriptions.Item>
               <Descriptions.Item label="岗位部门">
                 {detailRecord.job_department_name || '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="当前接收一级部门">
+                {detailRecord.current_primary_department_name || '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="当前接收部门">
+                {detailRecord.current_department_name || '-'}
               </Descriptions.Item>
               <Descriptions.Item label="简历状态">
                 {detailRecord.system_status_label || '-'}
@@ -1398,14 +1661,14 @@ export default function ResumesPage() {
                   ellipsis: true,
                 },
                 {
-                  title: '二级接口人',
-                  dataIndex: 'contact_name',
-                  width: 110,
+                  title: '首次二级部门',
+                  dataIndex: 'initial_department_name',
+                  width: 130,
                 },
                 {
-                  title: '三级接口人',
-                  dataIndex: 'sub_contact_name',
-                  width: 110,
+                  title: '当前接收部门',
+                  dataIndex: 'current_department_name',
+                  width: 130,
                 },
                 {
                   title: '原因',
@@ -1433,12 +1696,62 @@ export default function ResumesPage() {
                     value === 'passed' ? '通过' : value === 'rejected' ? '未通过' : '-',
                 },
                 {
+                  title: '不通过原因',
+                  dataIndex: 'feedback_reason_label_snapshot',
+                  width: 140,
+                  render: (value) => value || '-',
+                },
+                {
                   title: '备注',
                   dataIndex: 'feedback_note',
                   ellipsis: true,
                 },
               ]}
             />
+
+            <section className="resume-handling-timeline">
+              <Typography.Title level={5} style={{ marginTop: 0 }}>
+                处理时间线
+              </Typography.Title>
+              {candidateHandlingEvents(detailRecord).length ? (
+                <Timeline
+                  items={candidateHandlingEvents(detailRecord).map((event, index) => {
+                    const fromName = eventDepartmentName(event, 'from')
+                    const toName = eventDepartmentName(event, 'to')
+                    const route = [fromName, toName].filter(Boolean).join(' → ')
+                    const duration = formatDuration(event.duration_since_previous_seconds)
+                    return {
+                      key: event.id || `${event.attemptNo}-${event.event_type}-${event.occurred_at}-${index}`,
+                      color: event.event_type === 'feedback_rejected'
+                        ? 'red'
+                        : event.event_type === 'feedback_passed'
+                          ? 'green'
+                          : 'blue',
+                      children: (
+                        <div>
+                          <Space size={8} wrap>
+                            <Typography.Text strong>
+                              {HANDLING_EVENT_TEXT[event.event_type] || event.event_type}
+                            </Typography.Text>
+                            {event.attemptNo ? <Tag>第 {event.attemptNo} 次尝试</Tag> : null}
+                            {event.is_system_auto ? <Tag color="purple">系统自动</Tag> : null}
+                            {duration ? <Tag color="blue">距上一步 {duration}</Tag> : null}
+                          </Space>
+                          <div className="resume-handling-timeline-meta">
+                            {formatEventTime(event.occurred_at)}
+                            {route ? ` · ${route}` : ''}
+                            {event.actor_username_snapshot ? ` · 操作人 ${event.actor_username_snapshot}` : ''}
+                          </div>
+                          {event.note ? <div>{event.note}</div> : null}
+                        </div>
+                      ),
+                    }
+                  })}
+                />
+              ) : (
+                <Typography.Text type="secondary">暂无处理日志</Typography.Text>
+              )}
+            </section>
 
             {canViewAgentDecisions && (
               <SmartDataTable
@@ -1546,39 +1859,23 @@ export default function ResumesPage() {
         open={manualModal.open}
         confirmLoading={manualModal.loading}
         onOk={handleManualAssign}
-        onCancel={() => setManualModal({ open: false, resume: null, attempt: null, contacts: [], contactId: undefined, secondaryId: undefined, reason: '', loading: false })}
+        onCancel={() => setManualModal({ open: false, resume: null, attempt: null, departments: [], departmentId: undefined, reason: '', loading: false })}
         okText="确认分配"
       >
         <Space direction="vertical" style={{ width: '100%' }}>
           <Select
+            aria-label="手动分配目标部门"
             showSearch
             optionFilterProp="label"
             style={{ width: '100%' }}
-            placeholder="选择二级或三级接口人"
-            value={manualModal.contactId}
-            options={manualModal.contacts.map((contact) => ({
-              value: contact.id,
-              label: `${contact.name}（${contact.contact_level === 'secondary' ? '二级' : '三级'} / ${contact.department_name || '未绑定部门'} / ${contact.employee_no}）`,
+            placeholder="选择二级或三级部门"
+            value={manualModal.departmentId}
+            options={manualModal.departments.map((department) => ({
+              value: department.id,
+              label: departmentLabel(department),
             }))}
-            onChange={(value) => setManualModal((prev) => ({ ...prev, contactId: value, secondaryId: undefined }))}
+            onChange={(value) => setManualModal((prev) => ({ ...prev, departmentId: value }))}
           />
-          {(() => {
-            const target = manualModal.contacts.find((item) => item.id === manualModal.contactId)
-            if (target?.contact_level !== 'tertiary') return null
-            const parents = manualModal.contacts.filter(
-              (item) => item.contact_level === 'secondary' && item.department === target.parent_department,
-            )
-            if (parents.length <= 1) return null
-            return (
-              <Select
-                style={{ width: '100%' }}
-                placeholder="该三级部门有多个上级二级接口人，请明确选择"
-                value={manualModal.secondaryId}
-                options={parents.map((item) => ({ value: item.id, label: `${item.name}（${item.employee_no}）` }))}
-                onChange={(value) => setManualModal((prev) => ({ ...prev, secondaryId: value }))}
-              />
-            )
-          })()}
           <Input.TextArea
             rows={3}
             placeholder="人工分配原因"
@@ -1588,30 +1885,40 @@ export default function ResumesPage() {
         </Space>
       </Modal>
       <Modal
-        title="转派三级接口人"
-        open={assignModal.open}
-        confirmLoading={assignModal.loading}
-        onOk={handleAssignSubContact}
-        onCancel={() => setAssignModal({ open: false, record: null, contacts: [], selected: undefined, loading: false })}
+        title="转派部门"
+        open={transferModal.open}
+        confirmLoading={transferModal.loading}
+        onOk={handleTransfer}
+        onCancel={() => setTransferModal({ open: false, record: null, departments: [], selected: undefined, note: '', loading: false })}
         okText="转派"
       >
-        <Select
-          style={{ width: '100%' }}
-          placeholder="选择本二级部门下的三级接口人"
-          value={assignModal.selected}
-          options={assignModal.contacts.map((contact) => ({
-            value: contact.id,
-            label: `${contact.name}（${contact.employee_no} / ${contact.department_name || '未绑定部门'}）`,
-          }))}
-          onChange={(value) => setAssignModal((previous) => ({ ...previous, selected: value }))}
-        />
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Select
+            showSearch
+            optionFilterProp="label"
+            style={{ width: '100%' }}
+            placeholder="选择目标二级或三级部门"
+            value={transferModal.selected}
+            options={transferModal.departments.map((department) => ({
+              value: department.id,
+              label: departmentLabel(department),
+            }))}
+            onChange={(value) => setTransferModal((previous) => ({ ...previous, selected: value }))}
+          />
+          <Input.TextArea
+            rows={3}
+            placeholder="转派备注（可选）"
+            value={transferModal.note}
+            onChange={(event) => setTransferModal((previous) => ({ ...previous, note: event.target.value }))}
+          />
+        </Space>
       </Modal>
       <Modal
         title="提交筛选反馈"
         open={feedbackModal.open}
         confirmLoading={feedbackModal.loading}
         onOk={handleFeedback}
-        onCancel={() => setFeedbackModal({ open: false, record: null, result: 'passed', note: '', loading: false })}
+        onCancel={() => setFeedbackModal({ open: false, record: null, result: 'passed', reasonCode: undefined, reasonOptions: FEEDBACK_REASON_OPTIONS, note: '', loading: false })}
         okText="提交反馈"
       >
         <Space direction="vertical" style={{ width: '100%' }}>
@@ -1622,11 +1929,24 @@ export default function ResumesPage() {
               { value: 'passed', label: '通过' },
               { value: 'rejected', label: '不通过' },
             ]}
-            onChange={(value) => setFeedbackModal((previous) => ({ ...previous, result: value }))}
+            onChange={(value) => setFeedbackModal((previous) => ({
+              ...previous,
+              result: value,
+              reasonCode: value === 'rejected' ? previous.reasonCode : undefined,
+            }))}
           />
+          {feedbackModal.result === 'rejected' && (
+            <Select
+              style={{ width: '100%' }}
+              placeholder="请选择不通过原因"
+              value={feedbackModal.reasonCode}
+              options={feedbackModal.reasonOptions}
+              onChange={(value) => setFeedbackModal((previous) => ({ ...previous, reasonCode: value }))}
+            />
+          )}
           <Input.TextArea
             rows={4}
-            placeholder="反馈备注（可选）"
+            placeholder={feedbackModal.reasonCode === 'other' ? '请填写其他原因（必填）' : '反馈备注（可选）'}
             value={feedbackModal.note}
             onChange={(event) => setFeedbackModal((previous) => ({ ...previous, note: event.target.value }))}
           />

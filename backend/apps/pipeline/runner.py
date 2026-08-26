@@ -413,7 +413,6 @@ def finalize_ai_run_if_complete(run_id):
                 "school_not_eligible",
                 "job_not_found",
                 "secondary_department_missing",
-                "secondary_contact_missing",
                 "job_mapping_ambiguous",
                 "internal_position_name_missing",
                 "job_hc_exhausted",
@@ -428,7 +427,7 @@ def finalize_ai_run_if_complete(run_id):
             result_type=ProcessingRunScopeItem.RESULT_COMPLETED,
         ).exclude(reason_code__in=[
             "education_not_eligible", "school_not_eligible", "job_not_found",
-            "secondary_department_missing", "secondary_contact_missing",
+            "secondary_department_missing",
             "rule_assigned", "terminal_workflow", "no_resume_available",
             "job_mapping_ambiguous", "internal_position_name_missing", "job_hc_exhausted",
         ]).count()

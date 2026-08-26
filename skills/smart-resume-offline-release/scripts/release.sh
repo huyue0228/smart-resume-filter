@@ -106,7 +106,8 @@ check_usage_metrics_contract() {
 
 check_prerequisites() {
   log "检查发布环境"
-  [[ "$REPO_ROOT" == */smart-resume-filter ]] || die "必须从 smart-resume-filter 项目 Skill 执行"
+  [[ -f "${REPO_ROOT}/AGENTS.md" && -f "${REPO_ROOT}/backend/manage.py" && -f "${REPO_ROOT}/frontend/package.json" ]] || \
+    die "必须从 smart-resume 项目 Skill 执行"
   [[ -f "${REPO_ROOT}/docker-compose.yml" ]] || die "缺少仓库 docker-compose.yml"
   [[ -d "${REPO_ROOT}/skills/smart-resume-offline-deploy" ]] || die "缺少部署 Skill"
   [[ -f "${ASSET_DIR}/docker-compose.yml" ]] || die "缺少离线 Compose 模板"

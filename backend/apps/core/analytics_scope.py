@@ -1,10 +1,10 @@
 """招聘分析与简历库下钻共用的候选人范围口径。"""
 
-import hashlib
 import json
 from datetime import date, datetime, time, timedelta
 
-from django.db.models import OuterRef, Q, Subquery
+from django.db.models import Case, F, IntegerField, OuterRef, Q, Subquery, When
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from apps.core import candidate_summary
@@ -76,7 +76,7 @@ def normalize_filters(params):
 
 
 def scoped_resumes(filters):
-    """返回招聘看板使用的投递 cohort，并附上最新非取消尝试引用。"""
+    """返回投递 cohort，并按候选人的当前有效志愿附加唯一分配尝试。"""
     current_timezone = timezone.get_current_timezone()
     start_at = timezone.make_aware(
         datetime.combine(filters["date_from"], time.min), current_timezone
@@ -88,37 +88,104 @@ def scoped_resumes(filters):
     resumes = m.Resume.objects.filter(imported_at__gte=start_at, imported_at__lt=end_at)
     if filters["entity"]:
         resumes = resumes.filter(entity=filters["entity"])
-    if filters["job_id"]:
-        resumes = resumes.filter(
-            Q(candidate__workflow__current_resume__job_id=filters["job_id"])
-            | Q(
-                candidate__workflow__current_resume__isnull=True,
-                job_id=filters["job_id"],
-            )
-        )
     if filters["school_tag_id"]:
         resumes = resumes.filter(
-            Q(candidate__highest_degree_tag_id=filters["school_tag_id"])
+            Q(candidate__school_tags__id=filters["school_tag_id"])
             | Q(
+                candidate__school_tags__isnull=True,
+                candidate__highest_degree_tag_id=filters["school_tag_id"],
+            )
+            | Q(
+                candidate__school_tags__isnull=True,
                 candidate__highest_degree_tag__isnull=True,
                 candidate__first_degree_tag_id=filters["school_tag_id"],
             )
-        )
+        ).distinct()
     if filters["education"]:
         resumes = resumes.filter(candidate__highest_education=filters["education"])
 
+    workflow_current_resume = m.CandidateWorkflow.objects.filter(
+        candidate_id=OuterRef("candidate_id"),
+        current_resume_id__isnull=False,
+    )
+    cohort_fallback_resume = m.Resume.objects.filter(
+        candidate_id=OuterRef("candidate_id"),
+        imported_at__gte=start_at,
+        imported_at__lt=end_at,
+    )
+    if filters["entity"]:
+        cohort_fallback_resume = cohort_fallback_resume.filter(entity=filters["entity"])
+    cohort_fallback_resume = cohort_fallback_resume.order_by(
+        "volunteer_rank", "apply_date", "id"
+    )
+    resumes = resumes.annotate(
+        workflow_current_resume_id=Subquery(
+            workflow_current_resume.values("current_resume_id")[:1],
+            output_field=IntegerField(),
+        ),
+        cohort_fallback_resume_id=Subquery(
+            cohort_fallback_resume.values("id")[:1],
+            output_field=IntegerField(),
+        ),
+    ).annotate(
+        latest_effective_resume_id=Coalesce(
+            "workflow_current_resume_id",
+            "cohort_fallback_resume_id",
+            output_field=IntegerField(),
+        )
+    )
+
+    effective_resume = m.Resume.objects.filter(pk=OuterRef("latest_effective_resume_id"))
+    resumes = resumes.annotate(
+        latest_effective_job_id=Subquery(effective_resume.values("job_id")[:1])
+    )
+    if filters["job_id"]:
+        resumes = resumes.filter(latest_effective_job_id=filters["job_id"])
+
     latest_attempt = (
-        m.AssignmentAttempt.objects.filter(resume_id=OuterRef("pk"))
+        m.AssignmentAttempt.objects.filter(
+            resume_id=OuterRef("latest_effective_resume_id")
+        )
         .exclude(status=m.AssignmentAttempt.STATUS_CANCELLED)
+        .annotate(
+            current_primary_department_id=Case(
+                When(
+                    current_department__level=1,
+                    then=F("current_department_id"),
+                ),
+                When(
+                    current_department__level=2,
+                    then=F("current_department__parent_id"),
+                ),
+                When(
+                    current_department__level=3,
+                    then=F("current_department__parent__parent_id"),
+                ),
+                default=None,
+                output_field=IntegerField(),
+            ),
+            current_secondary_department_id=Case(
+                When(
+                    current_department__level=2,
+                    then=F("current_department_id"),
+                ),
+                When(
+                    current_department__level=3,
+                    then=F("current_department__parent_id"),
+                ),
+                default=None,
+                output_field=IntegerField(),
+            )
+        )
         .order_by("-attempt_no", "-id")
     )
     resumes = resumes.annotate(
         latest_effective_attempt_id=Subquery(latest_attempt.values("id")[:1]),
-        latest_effective_department_id=Subquery(
-            latest_attempt.values("department_id")[:1]
+        latest_effective_secondary_department_id=Subquery(
+            latest_attempt.values("current_secondary_department_id")[:1]
         ),
         latest_effective_primary_department_id=Subquery(
-            latest_attempt.values("department__parent_id")[:1]
+            latest_attempt.values("current_primary_department_id")[:1]
         ),
         latest_effective_source=Subquery(latest_attempt.values("source")[:1]),
     )
@@ -128,7 +195,7 @@ def scoped_resumes(filters):
         )
     if filters["department_id"]:
         resumes = resumes.filter(
-            latest_effective_department_id=filters["department_id"]
+            latest_effective_secondary_department_id=filters["department_id"]
         )
     if filters["source"]:
         resumes = resumes.filter(latest_effective_source=filters["source"])
@@ -153,10 +220,8 @@ def effective_resume_ids(candidate_ids, base_resumes):
 
 
 def rejection_reason_key(value):
-    text = str(value or "")
-    if not text:
-        return "empty"
-    return f"sha256:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
+    """结构化拒绝原因本身就是稳定、可安全下钻的公开代码。"""
+    return str(value or "")
 
 
 DRILLDOWN_DIMENSIONS = {
@@ -257,7 +322,7 @@ def apply_candidate_drilldown(qs, params):
     pairs = list(zip(values, labels))
 
     resumes = scoped_resumes(_drilldown_filters(params))
-    resume_ids = resumes.values("id")
+    resume_ids = resumes.values("latest_effective_resume_id")
     candidate_ids = list(
         resumes.order_by().values_list("candidate_id", flat=True).distinct()
     )
@@ -267,7 +332,8 @@ def apply_candidate_drilldown(qs, params):
         matched_ids = (
             resumes.exclude(job_category="")
             .filter(
-                Q(candidate__first_degree_tag_id__isnull=False)
+                Q(candidate__school_tags__isnull=False)
+                | Q(candidate__first_degree_tag_id__isnull=False)
                 | Q(candidate__highest_degree_tag_id__isnull=False)
                 | ~Q(candidate__first_degree_platform="")
                 | ~Q(candidate__highest_degree_platform="")
@@ -284,20 +350,27 @@ def apply_candidate_drilldown(qs, params):
         return qs.filter(id__in=attempts.values("workflow__candidate_id"))
     if dimension == "dispatched":
         return qs.filter(
-            id__in=attempts.exclude(dispatched_at__isnull=True).values(
-                "workflow__candidate_id"
-            )
+            id__in=attempts.filter(
+                status__in=[
+                    m.AssignmentAttempt.STATUS_DISPATCHED,
+                    m.AssignmentAttempt.STATUS_PASSED,
+                    m.AssignmentAttempt.STATUS_REJECTED,
+                ]
+            ).values("workflow__candidate_id")
         )
     if dimension == "feedback":
         return qs.filter(
-            id__in=attempts.exclude(feedback_at__isnull=True).values(
-                "workflow__candidate_id"
-            )
+            id__in=attempts.filter(
+                status__in=[
+                    m.AssignmentAttempt.STATUS_PASSED,
+                    m.AssignmentAttempt.STATUS_REJECTED,
+                ]
+            ).values("workflow__candidate_id")
         )
     if dimension == "passed":
         return qs.filter(
             id__in=attempts.filter(
-                feedback_result=m.AssignmentAttempt.FEEDBACK_PASSED
+                status=m.AssignmentAttempt.STATUS_PASSED
             ).values("workflow__candidate_id")
         )
     if dimension == "source":
@@ -306,25 +379,48 @@ def apply_candidate_drilldown(qs, params):
         )
     if dimension in {"primary_department", "department"}:
         matched_ids = []
-        rows = attempts.select_related("department__parent").values(
+        rows = attempts.select_related(
+            "current_department__parent__parent"
+        ).values(
             "workflow__candidate_id",
-            "department_id",
-            "department_name_snapshot",
-            "department__name",
-            "department__parent_id",
-            "department__parent__name",
+            "current_department_id",
+            "current_department__name",
+            "current_department__level",
+            "current_department__parent_id",
+            "current_department__parent__name",
+            "current_department__parent__parent_id",
+            "current_department__parent__parent__name",
         )
         for row in rows:
             if dimension == "primary_department":
-                label = row["department__parent__name"] or "未归属一级部门"
-                key = row["department__parent_id"] or f"text:{label}"
+                level = row["current_department__level"]
+                if level == 1:
+                    key = row["current_department_id"]
+                    label = row["current_department__name"]
+                elif level == 2:
+                    key = row["current_department__parent_id"]
+                    label = row["current_department__parent__name"]
+                elif level == 3:
+                    key = row["current_department__parent__parent_id"]
+                    label = row["current_department__parent__parent__name"]
+                else:
+                    key = None
+                    label = None
+                label = label or "未归属一级部门"
+                key = key or f"text:{label}"
             else:
-                label = (
-                    row["department_name_snapshot"]
-                    or row["department__name"]
-                    or "未分配"
-                )
-                key = row["department_id"] or f"text:{label}"
+                level = row["current_department__level"]
+                if level == 2:
+                    key = row["current_department_id"]
+                    label = row["current_department__name"]
+                elif level == 3:
+                    key = row["current_department__parent_id"]
+                    label = row["current_department__parent__name"]
+                else:
+                    key = None
+                    label = None
+                label = label or "未分配"
+                key = key or f"text:{label}"
             if _row_matches(pairs, key, label):
                 matched_ids.append(row["workflow__candidate_id"])
         return qs.filter(id__in=matched_ids)
@@ -386,33 +482,35 @@ def apply_candidate_drilldown(qs, params):
 
     if dimension == "school_tag":
         matched_ids = []
-        rows = m.Candidate.objects.filter(id__in=candidate_ids).values(
-            "id",
-            "highest_degree_tag_id",
-            "highest_degree_tag__name",
-            "first_degree_tag_id",
-            "first_degree_tag__name",
+        candidates = (
+            m.Candidate.objects.filter(id__in=candidate_ids)
+            .select_related("highest_degree_tag", "first_degree_tag")
+            .prefetch_related("school_tags")
         )
-        for row in rows:
-            tag_id = row["highest_degree_tag_id"] or row["first_degree_tag_id"]
-            label = (
-                row["highest_degree_tag__name"]
-                or row["first_degree_tag__name"]
-                or "未填写"
-            )
-            if _row_matches(pairs, tag_id or f"text:{label}", label):
-                matched_ids.append(row["id"])
+        for candidate in candidates:
+            tags = list(candidate.school_tags.all())
+            if not tags:
+                tags = list(
+                    {
+                        tag.id: tag
+                        for tag in (
+                            candidate.highest_degree_tag,
+                            candidate.first_degree_tag,
+                        )
+                        if tag
+                    }.values()
+                )
+            if any(_row_matches(pairs, tag.id, tag.name) for tag in tags):
+                matched_ids.append(candidate.id)
         return qs.filter(id__in=matched_ids)
     if dimension == "education":
         return qs.filter(id__in=candidate_ids, highest_education__in=values)
     if dimension == "rejection_reason":
-        matched_ids = [
-            row["workflow__candidate_id"]
-            for row in attempts.filter(
-                status=m.AssignmentAttempt.STATUS_REJECTED
-            ).values("workflow__candidate_id", "feedback_note")
-            if rejection_reason_key(row["feedback_note"]) in values
-        ]
-        return qs.filter(id__in=matched_ids)
+        return qs.filter(
+            id__in=attempts.filter(
+                status=m.AssignmentAttempt.STATUS_REJECTED,
+                feedback_reason_code__in=values,
+            ).values("workflow__candidate_id")
+        )
 
     return qs.none()

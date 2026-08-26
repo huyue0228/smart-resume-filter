@@ -15,21 +15,22 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from apps.core import candidate_summary
 from apps.core import models as m
 from apps.core import system_status
+from apps.core.departments import resolve_department_hierarchy
 from apps.ingestion.sources import RESUME_SUBDIR
 
 
-EXPORT_FIELDS_VERSION = 2
+EXPORT_FIELDS_VERSION = 4
 DEFAULT_FIELD_KEYS = {
     "candidate_name",
     "candidate_phone",
     "current_apply_id",
     "current_position_name",
     "volunteer_rank",
-    "allocation_secondary_department",
-    "secondary_contact",
-    "tertiary_contact",
-    "allocation_source",
+    "initial_department",
+    "current_primary_department",
+    "current_department",
     "resume_status",
+    "feedback_reason",
 }
 
 
@@ -52,6 +53,7 @@ EXPORT_FIELD_GROUPS = [
             _field("first_degree_tag", "第一学历院校标签"),
             _field("highest_degree_school", "最高学历院校"),
             _field("highest_degree_tag", "最高学历院校标签"),
+            _field("school_tags", "全部院校标签"),
             _field("candidate_imported_at", "候选人导入时间"),
         ],
     },
@@ -97,17 +99,23 @@ EXPORT_FIELD_GROUPS = [
         "fields": [
             _field("allocation_source", "分配来源"),
             _field("attempt_status", "尝试状态"),
-            _field("allocation_secondary_department", "二级部门"),
-            _field("secondary_contact", "二级接口人"),
-            _field("tertiary_department", "三级部门"),
-            _field("tertiary_contact", "三级接口人"),
+            _field("initial_department", "首次部门"),
+            _field("current_primary_department", "当前接收一级部门"),
+            _field("current_department", "当前接收部门"),
             _field("allocation_reason", "匹配/人工理由"),
             _field("confidence_score", "置信度"),
             _field("feedback_result", "反馈结果"),
+            _field("feedback_reason_code", "不通过原因码"),
+            _field("feedback_reason", "不通过原因"),
             _field("feedback_note", "反馈备注"),
-            _field("dispatched_at", "下发时间"),
-            _field("assigned_to_sub_at", "转派时间"),
+            _field("first_dispatched_at", "首次下发时间"),
+            _field("current_department_entered_at", "当前部门进入时间"),
             _field("feedback_at", "反馈时间"),
+            _field("hr_dispatch_duration_hours", "HR 下发时长（小时）"),
+            _field(
+                "current_department_duration_hours", "当前部门处理时长（小时）"
+            ),
+            _field("total_feedback_duration_hours", "总反馈时长（小时）"),
         ],
     },
     {
@@ -145,7 +153,7 @@ def export_fields_payload():
 
 
 def parse_export_fields(params):
-    """未传时兼容旧调用；显式空值和未知字段均拒绝。"""
+    """未传字段时使用当前默认集；显式空值和未知字段均拒绝。"""
     if "fields" not in params:
         return [key for key in FIELD_ORDER if key in DEFAULT_FIELD_KEYS]
     raw = params.get("fields", "")
@@ -195,12 +203,100 @@ def _time_text(value):
     return value.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _related_or_snapshot(attempt, snapshot_field, related_field):
+def primary_department(department):
+    """返回部门树中的有效一级祖先。"""
+    return resolve_department_hierarchy(department).primary
+
+
+def receiving_secondary_department(department):
+    """返回实际接收节点归属的有效二级部门。"""
+    return resolve_department_hierarchy(department).secondary
+
+
+def _handling_events(attempt):
     if not attempt:
+        return []
+    events = list(attempt.handling_events.all())
+    return sorted(events, key=lambda item: (item.occurred_at, item.pk or 0))
+
+
+def _duration_hours(start, end):
+    if not start or not end or end < start:
         return ""
-    snapshot = getattr(attempt, snapshot_field, "")
-    related = getattr(attempt, related_field, None)
-    return snapshot or (related.name if related else "")
+    return round((end - start).total_seconds() / 3600, 2)
+
+
+def attempt_processing_values(attempt, *, as_of=None):
+    """按处理事件生成导出/结果报表共用的人工时效字段。"""
+    empty = {
+        "first_dispatched_at": "",
+        "current_department_entered_at": "",
+        "feedback_at": "",
+        "hr_dispatch_duration_hours": "",
+        "current_department_duration_hours": "",
+        "total_feedback_duration_hours": "",
+    }
+    if not attempt:
+        return empty
+
+    events = _handling_events(attempt)
+    dispatched_events = [
+        item
+        for item in events
+        if item.event_type
+        == m.AssignmentHandlingEvent.EVENT_DEPARTMENT_DISPATCHED
+    ]
+    feedback_events = [
+        item
+        for item in events
+        if item.event_type
+        in {
+            m.AssignmentHandlingEvent.EVENT_FEEDBACK_PASSED,
+            m.AssignmentHandlingEvent.EVENT_FEEDBACK_REJECTED,
+        }
+    ]
+    cancelled_events = [
+        item
+        for item in events
+        if item.event_type == m.AssignmentHandlingEvent.EVENT_CANCELLED
+    ]
+    first_dispatched = dispatched_events[0].occurred_at if dispatched_events else None
+    feedback_at = feedback_events[-1].occurred_at if feedback_events else None
+    cancelled_at = cancelled_events[-1].occurred_at if cancelled_events else None
+
+    department_entered_at = None
+    if attempt.current_department_id:
+        for event in events:
+            if (
+                event.event_type
+                in {
+                    m.AssignmentHandlingEvent.EVENT_DEPARTMENT_DISPATCHED,
+                    m.AssignmentHandlingEvent.EVENT_DEPARTMENT_TRANSFERRED,
+                }
+                and event.to_department_id == attempt.current_department_id
+            ):
+                department_entered_at = event.occurred_at
+
+    if feedback_at:
+        current_department_end = feedback_at
+    elif cancelled_at:
+        current_department_end = None
+    else:
+        current_department_end = as_of or timezone.now()
+    return {
+        "first_dispatched_at": _time_text(first_dispatched),
+        "current_department_entered_at": _time_text(department_entered_at),
+        "feedback_at": _time_text(feedback_at),
+        "hr_dispatch_duration_hours": _duration_hours(
+            attempt.created_at, first_dispatched
+        ),
+        "current_department_duration_hours": _duration_hours(
+            department_entered_at, current_department_end
+        ),
+        "total_feedback_duration_hours": _duration_hours(
+            first_dispatched, feedback_at
+        ),
+    }
 
 
 def _job_secondary_department(job):
@@ -231,10 +327,7 @@ def _attempt_status(candidate, attempt):
             return system_status.SCREENING_PASSED
         if attempt.status == m.AssignmentAttempt.STATUS_REJECTED:
             return system_status.SCREENING_REJECTED
-        if attempt.status in {
-            m.AssignmentAttempt.STATUS_DISPATCHED_L2,
-            m.AssignmentAttempt.STATUS_ASSIGNED_L3,
-        }:
+        if attempt.status == m.AssignmentAttempt.STATUS_DISPATCHED:
             return system_status.PENDING_SCREENING
         if attempt.status == m.AssignmentAttempt.STATUS_PENDING_REVIEW:
             return system_status.PENDING_REVIEW
@@ -243,7 +336,7 @@ def _attempt_status(candidate, attempt):
     return system_status.candidate_system_status(candidate)
 
 
-def _record_values(record):
+def _record_values(record, *, as_of=None):
     candidate = record.candidate
     resume = record.current_resume
     attempt = record.attempt
@@ -269,10 +362,19 @@ def _record_values(record):
         attempt.source if attempt else candidate_summary.allocation_source(candidate)
     )
     resume_status = _attempt_status(candidate, attempt)
-    allocation_department = _related_or_snapshot(
-        attempt, "department_name_snapshot", "department"
-    ) or _job_secondary_department(job)
-    return {
+    initial_department = attempt.initial_department if attempt else None
+    current_department = attempt.current_department if attempt else None
+    current_primary = primary_department(current_department)
+    feedback_reason_labels = dict(m.AssignmentAttempt.REJECTION_REASON_CHOICES)
+    feedback_reason = ""
+    if attempt:
+        feedback_reason = (
+            attempt.feedback_reason_label_snapshot
+            or feedback_reason_labels.get(
+                attempt.feedback_reason_code, attempt.feedback_reason_code
+            )
+        )
+    values = {
         "candidate_name": candidate.name,
         "candidate_phone": candidate.phone,
         "gender": candidate.gender,
@@ -290,6 +392,9 @@ def _record_values(record):
         "highest_degree_tag": (
             getattr(candidate.highest_degree_tag, "name", "")
             or candidate.highest_degree_platform
+        ),
+        "school_tags": "、".join(
+            tag.name for tag in candidate.school_tags.all()
         ),
         "candidate_imported_at": _time_text(candidate.imported_at),
         "current_apply_id": resume.apply_id if resume else "",
@@ -324,16 +429,9 @@ def _record_values(record):
         "attempt_status": attempt_status_labels.get(attempt.status, attempt.status)
         if attempt
         else "",
-        "allocation_secondary_department": allocation_department,
-        "secondary_contact": _related_or_snapshot(
-            attempt, "contact_name_snapshot", "contact"
-        ),
-        "tertiary_department": _related_or_snapshot(
-            attempt, "sub_department_name_snapshot", "sub_department"
-        ),
-        "tertiary_contact": _related_or_snapshot(
-            attempt, "sub_contact_name_snapshot", "sub_contact"
-        ),
+        "initial_department": initial_department.name if initial_department else "",
+        "current_primary_department": current_primary.name if current_primary else "",
+        "current_department": current_department.name if current_department else "",
         "allocation_reason": (
             attempt.manual_reason
             or (
@@ -348,11 +446,9 @@ def _record_values(record):
         "feedback_result": feedback_labels.get(
             attempt.feedback_result, attempt.feedback_result
         ) if attempt else "",
+        "feedback_reason_code": attempt.feedback_reason_code if attempt else "",
+        "feedback_reason": feedback_reason,
         "feedback_note": attempt.feedback_note if attempt else "",
-        "dispatched_at": _time_text(attempt.dispatched_at) if attempt else "",
-        "assigned_to_sub_at": _time_text(attempt.assigned_to_sub_at)
-        if attempt else "",
-        "feedback_at": _time_text(attempt.feedback_at) if attempt else "",
         "resume_status": system_status.system_status_label(resume_status),
         "reason_code": (
             {
@@ -373,6 +469,8 @@ def _record_values(record):
         ),
         "archive_detail": workflow.archive_detail if workflow else "",
     }
+    values.update(attempt_processing_values(attempt, as_of=as_of))
+    return values
 
 
 def build_resume_export_workbook(records, field_keys):
@@ -380,8 +478,9 @@ def build_resume_export_workbook(records, field_keys):
     sheet = workbook.active
     sheet.title = "简历库"
     sheet.append([FIELD_CATALOG[key]["label"] for key in field_keys])
+    as_of = timezone.now()
     for record in records:
-        values = _record_values(record)
+        values = _record_values(record, as_of=as_of)
         sheet.append([_safe_excel_text(values[key]) for key in field_keys])
 
     header_fill = PatternFill("solid", fgColor="D9EAF7")

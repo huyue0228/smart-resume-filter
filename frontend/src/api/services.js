@@ -191,6 +191,9 @@ export function previewAllocationResume(id) {
 export function manualAssignResume(id, body) {
   return client.post(`/resumes/${id}/manual-assign/`, body)
 }
+export function fetchManualAssignmentOptions() {
+  return client.get('/resumes/manual-assignment-options/')
+}
 export function exportResumeResultReport(params) {
   return client.get('/resumes/result-report/', { params, responseType: 'blob' })
 }
@@ -321,11 +324,17 @@ export function transferAllocationToManual(id, body) {
 export function bulkDispatchCandidates(body) {
   return client.post('/candidates/bulk-dispatch/', body)
 }
-export function assignSubContact(id, body) {
-  return client.post(`/workflow-attempts/${id}/assign-sub-contact/`, body)
+export function bulkTransferCandidates(body) {
+  return client.post('/candidates/bulk-transfer/', body)
 }
-export function fetchEligibleSubContacts(id) {
-  return client.get(`/workflow-attempts/${id}/eligible-sub-contacts/`)
+export function transferAllocation(id, body) {
+  return client.post(`/workflow-attempts/${id}/transfer/`, body)
+}
+export function fetchTransferOptions(id) {
+  return client.get(`/workflow-attempts/${id}/transfer-options/`)
+}
+export function fetchFeedbackReasons() {
+  return client.get('/workflow-attempts/feedback-reasons/')
 }
 export function submitAllocationFeedback(id, body) {
   return client.post(`/workflow-attempts/${id}/feedback/`, body)

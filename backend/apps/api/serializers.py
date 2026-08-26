@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from django.contrib.auth.models import Group
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from apps.accounts.contact_users import sync_contact_user
@@ -8,8 +9,9 @@ from apps.accounts.models import User
 from apps.accounts.protected_users import is_protected_admin
 from apps.accounts.permissions import (
     PERMISSION_TREE,
+    all_permission_codes,
+    ensure_permission_definitions,
     permission_code,
-    permission_codename,
     user_permission_codes,
     user_role_names,
 )
@@ -43,6 +45,64 @@ def _public_match_reason(attempt):
     return _public_ai_message(attempt.match_reason if attempt else "")
 
 
+VISIBLE_DEPARTMENT_ATTEMPT_STATUSES = {
+    m.AssignmentAttempt.STATUS_DISPATCHED,
+    m.AssignmentAttempt.STATUS_PASSED,
+    m.AssignmentAttempt.STATUS_REJECTED,
+}
+
+
+def department_attempt_scope_q(user, *, prefix=""):
+    """返回接口人部门收件箱的数据范围，不包含待复核、待下发或已取消记录。"""
+    contact = getattr(user, "contact", None)
+    department = getattr(contact, "department", None) if contact else None
+    if not contact or not contact.is_active or not department:
+        return Q(pk__in=[])
+
+    status_field = f"{prefix}status__in"
+    department_field = f"{prefix}current_department_id"
+    parent_field = f"{prefix}current_department__parent_id"
+    visible_status = Q(**{status_field: VISIBLE_DEPARTMENT_ATTEMPT_STATUSES})
+    if (
+        contact.contact_level == m.Contact.LEVEL_SECONDARY
+        and department.level == 2
+    ):
+        return visible_status & (
+            Q(**{department_field: department.id})
+            | (
+                Q(**{f"{prefix}current_department__level": 3})
+                & Q(**{parent_field: department.id})
+            )
+        )
+    if (
+        contact.contact_level == m.Contact.LEVEL_TERTIARY
+        and department.level == 3
+    ):
+        return visible_status & Q(**{department_field: department.id})
+    return Q(pk__in=[])
+
+
+def department_attempt_is_visible(attempt, user):
+    contact = getattr(user, "contact", None)
+    department = getattr(contact, "department", None) if contact else None
+    current = getattr(attempt, "current_department", None)
+    if (
+        not contact
+        or not contact.is_active
+        or not department
+        or not current
+        or attempt.status not in VISIBLE_DEPARTMENT_ATTEMPT_STATUSES
+    ):
+        return False
+    if contact.contact_level == m.Contact.LEVEL_SECONDARY and department.level == 2:
+        return current.id == department.id or (
+            current.level == 3 and current.parent_id == department.id
+        )
+    if contact.contact_level == m.Contact.LEVEL_TERTIARY and department.level == 3:
+        return current.id == department.id
+    return False
+
+
 def visible_candidate_attempt(candidate, user, *, permissions=None):
     """返回当前用户在统一简历库中可操作的最新尝试。"""
     workflow = candidate_summary.workflow_or_none(candidate)
@@ -55,28 +115,13 @@ def visible_candidate_attempt(candidate, user, *, permissions=None):
         return candidate_summary.latest_effective_attempt(
             workflow, resume_id=resume.id if resume else None
         )
-    contact_id = getattr(user, "contact_id", None)
-    if not contact_id:
+    if "attempt.view_department" not in permissions:
         return None
-    attempts = list(workflow.attempts.all())
-    visible = []
-    if "attempt.view_received" in permissions:
-        visible.extend(
-            attempt
-            for attempt in attempts
-            if attempt.contact_id == contact_id
-            and attempt.status
-            in {
-                m.AssignmentAttempt.STATUS_DISPATCHED_L2,
-                m.AssignmentAttempt.STATUS_ASSIGNED_L3,
-                m.AssignmentAttempt.STATUS_PASSED,
-                m.AssignmentAttempt.STATUS_REJECTED,
-            }
-        )
-    if "attempt.view_assigned" in permissions:
-        visible.extend(
-            attempt for attempt in attempts if attempt.sub_contact_id == contact_id
-        )
+    visible = [
+        attempt
+        for attempt in workflow.attempts.all()
+        if department_attempt_is_visible(attempt, user)
+    ]
     if not visible:
         return None
     return sorted(set(visible), key=lambda item: (item.attempt_no, item.id))[-1]
@@ -120,10 +165,30 @@ class CurrentUserSerializer(serializers.ModelSerializer):
         permissions = user_permission_codes(obj)
         if "attempt.view_all" in permissions:
             return {"type": "all"}
-        if obj.contact and "attempt.view_received" in permissions:
-            return {"type": "received", "contact_id": obj.contact_id}
-        if obj.contact and "attempt.view_assigned" in permissions:
-            return {"type": "assigned", "contact_id": obj.contact_id}
+        contact = obj.contact
+        department = contact.department if contact else None
+        if (
+            contact
+            and contact.is_active
+            and department
+            and "attempt.view_department" in permissions
+        ):
+            include_descendants = (
+                contact.contact_level == m.Contact.LEVEL_SECONDARY
+                and department.level == 2
+            )
+            department_ids = [department.id]
+            if include_descendants:
+                department_ids.extend(
+                    department.children.filter(level=3).values_list("id", flat=True)
+                )
+            return {
+                "type": "department",
+                "department_id": department.id,
+                "department_level": department.level,
+                "department_ids": department_ids,
+                "include_descendants": include_descendants,
+            }
         return {"type": "none"}
 
 
@@ -217,18 +282,25 @@ class RoleSerializer(serializers.ModelSerializer):
         fields = ["id", "name", "permissions", "permission_codes"]
 
     def get_permissions(self, obj):
+        known_codes = set(all_permission_codes())
         return sorted(
-            permission_code(permission.codename)
+            code
             for permission in obj.permissions.all()
-            if "__" in permission.codename
+            if (code := permission_code(permission.codename)) in known_codes
         )
 
-    def _set_permissions(self, group, codes):
-        from django.contrib.auth.models import Permission
+    def validate_permission_codes(self, codes):
+        normalized_codes = list(dict.fromkeys(codes))
+        unknown_codes = sorted(set(normalized_codes) - set(all_permission_codes()))
+        if unknown_codes:
+            raise serializers.ValidationError(
+                f"包含未知权限码：{', '.join(unknown_codes)}"
+            )
+        return normalized_codes
 
-        codenames = [permission_codename(code) for code in codes]
-        permissions = Permission.objects.filter(codename__in=codenames)
-        group.permissions.set(permissions)
+    def _set_permissions(self, group, codes):
+        permissions = ensure_permission_definitions()
+        group.permissions.set([permissions[code] for code in codes])
 
     def create(self, validated_data):
         codes = validated_data.pop("permission_codes", None)
@@ -263,6 +335,7 @@ class ResumeListSerializer(serializers.ModelSerializer):
     candidate_name = serializers.CharField(source="candidate.name", read_only=True)
     phone = serializers.CharField(source="candidate.phone", read_only=True)
     school_tag = serializers.SerializerMethodField()
+    school_tags = serializers.SerializerMethodField()
 
     class Meta:
         model = m.Resume
@@ -275,6 +348,7 @@ class ResumeListSerializer(serializers.ModelSerializer):
             "volunteer_rank",
             "job_category",
             "school_tag",
+            "school_tags",
             "status",
         ]
 
@@ -287,6 +361,9 @@ class ResumeListSerializer(serializers.ModelSerializer):
             or c.first_degree_platform
             or ""
         )
+
+    def get_school_tags(self, obj):
+        return [tag.name for tag in obj.candidate.school_tags.all()]
 
 
 class ResumeBriefSerializer(serializers.ModelSerializer):
@@ -312,6 +389,7 @@ class ResumeBriefSerializer(serializers.ModelSerializer):
 class CandidateSerializer(serializers.ModelSerializer):
     phone = serializers.SerializerMethodField()
     school_tag = serializers.SerializerMethodField()
+    school_tags = serializers.SerializerMethodField()
     system_status = serializers.SerializerMethodField()
     system_status_label = serializers.SerializerMethodField()
     workflow_id = serializers.SerializerMethodField()
@@ -322,6 +400,10 @@ class CandidateSerializer(serializers.ModelSerializer):
     current_apply_id = serializers.SerializerMethodField()
     current_apply_date = serializers.SerializerMethodField()
     job_department_name = serializers.SerializerMethodField()
+    current_department_id = serializers.SerializerMethodField()
+    current_department_name = serializers.SerializerMethodField()
+    current_primary_department_id = serializers.SerializerMethodField()
+    current_primary_department_name = serializers.SerializerMethodField()
     reason_type = serializers.SerializerMethodField()
     reason_text = serializers.SerializerMethodField()
     archive_reason = serializers.SerializerMethodField()
@@ -355,6 +437,7 @@ class CandidateSerializer(serializers.ModelSerializer):
             "first_degree_platform",
             "highest_degree_platform",
             "school_tag",
+            "school_tags",
             "system_status",
             "system_status_label",
             "workflow_id",
@@ -365,6 +448,10 @@ class CandidateSerializer(serializers.ModelSerializer):
             "current_apply_id",
             "current_apply_date",
             "job_department_name",
+            "current_department_id",
+            "current_department_name",
+            "current_primary_department_id",
+            "current_primary_department_name",
             "reason_type",
             "reason_text",
             "archive_reason",
@@ -405,12 +492,21 @@ class CandidateSerializer(serializers.ModelSerializer):
     def _visible_attempt(self, obj):
         request = self.context.get("request")
         user = request.user if request else None
+
+        def resolve():
+            if not request:
+                resume = candidate_summary.current_resume(obj)
+                return candidate_summary.latest_effective_attempt(
+                    self._workflow(obj), resume_id=resume.id if resume else None
+                )
+            return visible_candidate_attempt(
+                obj, user, permissions=self._permissions()
+            )
+
         return self._cached_candidate_value(
             "_visible_attempt_cache",
             obj,
-            lambda: visible_candidate_attempt(
-                obj, user, permissions=self._permissions()
-            ),
+            resolve,
         )
 
     def _is_full_view(self):
@@ -432,13 +528,18 @@ class CandidateSerializer(serializers.ModelSerializer):
         return obj.phone
 
     def get_school_tag(self, obj):
-        return (
-            getattr(obj.highest_degree_tag, "name", "")
-            or getattr(obj.first_degree_tag, "name", "")
-            or obj.highest_degree_platform
-            or obj.first_degree_platform
-            or ""
-        )
+        names = [item["name"] for item in self.get_school_tags(obj)]
+        return "、".join(names)
+
+    def get_school_tags(self, obj):
+        tags = list(obj.school_tags.all())
+        if not tags:
+            fallback = [obj.first_degree_tag, obj.highest_degree_tag]
+            tags = list({tag.id: tag for tag in fallback if tag}.values())
+        return [
+            {"id": tag.id, "code": tag.code, "name": tag.name}
+            for tag in sorted(tags, key=lambda tag: (tag.code, tag.id))
+        ]
 
     def get_system_status(self, obj):
         if not self._is_full_view():
@@ -460,6 +561,11 @@ class CandidateSerializer(serializers.ModelSerializer):
         return workflow.id if workflow else None
 
     def get_workflow_status(self, obj):
+        if not self._is_full_view():
+            attempt = self._visible_attempt(obj)
+            if attempt and attempt.status == m.AssignmentAttempt.STATUS_PASSED:
+                return m.CandidateWorkflow.STATUS_PASSED
+            return m.CandidateWorkflow.STATUS_IN_PROGRESS
         workflow = self._workflow(obj)
         return workflow.status if workflow else m.CandidateWorkflow.STATUS_PENDING
 
@@ -494,10 +600,31 @@ class CandidateSerializer(serializers.ModelSerializer):
         if not self._is_full_view():
             attempt = self._visible_attempt(obj)
             if attempt:
-                return attempt.department_name_snapshot or (
-                    attempt.department.name if attempt.department else ""
-                )
+                job_department = getattr(getattr(attempt.resume, "job", None), "department", None)
+                secondary = resolve_department_hierarchy(job_department).secondary
+                return secondary.name if secondary else ""
         return candidate_summary.job_department_name(obj)
+
+    def _current_department_hierarchy(self, obj):
+        attempt = self._visible_attempt(obj)
+        department = attempt.current_department if attempt else None
+        return resolve_department_hierarchy(department)
+
+    def get_current_department_id(self, obj):
+        attempt = self._visible_attempt(obj)
+        return attempt.current_department_id if attempt else None
+
+    def get_current_department_name(self, obj):
+        attempt = self._visible_attempt(obj)
+        return attempt.current_department.name if attempt and attempt.current_department else ""
+
+    def get_current_primary_department_id(self, obj):
+        primary = self._current_department_hierarchy(obj).primary
+        return primary.id if primary else None
+
+    def get_current_primary_department_name(self, obj):
+        primary = self._current_department_hierarchy(obj).primary
+        return primary.name if primary else ""
 
     def get_reason_type(self, obj):
         if not self._is_full_view():
@@ -518,11 +645,15 @@ class CandidateSerializer(serializers.ModelSerializer):
             attempt = self._visible_attempt(obj)
             if attempt:
                 return (
-                    attempt.manual_reason
-                    or _public_match_reason(attempt)
+                    attempt.feedback_reason_label_snapshot
                     or attempt.feedback_note
+                    or attempt.manual_reason
+                    or _public_match_reason(attempt)
                 )
             return ""
+        attempt = self._visible_attempt(obj)
+        if attempt and attempt.feedback_reason_label_snapshot:
+            return attempt.feedback_reason_label_snapshot
         status_code = self.get_system_status(obj)
         item = self._processing_item(obj)
         if (
@@ -534,10 +665,14 @@ class CandidateSerializer(serializers.ModelSerializer):
         return _public_ai_message(candidate_summary.reason(obj)[1])
 
     def get_archive_reason(self, obj):
+        if not self._is_full_view():
+            return ""
         workflow = self._workflow(obj)
         return workflow.archive_reason if workflow else ""
 
     def get_archive_detail(self, obj):
+        if not self._is_full_view():
+            return ""
         workflow = self._workflow(obj)
         return workflow.archive_detail if workflow else ""
 
@@ -558,10 +693,17 @@ class CandidateSerializer(serializers.ModelSerializer):
         return self._cached_candidate_value("_processing_item_cache", obj, resolve)
 
     def get_processing_result(self, obj):
+        if not self._is_full_view():
+            return ""
         item = self._processing_item(obj)
         return item.result_type if item else ""
 
     def get_reason_code(self, obj):
+        attempt = self._visible_attempt(obj)
+        if attempt and attempt.feedback_reason_code:
+            return attempt.feedback_reason_code
+        if not self._is_full_view():
+            return ""
         item = self._processing_item(obj)
         return _public_reason_code(item.reason_code) if item else ""
 
@@ -602,7 +744,8 @@ class CandidateSerializer(serializers.ModelSerializer):
         return self._attempt_data(attempt, include_ai=include_ai)
 
     def _attempt_data(self, attempt, *, include_ai):
-        data = AssignmentAttemptSerializer(attempt, context=self.context).data
+        context = {**self.context, "permission_codes": self._permissions()}
+        data = AssignmentAttemptSerializer(attempt, context=context).data
         if not include_ai:
             data.pop("agent_decision", None)
             data.pop("agent_decision_summary", None)
@@ -615,8 +758,6 @@ class JobSerializer(serializers.ModelSerializer):
     primary_department_name = serializers.SerializerMethodField()
     secondary_department_id = serializers.SerializerMethodField()
     secondary_department_name = serializers.SerializerMethodField()
-    tertiary_department_id = serializers.SerializerMethodField()
-    tertiary_department_name = serializers.SerializerMethodField()
     responsibilities = serializers.CharField(
         required=True,
         allow_blank=False,
@@ -640,8 +781,6 @@ class JobSerializer(serializers.ModelSerializer):
             "primary_department_name",
             "secondary_department_id",
             "secondary_department_name",
-            "tertiary_department_id",
-            "tertiary_department_name",
             "category",
             "public_name",
             "is_public",
@@ -688,24 +827,17 @@ class JobSerializer(serializers.ModelSerializer):
     def get_secondary_department_name(self, obj):
         return self.get_department_name(obj)
 
-    def get_tertiary_department_id(self, obj):
-        department = self._department_hierarchy(obj).tertiary
-        return department.id if department else None
-
-    def get_tertiary_department_name(self, obj):
-        department = self._department_hierarchy(obj).tertiary
-        return department.name if department else ""
-
     def validate_department(self, department):
-        if department and department.level not in (2, 3):
-            raise serializers.ValidationError("岗位只能绑定二级或三级部门")
-        if department and department.level == 3:
-            hierarchy = resolve_department_hierarchy(department)
-            if not hierarchy.secondary:
-                raise serializers.ValidationError("三级部门缺少有效二级父部门")
+        if not department or department.level != 2:
+            raise serializers.ValidationError("岗位必须绑定二级部门")
         return department
 
     def validate(self, attrs):
+        department = attrs.get("department", getattr(self.instance, "department", None))
+        if not department or department.level != 2:
+            raise serializers.ValidationError(
+                {"department": "岗位必须绑定二级部门"}
+            )
         responsibilities = attrs.get(
             "responsibilities",
             getattr(self.instance, "responsibilities", ""),
@@ -765,7 +897,14 @@ class SchoolSerializer(serializers.ModelSerializer):
             "school_tag",
             "school_tag_name",
         ]
-        read_only_fields = ["platform"]
+        read_only_fields = ["platform", "province"]
+
+    def to_internal_value(self, data):
+        if "province" in data:
+            raise serializers.ValidationError(
+                {"province": "所在省份由 AI 自动补全，不接受用户填写"}
+            )
+        return super().to_internal_value(data)
 
     def create(self, validated_data):
         if "school_tag" in validated_data:
@@ -781,9 +920,93 @@ class SchoolSerializer(serializers.ModelSerializer):
 
 
 class DepartmentSerializer(serializers.ModelSerializer):
+    parent_id = serializers.IntegerField(source="parent.id", read_only=True, default=None)
+    parent_name = serializers.CharField(source="parent.name", read_only=True, default="")
+    primary_department_id = serializers.SerializerMethodField()
+    primary_department_name = serializers.SerializerMethodField()
+
     class Meta:
         model = m.Department
-        fields = ["id", "name", "level", "parent", "entity"]
+        fields = [
+            "id",
+            "name",
+            "level",
+            "parent",
+            "parent_id",
+            "parent_name",
+            "primary_department_id",
+            "primary_department_name",
+            "entity",
+        ]
+
+    def get_primary_department_id(self, obj):
+        primary = resolve_department_hierarchy(obj).primary
+        return primary.id if primary else None
+
+    def get_primary_department_name(self, obj):
+        primary = resolve_department_hierarchy(obj).primary
+        return primary.name if primary else ""
+
+    def validate(self, attrs):
+        level = attrs.get(
+            "level", getattr(self.instance, "level", 2)
+        )
+        parent = attrs.get(
+            "parent", getattr(self.instance, "parent", None)
+        )
+        if level not in {1, 2, 3}:
+            raise serializers.ValidationError({"level": "部门层级只能是 1、2 或 3"})
+        if self.instance and parent and parent.pk == self.instance.pk:
+            raise serializers.ValidationError({"parent": "部门不能以自身作为父部门"})
+
+        expected_parent_level = {1: None, 2: 1, 3: 2}[level]
+        if expected_parent_level is None and parent is not None:
+            raise serializers.ValidationError({"parent": "一级部门不能设置父部门"})
+        if expected_parent_level is not None and (
+            parent is None or parent.level != expected_parent_level
+        ):
+            raise serializers.ValidationError(
+                {"parent": f"{level}级部门必须归属于{expected_parent_level}级部门"}
+            )
+
+        seen = set()
+        ancestor = parent
+        while ancestor:
+            if ancestor.pk in seen or (
+                self.instance and ancestor.pk == self.instance.pk
+            ):
+                raise serializers.ValidationError({"parent": "部门层级不能形成循环"})
+            seen.add(ancestor.pk)
+            ancestor = ancestor.parent
+
+        if self.instance:
+            structure_changed = (
+                ("level" in attrs and level != self.instance.level)
+                or (
+                    "parent" in attrs
+                    and getattr(parent, "pk", None) != self.instance.parent_id
+                )
+            )
+            if structure_changed:
+                related_managers = (
+                    "children",
+                    "contacts",
+                    "jobs",
+                    "initial_assignment_attempts",
+                    "current_assignment_attempts",
+                    "assignment_events_from",
+                    "assignment_events_to",
+                    "agent_decisions",
+                    "prepared_processing_items",
+                )
+                if any(
+                    getattr(self.instance, relation).exists()
+                    for relation in related_managers
+                ):
+                    raise serializers.ValidationError(
+                        {"detail": "部门存在下级部门或业务引用，不可修改层级或父部门"}
+                    )
+        return attrs
 
 
 class ContactSerializer(serializers.ModelSerializer):
@@ -1203,6 +1426,68 @@ class CandidateWorkflowSerializer(serializers.ModelSerializer):
         ]
 
 
+class AssignmentHandlingEventSerializer(serializers.ModelSerializer):
+    event_type_label = serializers.CharField(source="get_event_type_display", read_only=True)
+    from_department_name = serializers.SerializerMethodField()
+    to_department_name = serializers.SerializerMethodField()
+    metadata = serializers.SerializerMethodField()
+
+    class Meta:
+        model = m.AssignmentHandlingEvent
+        fields = [
+            "id",
+            "event_type",
+            "event_type_label",
+            "from_department",
+            "from_department_name",
+            "to_department",
+            "to_department_name",
+            "actor",
+            "actor_username_snapshot",
+            "note",
+            "batch_operation_id",
+            "is_system_auto",
+            "metadata",
+            "occurred_at",
+        ]
+        read_only_fields = fields
+
+    def get_from_department_name(self, obj):
+        return obj.from_department_name_snapshot or (
+            obj.from_department.name if obj.from_department else ""
+        )
+
+    def get_to_department_name(self, obj):
+        return obj.to_department_name_snapshot or (
+            obj.to_department.name if obj.to_department else ""
+        )
+
+    def get_metadata(self, obj):
+        permissions = self.context.get("permission_codes")
+        if permissions is None:
+            request = self.context.get("request")
+            permissions = user_permission_codes(request.user) if request else set()
+        if "attempt.view_all" in permissions:
+            return obj.metadata
+        metadata = obj.metadata if isinstance(obj.metadata, dict) else {}
+        allowed = {
+            "enabled",
+            "delivery_status",
+            "recipient_count",
+            "skipped_reason",
+            "error",
+        }
+        if isinstance(metadata.get("welink"), dict):
+            return {
+                "welink": {
+                    key: value
+                    for key, value in metadata["welink"].items()
+                    if key in allowed
+                }
+            }
+        return {key: value for key, value in metadata.items() if key in allowed}
+
+
 class AssignmentAttemptSerializer(serializers.ModelSerializer):
     candidate_name = serializers.CharField(
         source="resume.candidate.name", read_only=True
@@ -1212,26 +1497,68 @@ class AssignmentAttemptSerializer(serializers.ModelSerializer):
     volunteer_rank = serializers.IntegerField(
         source="resume.volunteer_rank", read_only=True
     )
-    department_name = serializers.CharField(
-        source="department.name", read_only=True, default=""
-    )
-    contact_name = serializers.CharField(source="contact.name", read_only=True, default="")
-    sub_department_name = serializers.CharField(
-        source="sub_department.name", read_only=True, default=""
-    )
-    sub_contact_name = serializers.CharField(
-        source="sub_contact.name", read_only=True, default=""
-    )
+    initial_department_name = serializers.SerializerMethodField()
+    current_department_name = serializers.SerializerMethodField()
+    primary_department_id = serializers.SerializerMethodField()
+    primary_department_name = serializers.SerializerMethodField()
+    handling_events = serializers.SerializerMethodField()
     matched_rule_name = serializers.CharField(
         source="matched_rule.name", read_only=True, default=""
     )
     match_reason = serializers.SerializerMethodField()
     agent_decision_summary = serializers.SerializerMethodField()
+    agent_decision = serializers.SerializerMethodField()
+
+    def _permission_codes(self):
+        permissions = self.context.get("permission_codes")
+        if permissions is not None:
+            return permissions
+        if not hasattr(self, "_resolved_permission_codes"):
+            request = self.context.get("request")
+            self._resolved_permission_codes = (
+                user_permission_codes(request.user) if request else set()
+            )
+        return self._resolved_permission_codes
+
+    def _can_view_all_attempts(self):
+        return "attempt.view_all" in self._permission_codes()
 
     def get_match_reason(self, obj):
         return _public_match_reason(obj)
 
+    def get_initial_department_name(self, obj):
+        return obj.initial_department_name_snapshot or obj.initial_department.name
+
+    def get_current_department_name(self, obj):
+        return obj.current_department_name_snapshot or obj.current_department.name
+
+    def get_primary_department_id(self, obj):
+        primary = resolve_department_hierarchy(obj.current_department).primary
+        return primary.id if primary else None
+
+    def get_primary_department_name(self, obj):
+        primary = resolve_department_hierarchy(obj.current_department).primary
+        return primary.name if primary else ""
+
+    def get_handling_events(self, obj):
+        events = list(obj.handling_events.all())
+        context = {**self.context, "permission_codes": self._permission_codes()}
+        payload = AssignmentHandlingEventSerializer(
+            events, many=True, context=context
+        ).data
+        previous_at = None
+        for item, event in zip(payload, events):
+            item["duration_since_previous_seconds"] = (
+                max(0, int((event.occurred_at - previous_at).total_seconds()))
+                if previous_at
+                else None
+            )
+            previous_at = event.occurred_at
+        return payload
+
     def get_agent_decision_summary(self, obj):
+        if not self._can_view_all_attempts():
+            return None
         decision = obj.agent_decision
         if not decision:
             return None
@@ -1251,6 +1578,9 @@ class AssignmentAttemptSerializer(serializers.ModelSerializer):
             "error_message": _public_ai_message(decision.error_message),
         }
 
+    def get_agent_decision(self, obj):
+        return obj.agent_decision_id if self._can_view_all_attempts() else None
+
     class Meta:
         model = m.AssignmentAttempt
         fields = [
@@ -1264,14 +1594,12 @@ class AssignmentAttemptSerializer(serializers.ModelSerializer):
             "attempt_no",
             "source",
             "status",
-            "department",
-            "department_name",
-            "contact",
-            "contact_name",
-            "sub_department",
-            "sub_department_name",
-            "sub_contact",
-            "sub_contact_name",
+            "initial_department",
+            "initial_department_name",
+            "current_department",
+            "current_department_name",
+            "primary_department_id",
+            "primary_department_name",
             "matched_rule",
             "matched_rule_name",
             "agent_decision",
@@ -1280,46 +1608,42 @@ class AssignmentAttemptSerializer(serializers.ModelSerializer):
             "review_required",
             "match_mode",
             "match_reason",
-            "welink_message_id",
             "dispatched_at",
-            "assigned_to_sub_at",
             "feedback_result",
+            "feedback_reason_code",
+            "feedback_reason_label_snapshot",
             "feedback_note",
             "feedback_at",
             "cancelled_at",
             "cancel_reason",
             "manual_reason",
-            "department_name_snapshot",
-            "contact_name_snapshot",
-            "contact_employee_no_snapshot",
-            "sub_department_name_snapshot",
-            "sub_contact_name_snapshot",
-            "sub_contact_employee_no_snapshot",
+            "initial_department_name_snapshot",
+            "current_department_name_snapshot",
             "resume_apply_id_snapshot",
             "position_name_snapshot",
             "created_by_username_snapshot",
             "created_by",
             "capacity_reservation",
             "capacity_released_at",
+            "handling_events",
             "created_at",
             "updated_at",
         ]
         read_only_fields = [
             "attempt_no",
             "status",
-            "department",
-            "sub_department",
-            "sub_contact",
+            "initial_department",
+            "current_department",
             "matched_rule",
             "agent_decision",
             "confidence_score",
             "review_required",
             "match_mode",
             "match_reason",
-            "welink_message_id",
             "dispatched_at",
-            "assigned_to_sub_at",
             "feedback_result",
+            "feedback_reason_code",
+            "feedback_reason_label_snapshot",
             "feedback_note",
             "feedback_at",
             "cancelled_at",
@@ -1396,9 +1720,6 @@ class AgentDispatchDecisionSerializer(serializers.ModelSerializer):
     recommended_department_name = serializers.CharField(
         source="recommended_department.name", read_only=True, default=""
     )
-    recommended_contact_name = serializers.CharField(
-        source="recommended_contact.name", read_only=True, default=""
-    )
     evaluated_job_name = serializers.SerializerMethodField()
     recommended_job_name = serializers.SerializerMethodField()
 
@@ -1438,10 +1759,6 @@ class AgentDispatchDecisionSerializer(serializers.ModelSerializer):
             "matched_job_category",
             "recommended_department",
             "recommended_department_name",
-            "recommended_contact",
-            "recommended_contact_name",
-            "recommended_contact_name_snapshot",
-            "recommended_contact_employee_no_snapshot",
             "confidence_score",
             "score_breakdown",
             "summary",

@@ -5,17 +5,18 @@ from unittest.mock import patch
 import zipfile
 
 import pandas as pd
-from django.contrib.auth.models import Group
+from django.contrib.auth.models import Group, Permission
 from django.test import TestCase
 
 from apps.accounts.models import User
-from apps.accounts.permissions import ensure_rbac_defaults
+from apps.accounts.permissions import ensure_rbac_defaults, permission_codename
 from apps.core import models as m
 from apps.ingestion.sources import (
     _read_excel,
     import_files,
     normalize_highest_education,
 )
+from apps.ingestion.snapshot import restore_latest, take_snapshot
 from apps.ingestion.tabular_imports import (
     get_import_table_schema,
     validate_table_headers,
@@ -58,24 +59,82 @@ def _excel_file_without_name(rows):
 
 
 class ResumeImportDesignContractTests(TestCase):
+    def test_snapshot_restores_department_attempt_and_handling_event(self):
+        department = m.Department.objects.create(name="平台组", level=2)
+        candidate = m.Candidate.objects.create(
+            identity_hash="snapshot-candidate",
+            name="张三",
+            phone="13800000000",
+        )
+        resume = m.Resume.objects.create(
+            candidate=candidate,
+            apply_id="SNAPSHOT1001",
+            position_name="后端工程师",
+        )
+        workflow = m.CandidateWorkflow.objects.create(
+            candidate=candidate,
+            current_resume=resume,
+            current_rank=1,
+        )
+        attempt = m.AssignmentAttempt.objects.create(
+            workflow=workflow,
+            resume=resume,
+            attempt_no=1,
+            initial_department=department,
+            current_department=department,
+        )
+        workflow.passed_attempt = attempt
+        workflow.save(update_fields=["passed_attempt"])
+        event = m.AssignmentHandlingEvent.objects.create(
+            attempt=attempt,
+            event_type=m.AssignmentHandlingEvent.EVENT_ATTEMPT_CREATED,
+            to_department=department,
+            to_department_name_snapshot=department.name,
+            is_system_auto=True,
+        )
+        event_id = event.id
+
+        take_snapshot(label="部门分配快照")
+        m.AssignmentHandlingEvent.objects.all().delete()
+        m.AssignmentAttempt.objects.all().delete()
+        m.CandidateWorkflow.objects.all().delete()
+        m.Resume.objects.all().delete()
+        m.Candidate.objects.all().delete()
+
+        self.assertTrue(restore_latest())
+
+        restored_workflow = m.CandidateWorkflow.objects.get(
+            candidate__identity_hash="snapshot-candidate"
+        )
+        restored_attempt = restored_workflow.attempts.get()
+        restored_event = restored_attempt.handling_events.get(pk=event_id)
+        self.assertEqual(restored_workflow.passed_attempt, restored_attempt)
+        self.assertEqual(restored_attempt.initial_department, department)
+        self.assertEqual(restored_attempt.current_department, department)
+        self.assertEqual(restored_event.to_department, department)
+        self.assertTrue(restored_event.is_system_auto)
+
     def test_school_import_tracks_blank_province_for_background_enrichment(self):
         schools = _excel_file(
             [
-                {"学校": "北京大学", "院校标签": "重点院校", "所在省份": ""},
-                {"学校": "南京大学", "院校标签": "重点院校", "所在省份": "江苏"},
+                {"学校": "北京大学", "院校标签": "重点院校"},
+                {"学校": "南京大学", "院校标签": "重点院校"},
             ]
         )
 
         counts = import_files({"schools": schools}, mode="incremental")
 
         blank = m.School.objects.get(name="北京大学")
+        other = m.School.objects.get(name="南京大学")
         self.assertEqual(blank.province, "")
-        self.assertEqual(counts["_school_ids_missing_province"], [blank.id])
+        self.assertEqual(
+            counts["_school_ids_missing_province"], sorted([blank.id, other.id])
+        )
 
     def test_blank_import_province_preserves_existing_value(self):
         existing = m.School.objects.create(name="北京大学", province="北京")
         schools = _excel_file(
-            [{"学校": "北京大学", "院校标签": "重点院校", "所在省份": ""}]
+            [{"学校": "北京大学", "院校标签": "重点院校"}]
         )
 
         counts = import_files({"schools": schools}, mode="incremental")
@@ -84,16 +143,16 @@ class ResumeImportDesignContractTests(TestCase):
         self.assertEqual(existing.province, "北京")
         self.assertEqual(counts["_school_ids_missing_province"], [])
 
-    def test_explicit_import_province_overrides_existing_value(self):
+    def test_school_import_has_no_province_field_and_preserves_existing_value(self):
         existing = m.School.objects.create(name="测试大学", province="北京")
         schools = _excel_file(
-            [{"学校": "测试大学", "院校标签": "普通院校", "所在省份": "河北"}]
+            [{"学校": "测试大学", "院校标签": "普通院校"}]
         )
 
         import_files({"schools": schools}, mode="incremental")
 
         existing.refresh_from_db()
-        self.assertEqual(existing.province, "河北")
+        self.assertEqual(existing.province, "北京")
 
     def test_highest_education_aliases_are_normalized(self):
         self.assertEqual(normalize_highest_education("高职（专科）"), "associate")
@@ -195,12 +254,16 @@ class ResumeImportDesignContractTests(TestCase):
             [
                 {
                     "招聘主体": "GW",
+                    "一层部门": "技术中心",
+                    "二层部门": "平台部",
                     "职位名称": "后端工程师",
                     "对外发布名称": "后端开发",
                     "工作职责": "负责服务设计、接口开发和性能优化。",
                 },
                 {
                     "招聘主体": "GW",
+                    "一层部门": "技术中心",
+                    "二层部门": "平台部",
                     "职位名称": "测试工程师",
                     "对外发布名称": "测试开发",
                     "工作职责": "",
@@ -234,7 +297,12 @@ class ResumeImportDesignContractTests(TestCase):
             responsibilities="已有职责",
         )
         jobs = _excel_file(
-            [{"职位名称": "新岗位", "对外发布名称": "新岗位"}]
+            [{
+                "一层部门": "技术中心",
+                "二层部门": "平台部",
+                "职位名称": "新岗位",
+                "对外发布名称": "新岗位",
+            }]
         )
 
         counts = import_files({"jobs": jobs}, mode="replace")
@@ -251,11 +319,15 @@ class ResumeImportDesignContractTests(TestCase):
         jobs = _excel_file(
             [
                 {
+                    "一层部门": "技术中心",
+                    "二层部门": "平台部",
                     "职位名称": "新岗位",
                     "对外发布名称": "新岗位",
                     "工作职责": "负责新业务建设。",
                 },
                 {
+                    "一层部门": "技术中心",
+                    "二层部门": "平台部",
                     "职位名称": "缺失职责岗位",
                     "对外发布名称": "缺失职责岗位",
                     "工作职责": "",
@@ -441,14 +513,31 @@ class ResumeImportDesignContractTests(TestCase):
     def test_standard_header_validation_reports_duplicate_fields(self):
         schema = get_import_table_schema("schools")
         table = pd.DataFrame(
-            [["北京大学", "重复学校", "重点院校", "北京"]],
-            columns=("学校", "学校", "院校标签", "所在省份"),
+            [["北京大学", "重复学校", "重点院校"]],
+            columns=("学校", "学校", "院校标签"),
         )
 
         with self.assertRaisesRegex(ValueError, "重复字段【学校】"):
             validate_table_headers(table, schema.key)
 
-    def test_job_import_business_key_distinguishes_entity_and_each_department_level(self):
+    def test_school_import_rejects_user_provided_province_column(self):
+        with self.assertRaisesRegex(ValueError, "未知字段【所在省份】"):
+            import_files(
+                {
+                    "schools": _raw_excel_file(
+                        [
+                            {
+                                "学校": "测试大学",
+                                "院校标签": "目标院校",
+                                "所在省份": "湖北",
+                            }
+                        ]
+                    )
+                },
+                mode="incremental",
+            )
+
+    def test_job_import_business_key_distinguishes_entity_primary_and_secondary(self):
         common = {
             "对外发布名称": "后端开发",
             "职位名称": "后端工程师",
@@ -462,67 +551,54 @@ class ResumeImportDesignContractTests(TestCase):
                     "招聘主体": "GW",
                     "一层部门": "技术中心",
                     "二层部门": "平台部",
-                    "三级部门": "研发一组",
                 },
                 {
                     **common,
                     "招聘主体": "YLS",
                     "一层部门": "技术中心",
                     "二层部门": "平台部",
-                    "三级部门": "研发一组",
                 },
                 {
                     **common,
                     "招聘主体": "GW",
                     "一层部门": "数据中心",
                     "二层部门": "平台部",
-                    "三级部门": "研发一组",
                 },
                 {
                     **common,
                     "招聘主体": "GW",
                     "一层部门": "技术中心",
                     "二层部门": "应用部",
-                    "三级部门": "研发一组",
-                },
-                {
-                    **common,
-                    "招聘主体": "GW",
-                    "一层部门": "技术中心",
-                    "二层部门": "平台部",
-                    "三级部门": "研发二组",
                 },
             ]
         )
 
         counts = import_files({"jobs": jobs}, mode="incremental")
 
-        self.assertEqual(counts["jobs"], 5)
-        self.assertEqual(m.Job.objects.filter(is_active=True).count(), 5)
+        self.assertEqual(counts["jobs"], 4)
+        self.assertEqual(m.Job.objects.filter(is_active=True).count(), 4)
 
-    def test_job_import_rejects_tertiary_department_without_secondary_parent_by_row(self):
-        jobs = _excel_file(
-            [
-                {
-                    "招聘主体": "GW",
-                    "一层部门": "技术中心",
-                    "三级部门": "研发组",
-                    "对外发布名称": "后端开发",
-                    "职位名称": "后端工程师",
-                    "岗位类别": "技术类",
-                    "工作职责": "负责后端研发。",
-                }
-            ]
+    def test_job_import_rejects_tertiary_department_header(self):
+        row = dict.fromkeys(get_import_table_schema("jobs").headers, "")
+        row.update(
+            {
+                "招聘主体": "GW",
+                "一层部门": "技术中心",
+                "二层部门": "平台部",
+                "三级部门": "研发组",
+                "对外发布名称": "后端开发",
+                "职位名称": "后端工程师",
+                "岗位类别": "技术类",
+                "工作职责": "负责后端研发。",
+            }
         )
 
-        with self.assertRaisesRegex(
-            ValueError, "岗位文件第 2 行三级部门缺少有效二级父部门"
-        ):
-            import_files({"jobs": jobs}, mode="incremental")
+        with self.assertRaisesRegex(ValueError, "未知字段【三级部门】"):
+            import_files({"jobs": _raw_excel_file([row])}, mode="incremental")
 
         self.assertFalse(m.Job.objects.exists())
 
-    def test_job_import_completes_one_legacy_secondary_job_in_place(self):
+    def test_job_import_updates_secondary_job_in_place(self):
         primary = m.Department.objects.create(name="技术中心", level=1)
         secondary = m.Department.objects.create(
             name="平台部", level=2, parent=primary, entity="GW"
@@ -542,7 +618,6 @@ class ResumeImportDesignContractTests(TestCase):
                     "招聘主体": "GW",
                     "一层部门": "技术中心",
                     "二层部门": "平台部",
-                    "三级部门": "研发组",
                     "岗位类别": "技术类",
                     "对外发布名称": "后端开发",
                     "职位名称": "后端工程师",
@@ -557,11 +632,11 @@ class ResumeImportDesignContractTests(TestCase):
         existing.refresh_from_db()
         self.assertEqual(counts["jobs"], 1)
         self.assertEqual(m.Job.objects.count(), 1)
-        self.assertEqual(existing.department.level, 3)
-        self.assertEqual(existing.department.name, "研发组")
+        self.assertEqual(existing.department.level, 2)
+        self.assertEqual(existing.department.name, "平台部")
         self.assertEqual((existing.responsibilities, existing.headcount), ("新职责", 3))
 
-    def test_job_import_splits_legacy_secondary_job_without_breaking_history(self):
+    def test_job_import_never_creates_tertiary_department(self):
         primary = m.Department.objects.create(name="技术中心", level=1)
         secondary = m.Department.objects.create(
             name="平台部", level=2, parent=primary, entity="GW"
@@ -575,55 +650,38 @@ class ResumeImportDesignContractTests(TestCase):
             responsibilities="聚合职责",
             headcount=9,
         )
-        run = m.ProcessingRun.objects.create(step="step2", mode="rule")
-        capacity = m.ProcessingRunJobCapacity.objects.create(
-            run=run,
-            job=existing,
-            headcount_snapshot=9,
-            capacity=9,
-            used_count=2,
-        )
         jobs = _excel_file(
             [
                 {
                     "招聘主体": "GW",
                     "一层部门": "技术中心",
                     "二层部门": "平台部",
-                    "三级部门": tertiary,
                     "岗位类别": "技术类",
                     "对外发布名称": "后端开发",
                     "职位名称": "后端工程师",
-                    "工作职责": f"{tertiary}职责",
-                    "HC": headcount,
+                    "工作职责": "二级部门职责",
+                    "HC": 5,
                 }
-                for tertiary, headcount in (("研发一组", 4), ("研发二组", 5))
             ]
         )
 
         counts = import_files({"jobs": jobs}, mode="incremental")
 
         existing.refresh_from_db()
-        capacity.refresh_from_db()
-        self.assertEqual(counts["jobs"], 2)
-        self.assertFalse(existing.is_active)
-        self.assertEqual(existing.headcount, 9)
-        self.assertEqual(capacity.job_id, existing.id)
-        self.assertEqual(
-            (capacity.headcount_snapshot, capacity.capacity, capacity.used_count),
-            (9, 9, 2),
-        )
-        self.assertEqual(
-            list(
-                m.Job.objects.filter(is_active=True)
-                .order_by("department__name")
-                .values_list("department__name", "headcount")
-            ),
-            [("研发一组", 4), ("研发二组", 5)],
-        )
+        self.assertEqual(counts["jobs"], 1)
+        self.assertTrue(existing.is_active)
+        self.assertEqual(existing.department, secondary)
+        self.assertEqual(existing.headcount, 5)
+        self.assertFalse(m.Department.objects.filter(level=3).exists())
 
     def test_job_import_rejects_duplicate_business_key_in_database(self):
+        primary = m.Department.objects.create(name="技术中心", level=1)
+        secondary = m.Department.objects.create(
+            name="平台部", level=2, parent=primary
+        )
         first = m.Job.objects.create(
             entity="GW",
+            department=secondary,
             category="技术类",
             public_name="后端开发",
             position_name="后端工程师",
@@ -632,6 +690,7 @@ class ResumeImportDesignContractTests(TestCase):
         )
         second = m.Job.objects.create(
             entity="gw",
+            department=secondary,
             category="技术类",
             public_name="后端开发",
             position_name="后端工程师",
@@ -643,6 +702,8 @@ class ResumeImportDesignContractTests(TestCase):
             [
                 {
                     "招聘主体": "GW",
+                    "一层部门": "技术中心",
+                    "二层部门": "平台部",
                     "对外发布名称": "新岗位",
                     "职位名称": "新岗位",
                     "岗位类别": "技术类",
@@ -661,8 +722,13 @@ class ResumeImportDesignContractTests(TestCase):
         self.assertFalse(m.Job.objects.filter(public_name="新岗位").exists())
 
     def test_replace_job_import_rolls_back_updates_when_major_sync_fails(self):
+        primary = m.Department.objects.create(name="技术中心", level=1)
+        secondary = m.Department.objects.create(
+            name="平台部", level=2, parent=primary
+        )
         existing = m.Job.objects.create(
             entity="GW",
+            department=secondary,
             category="技术类",
             public_name="后端开发",
             position_name="后端工程师",
@@ -672,6 +738,7 @@ class ResumeImportDesignContractTests(TestCase):
         m.JobMajor.objects.create(job=existing, major="旧专业")
         stale = m.Job.objects.create(
             entity="GW",
+            department=secondary,
             category="产品类",
             public_name="产品经理",
             position_name="产品经理",
@@ -682,6 +749,8 @@ class ResumeImportDesignContractTests(TestCase):
             [
                 {
                     "招聘主体": "GW",
+                    "一层部门": "技术中心",
+                    "二层部门": "平台部",
                     "对外发布名称": "后端开发",
                     "职位名称": "后端工程师",
                     "岗位类别": "技术类",
@@ -970,3 +1039,36 @@ class ResumeImportDesignContractTests(TestCase):
         self.assertIn("临时业务角色", group_names)
         self.assertIn("三级接口人", group_names)
         self.assertNotIn("二级接口人", group_names)
+
+    def test_contact_import_preserves_configured_builtin_role_permissions(self):
+        ensure_rbac_defaults()
+        role = Group.objects.get(name="二级接口人")
+        selected_permissions = Permission.objects.filter(
+            content_type__app_label="accounts",
+            content_type__model="user",
+            codename__in=[
+                permission_codename("attempt.view_department"),
+                permission_codename("settings.manage_ai_connection"),
+            ],
+        )
+        role.permissions.set(selected_permissions)
+        expected_ids = set(role.permissions.values_list("id", flat=True))
+        contacts = _excel_file(
+            [
+                {
+                    "工号": "L9004",
+                    "邮箱": "l9004@example.com",
+                    "姓名": "权限保留接口人",
+                    "一层部门": "技术中心",
+                    "二层部门": "平台组",
+                    "接口人层级": "二级接口人",
+                }
+            ]
+        )
+
+        import_files({"contacts": contacts}, mode="incremental")
+
+        self.assertEqual(
+            set(role.permissions.values_list("id", flat=True)),
+            expected_ids,
+        )

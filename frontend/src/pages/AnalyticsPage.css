@@ -426,9 +426,36 @@ button.analytics-metric-main {
   color: #b0bac7;
 }
 
+.analytics-handling-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.analytics-handling-metric .ant-card-body {
+  display: flex;
+  min-height: 132px;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.analytics-handling-metric strong {
+  color: var(--srf-ink);
+  font-size: 24px;
+  line-height: 1.2;
+}
+
+.analytics-handling-metric .ant-typography {
+  font-size: 12px;
+}
+
 @media (max-width: 1199px) {
   .analytics-metric-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .analytics-handling-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -504,6 +531,10 @@ button.analytics-metric-main {
   }
 
   .analytics-doughnut-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .analytics-handling-grid {
     grid-template-columns: 1fr;
   }
 }

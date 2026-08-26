@@ -6,16 +6,14 @@ import {
   ProFormSwitch,
   ProFormText,
 } from '@ant-design/pro-components'
-import { Button, message, Popconfirm, Space, Switch, Tag } from 'antd'
+import { Button, message, Popconfirm, Space, Tag } from 'antd'
 import {
   createContact,
   deleteContact,
-  fetchConfig,
   fetchContactFilterOptions,
   fetchContacts,
   fetchDepartments,
   updateContact,
-  updateConfig,
 } from '../api/services'
 import ImportButton from '../components/ImportButton'
 import SmartDataTable from '../components/SmartDataTable'
@@ -30,8 +28,6 @@ export default function DepartmentsPage() {
   const role = useRole()
   const canManageContacts = Boolean(role?.hasPermission?.('department.manage'))
   const canImportContacts = Boolean(role?.hasPermission?.('resume.import'))
-  const [welinkEnabled, setWelinkEnabled] = useState(false)
-  const [welinkLoading, setWelinkLoading] = useState(false)
   const [contactModal, setContactModal] = useState({ open: false, record: null })
   const [departments, setDepartments] = useState([])
 
@@ -41,36 +37,6 @@ export default function DepartmentsPage() {
       .then(({ data }) => setDepartments(data?.results || []))
       .catch(() => setDepartments([]))
   }, [canManageContacts])
-
-  useEffect(() => {
-    if (!canManageContacts) return
-    let active = true
-    setWelinkLoading(true)
-    fetchConfig('welink_enabled')
-      .then(({ data }) => {
-        if (active) setWelinkEnabled(Boolean(data?.value))
-      })
-      .catch(() => {
-        if (active) setWelinkEnabled(false)
-      })
-      .finally(() => {
-        if (active) setWelinkLoading(false)
-      })
-    return () => {
-      active = false
-    }
-  }, [canManageContacts])
-
-  const handleWelinkChange = async (checked) => {
-    setWelinkLoading(true)
-    try {
-      const { data } = await updateConfig('welink_enabled', checked)
-      setWelinkEnabled(Boolean(data?.value))
-      message.success(checked ? '已开启 WeLink 通知' : '已关闭 WeLink 通知')
-    } finally {
-      setWelinkLoading(false)
-    }
-  }
 
   const handleDelete = async (record) => {
     try {
@@ -188,7 +154,7 @@ export default function DepartmentsPage() {
           <a onClick={() => setContactModal({ open: true, record })}>编辑</a>
           <Popconfirm
             title="删除接口人"
-            description="将删除该接口人及绑定用户，历史分配记录仅保留快照。"
+            description="将删除该接口人及绑定用户；既有处理日志仍保留操作者快照。"
             okText="删除"
             cancelText="取消"
             okButtonProps={{ danger: true }}
@@ -203,35 +169,8 @@ export default function DepartmentsPage() {
   return (
     <PageContainer
       title="部门接口人"
-      content="二级/三级部门接口人名单，可导入维护；二级接口人负责转派，三级接口人负责反馈。"
+      content="二级/三级部门接口人名单，可导入维护；同部门接口人共享部门收件箱，按部门范围处理简历。"
     >
-      {canManageContacts && (
-        <div
-          style={{
-            alignItems: 'center',
-            background: '#fff',
-            border: '1px solid #f0f0f0',
-            borderRadius: 8,
-            display: 'flex',
-            justifyContent: 'space-between',
-            marginBottom: 16,
-            padding: '14px 16px',
-          }}
-        >
-          <div>
-            <div style={{ fontWeight: 600 }}>WeLink 通知</div>
-            <div style={{ color: '#8c8c8c', marginTop: 4 }}>
-              开启后，HR 下发简历时向对应二级接口人发送 WeLink 通知。
-            </div>
-          </div>
-          <Switch
-            aria-label="WeLink 通知"
-            checked={welinkEnabled}
-            loading={welinkLoading}
-            onChange={handleWelinkChange}
-          />
-        </div>
-      )}
       <SmartDataTable
         tableId="contacts"
         stickyPagination

@@ -30,8 +30,14 @@ const apiMocks = vi.hoisted(() => ({
   updateRole: vi.fn(),
   updateUser: vi.fn(),
 }))
+const roleMocks = vi.hoisted(() => ({
+  refreshMe: vi.fn(),
+}))
 
 vi.mock('../api/services', () => apiMocks)
+vi.mock('../contexts/roleState', () => ({
+  useRole: () => roleMocks,
+}))
 
 vi.mock('@ant-design/pro-components', () => ({
   PageContainer: ({ children }) => <div>{children}</div>,
@@ -121,6 +127,8 @@ describe('UsersPage role permissions', () => {
     apiMocks.updateRole.mockResolvedValue({
       data: { ...roleRecord, permissions: ['resume.view', 'resume.export'] },
     })
+    roleMocks.refreshMe.mockReset()
+    roleMocks.refreshMe.mockResolvedValue({ permissions: ['resume.view', 'resume.export'] })
   })
 
   it('merges permission configuration into the role action', async () => {
@@ -157,6 +165,7 @@ describe('UsersPage role permissions', () => {
     })).toBeNull())
     expect(fetchRoles).toHaveBeenCalledTimes(2)
     expect(fetchPermissionTree).toHaveBeenCalledTimes(2)
+    expect(roleMocks.refreshMe).toHaveBeenCalledTimes(1)
   })
 
   it('does not expose mutation actions for the protected administrator', async () => {

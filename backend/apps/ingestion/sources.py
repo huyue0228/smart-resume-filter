@@ -204,16 +204,6 @@ def _contact_level(row, dept):
     )
 
 
-def _contact_has_history(contact):
-    return (
-        contact.assignment_attempts.exists()
-        or contact.sub_assignment_attempts.exists()
-        or contact.handoffs_from.exists()
-        or contact.handoffs_to.exists()
-        or contact.agent_decisions.exists()
-    )
-
-
 def _disable_contact_users(contact):
     User.objects.filter(contact=contact).exclude(
         username=PROTECTED_ADMIN_USERNAME
@@ -244,7 +234,6 @@ def _job_row_department_names(row):
     return (
         _val(row, "一层部门"),
         _val(row, "二层部门"),
-        _val(row, "三级部门"),
     )
 
 
@@ -253,7 +242,6 @@ def _job_model_department_names(job):
     return (
         hierarchy.primary.name if hierarchy.primary else "",
         hierarchy.secondary.name if hierarchy.secondary else "",
-        hierarchy.tertiary.name if hierarchy.tertiary else "",
     )
 
 
@@ -261,7 +249,6 @@ def _job_business_key(
     entity,
     primary_department_name,
     secondary_department_name,
-    tertiary_department_name,
     public_name,
     position_name,
     category,
@@ -273,7 +260,6 @@ def _job_business_key(
             entity,
             primary_department_name,
             secondary_department_name,
-            tertiary_department_name,
             public_name,
             position_name,
             category,
@@ -282,12 +268,11 @@ def _job_business_key(
 
 
 def _job_row_business_key(row):
-    primary, secondary, tertiary = _job_row_department_names(row)
+    primary, secondary = _job_row_department_names(row)
     return _job_business_key(
         _val(row, "招聘主体"),
         primary,
         secondary,
-        tertiary,
         _val(row, "对外发布名称"),
         _val(row, "职位名称"),
         _val(row, "岗位类别"),
@@ -295,12 +280,11 @@ def _job_row_business_key(row):
 
 
 def _job_model_business_key(job):
-    primary, secondary, tertiary = _job_model_department_names(job)
+    primary, secondary = _job_model_department_names(job)
     return _job_business_key(
         job.entity,
         primary,
         secondary,
-        tertiary,
         job.public_name,
         job.position_name,
         job.category,
@@ -324,7 +308,7 @@ def _job_legacy_business_key(
 
 
 def _job_row_legacy_business_key(row):
-    _primary, secondary, _tertiary = _job_row_department_names(row)
+    _primary, secondary = _job_row_department_names(row)
     return _job_legacy_business_key(
         _val(row, "招聘主体"),
         secondary,
@@ -335,7 +319,7 @@ def _job_row_legacy_business_key(row):
 
 
 def _job_model_legacy_business_key(job):
-    _primary, secondary, _tertiary = _job_model_department_names(job)
+    _primary, secondary = _job_model_department_names(job)
     return _job_legacy_business_key(
         job.entity,
         secondary,
@@ -380,23 +364,13 @@ def _existing_jobs_by_business_key():
 
 
 def _legacy_job_matches_path(job, item):
-    existing_primary, _existing_secondary, existing_tertiary = (
-        _job_model_department_names(job)
-    )
-    primary, _secondary, tertiary = item["department_names"]
+    existing_primary, _existing_secondary = _job_model_department_names(job)
+    primary, _secondary = item["department_names"]
     primary_matches = not existing_primary or (
         _normalized_job_key_part(existing_primary)
         == _normalized_job_key_part(primary)
     )
-    tertiary_matches = not existing_tertiary or (
-        _normalized_job_key_part(existing_tertiary)
-        == _normalized_job_key_part(tertiary)
-    )
-    becomes_more_complete = (
-        (not existing_primary and bool(primary))
-        or (not existing_tertiary and bool(tertiary))
-    )
-    return primary_matches and tertiary_matches and becomes_more_complete
+    return primary_matches and not existing_primary and bool(primary)
 
 
 def _prepare_legacy_job_migrations(job_rows, jobs_by_key, jobs_by_legacy_key):
@@ -451,12 +425,11 @@ def _sync_jobs(job_rows, *, mode):
     for item in job_rows:
         row = item["row"]
         entity = _val(row, "招聘主体")
-        primary, secondary, tertiary = item["department_names"]
+        primary, secondary = item["department_names"]
         department = _get_department(
             primary,
             secondary,
             entity,
-            tertiary,
         )
         values = {
             "entity": entity,
@@ -546,9 +519,9 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
             if not (position or public_name):
                 continue
             department_names = _job_row_department_names(row)
-            if department_names[2] and not department_names[1]:
+            if not department_names[1]:
                 raise ValueError(
-                    f"岗位文件第 {excel_row} 行三级部门缺少有效二级父部门"
+                    f"岗位文件第 {excel_row} 行缺少二层部门"
                 )
             item = {
                 "excel_row": excel_row,
@@ -575,7 +548,7 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
             )
 
     if mode == "replace" and (files.get("resume_list") or files.get("resume_package")):
-        m.AssignmentHandoff.objects.all().delete()
+        m.AssignmentHandlingEvent.objects.all().delete()
         m.AssignmentAttempt.objects.all().delete()
         m.AgentDispatchDecision.objects.all().delete()
         m.ResumeProfile.objects.all().delete()
@@ -600,14 +573,10 @@ def import_files(files: dict, mode: str = "incremental") -> dict:
                     code=tag_text,
                     defaults={"name": tag_text, "is_active": True},
                 )
-            province = _val(row, "所在省份")
             school_defaults = {
                 "platform": tag_text,
                 "school_tag": school_tag,
             }
-            # 文件明确给出的省份优先；空单元格不覆盖人工或 AI 已补全的数据。
-            if province:
-                school_defaults["province"] = province
             school, _ = m.School.objects.update_or_create(
                 name=name,
                 defaults=school_defaults,

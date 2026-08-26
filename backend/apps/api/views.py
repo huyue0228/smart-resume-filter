@@ -4,6 +4,7 @@ import mimetypes
 import os
 import re
 import time
+import uuid
 from datetime import date, datetime, time as datetime_time, timedelta
 from io import BytesIO
 from urllib.parse import quote
@@ -108,6 +109,13 @@ BULK_DISPATCH_FILTER_FIELDS = {
     "reason_code",
 }
 
+DEPARTMENT_SCOPE_FORBIDDEN_FILTER_FIELDS = {
+    "processing_run_id",
+    "processing_result",
+    "workflow_status",
+    "reason_code",
+}
+
 
 def bool_query_value(value):
     if value in ["true", "false"]:
@@ -172,6 +180,45 @@ def _filter_option(value, *, option_value=None):
     }
 
 
+def _attempt_mutation_error(exc):
+    detail = str(exc)
+    if isinstance(exc, allocate_service.AttemptStateChanged) or any(
+        marker in detail
+        for marker in ("反馈已提交", "仅待", "仅已下发", "状态已变化")
+    ):
+        return Response(
+            {"detail": f"状态已变化：{detail}"},
+            status=status.HTTP_409_CONFLICT,
+        )
+    return Response({"detail": detail}, status=status.HTTP_400_BAD_REQUEST)
+
+
+def _can_transfer_departments(user):
+    permissions = user_permission_codes(user)
+    if "attempt.view_all" in permissions:
+        return True
+    contact = getattr(user, "contact", None)
+    department = getattr(contact, "department", None) if contact else None
+    return bool(
+        contact
+        and contact.is_active
+        and contact.contact_level == m.Contact.LEVEL_SECONDARY
+        and contact.can_delegate
+        and department
+        and department.level == 2
+    )
+
+
+def _reject_unknown_body_fields(request, allowed_fields):
+    unknown = sorted(set(request.data.keys()) - set(allowed_fields))
+    if not unknown:
+        return None
+    return Response(
+        {"detail": f"不支持的请求字段：{','.join(unknown)}"},
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
 def submit_processing_runs(runs):
     """提交一组已创建运行，并为上传与手动处理统一回填 Celery 审计标识。"""
     if not runs:
@@ -193,8 +240,8 @@ def _clear_user_references(users):
     m.AssignmentAttempt.objects.filter(created_by_id__in=user_ids).update(
         created_by=None
     )
-    m.AssignmentHandoff.objects.filter(created_by_id__in=user_ids).update(
-        created_by=None
+    m.AssignmentHandlingEvent.objects.filter(actor_id__in=user_ids).update(
+        actor=None
     )
 
 
@@ -218,13 +265,6 @@ def _delete_users(users):
 def _clear_contact_references(contact):
     if not contact or not contact.id:
         return
-    m.AssignmentAttempt.objects.filter(contact=contact).update(contact=None)
-    m.AssignmentAttempt.objects.filter(sub_contact=contact).update(sub_contact=None)
-    m.AssignmentHandoff.objects.filter(from_contact=contact).update(from_contact=None)
-    m.AssignmentHandoff.objects.filter(to_contact=contact).update(to_contact=None)
-    m.AgentDispatchDecision.objects.filter(recommended_contact=contact).update(
-        recommended_contact=None
-    )
 
 
 def delete_contact_and_bound_users(contact):
@@ -290,6 +330,17 @@ def resume_preview_response(resume):
     response["Content-Disposition"] = f"inline; filename*=UTF-8''{quote(fname)}"
     response["X-Resume-Filename"] = quote(fname)
     return response
+
+
+def assignment_department_options():
+    """返回可分配部门选项，不暴露接口人身份信息。"""
+
+    departments = (
+        m.Department.objects.filter(level__in=[2, 3])
+        .select_related("parent__parent")
+        .order_by("level", "parent_id", "name", "id")
+    )
+    return serializers.DepartmentSerializer(departments, many=True).data
 
 
 class PermissionedModelViewSet(viewsets.ModelViewSet):
@@ -678,6 +729,9 @@ class ImportUndoView(APIView):
 class ResumeViewSet(PermissionedReadOnlyModelViewSet):
     serializer_class = serializers.ResumeListSerializer
     permission_code = "resume.view"
+    permission_codes_by_action = {
+        "manual_assignment_options": "resume.manual_assign",
+    }
 
     def get_queryset(self):
         qs = m.Resume.objects.select_related("candidate", "job").order_by("-imported_at")
@@ -758,12 +812,10 @@ class ResumeViewSet(PermissionedReadOnlyModelViewSet):
                 status=m.AssignmentAttempt.STATUS_CANCELLED
             )
             .select_related(
-                "department",
-                "department__parent",
-                "contact",
-                "sub_department",
-                "sub_contact",
+                "initial_department__parent",
+                "current_department__parent__parent",
             )
+            .prefetch_related("handling_events")
             .order_by("attempt_no", "id")
         )
         resume_queryset = (
@@ -772,35 +824,39 @@ class ResumeViewSet(PermissionedReadOnlyModelViewSet):
                 imported_at__lt=end_at,
             )
             .select_related(
-                "candidate", "candidate__first_degree_tag", "candidate__highest_degree_tag"
+                "candidate",
+                "candidate__first_degree_tag",
+                "candidate__highest_degree_tag",
+                "candidate__workflow__current_resume",
             )
             .prefetch_related(
                 Prefetch(
-                    "assignment_attempts",
+                    "candidate__workflow__attempts",
                     queryset=attempts,
-                    to_attr="report_attempts",
                 )
             )
             .order_by("imported_at", "id")
         )
         resumes = list(resume_queryset)
         if primary_department_id or department_id:
-            resumes = [
-                resume
-                for resume in resumes
-                if (
-                    (attempt := current_effective_attempt(resume))
-                    and (
-                        not primary_department_id
-                        or (
-                            attempt.department
-                            and attempt.department.parent_id
-                            == primary_department_id
-                        )
-                    )
-                    and (not department_id or attempt.department_id == department_id)
-                )
-            ]
+            def matches_department_filters(resume):
+                attempt = current_effective_attempt(resume)
+                if not attempt:
+                    return False
+                hierarchy = resolve_department_hierarchy(attempt.current_department)
+                if primary_department_id and (
+                    not hierarchy.primary
+                    or hierarchy.primary.id != primary_department_id
+                ):
+                    return False
+                if department_id and (
+                    not hierarchy.secondary
+                    or hierarchy.secondary.id != department_id
+                ):
+                    return False
+                return True
+
+            resumes = [resume for resume in resumes if matches_department_filters(resume)]
         content = build_result_report(resumes)
         filename = f"简历结果报表_{start_date:%Y%m%d}_{end_date:%Y%m%d}.xlsx"
         response = HttpResponse(
@@ -819,72 +875,82 @@ class ResumeViewSet(PermissionedReadOnlyModelViewSet):
         resume = self.get_object()
         return resume_preview_response(resume)
 
+    @action(detail=False, methods=["get"], url_path="manual-assignment-options")
+    def manual_assignment_options(self, request):
+        return Response({"results": assignment_department_options()})
+
     @action(detail=True, methods=["post"], url_path="manual-assign")
     def manual_assign(self, request, pk=None):
         if not has_permission_code(request.user, "resume.manual_assign"):
             return Response({"detail": "无手动分配权限"}, status=status.HTTP_403_FORBIDDEN)
+        invalid_fields = _reject_unknown_body_fields(
+            request, {"target_department_id", "manual_reason"}
+        )
+        if invalid_fields:
+            return invalid_fields
         resume = self.get_object()
-        contact_id = request.data.get("contact_id") or request.data.get("contact")
-        if not contact_id:
+        target_department_id = request.data.get("target_department_id")
+        if not target_department_id:
             return Response(
-                {"detail": "contact_id 为必填项"}, status=status.HTTP_400_BAD_REQUEST
+                {"detail": "target_department_id 为必填项"},
+                status=status.HTTP_400_BAD_REQUEST,
             )
-        contact = m.Contact.objects.filter(pk=contact_id).first()
-        if not contact:
+        target_department = m.Department.objects.select_related("parent__parent").filter(
+            pk=target_department_id, level__in=[2, 3]
+        ).first()
+        if not target_department:
             return Response(
-                {"detail": "目标接口人不存在"}, status=status.HTTP_400_BAD_REQUEST
+                {"detail": "目标部门不存在或层级无效"},
+                status=status.HTTP_400_BAD_REQUEST,
             )
         try:
-            secondary_contact = None
-            secondary_contact_id = request.data.get("secondary_contact_id")
-            if secondary_contact_id:
-                secondary_contact = m.Contact.objects.filter(pk=secondary_contact_id).first()
-                if not secondary_contact:
-                    return Response(
-                        {"detail": "指定二级接口人不存在"},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
             attempt = allocate_service.manual_assign(
                 resume,
-                contact,
+                target_department,
                 user=request.user,
                 manual_reason=request.data.get("manual_reason", ""),
-                secondary_contact=secondary_contact,
             )
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(serializers.AssignmentAttemptSerializer(attempt).data)
+        return Response(
+            serializers.AssignmentAttemptSerializer(
+                attempt, context={"request": request}
+            ).data
+        )
 
 
 class CandidateViewSet(PermissionedModelViewSet):
     serializer_class = serializers.CandidateSerializer
     permission_codes_by_action = {
-        "list": ["resume.view", "attempt.view_received", "attempt.view_assigned"],
-        "retrieve": ["resume.view", "attempt.view_received", "attempt.view_assigned"],
+        "list": ["resume.view", "attempt.view_department"],
+        "retrieve": ["resume.view", "attempt.view_department"],
         "create": "resume.import",
         "update": "resume.import",
         "partial_update": "resume.import",
         "destroy": "resume.import",
         "export_resumes": ["resume.view", "attempt.export"],
         "export_fields": ["resume.view", "attempt.export"],
-        "filter_options": ["resume.view", "attempt.view_received", "attempt.view_assigned"],
+        "filter_options": ["resume.view", "attempt.view_department"],
         "bulk_dispatch": "attempt.dispatch",
+        "bulk_transfer": "attempt.transfer_department",
     }
 
     def _base_queryset(self):
         attempts = m.AssignmentAttempt.objects.select_related(
             "workflow__candidate",
             "resume__candidate",
-            "contact",
-            "department",
-            "sub_contact",
-            "sub_department",
+            "initial_department__parent",
+            "current_department__parent__parent",
             "matched_rule",
             "agent_decision",
+        ).prefetch_related(
+            "handling_events__from_department",
+            "handling_events__to_department",
         ).order_by("attempt_no")
         return (
             m.Candidate.objects.prefetch_related(
                 "resumes",
+                "school_tags",
                 "resumes__job__department__parent",
                 "resumes__job__majors",
                 Prefetch("workflow__attempts", queryset=attempts),
@@ -908,24 +974,35 @@ class CandidateViewSet(PermissionedModelViewSet):
         qs = self._scope_queryset(self._base_queryset())
         permissions = user_permission_codes(self.request.user)
         current_resume_resolver = None
+        current_attempt_resolver = None
         if "resume.view" not in permissions:
-            def current_resume_resolver(candidate):
-                attempt = serializers.visible_candidate_attempt(
-                    candidate,
-                    self.request.user,
-                    permissions=permissions,
+            forbidden = sorted(
+                key
+                for key in self.request.query_params.keys()
+                if key in DEPARTMENT_SCOPE_FORBIDDEN_FILTER_FIELDS
+                or key.startswith("analytics_")
+            )
+            if forbidden:
+                from rest_framework.exceptions import ValidationError
+
+                raise ValidationError(
+                    {"detail": f"部门接口人不可使用筛选字段：{','.join(forbidden)}"}
                 )
-                return attempt.resume if attempt else None
+            current_attempt_resolver, current_resume_resolver = (
+                self._department_scope_resolvers(permissions)
+            )
 
         try:
-            qs = analytics_scope.apply_candidate_drilldown(
-                qs,
-                self.request.query_params,
-            )
+            if "resume.view" in permissions:
+                qs = analytics_scope.apply_candidate_drilldown(
+                    qs,
+                    self.request.query_params,
+                )
             qs = system_status.apply_candidate_filters(
                 qs,
                 self.request.query_params,
                 current_resume_resolver=current_resume_resolver,
+                current_attempt_resolver=current_attempt_resolver,
             )
         except ValueError as exc:
             from rest_framework.exceptions import ValidationError
@@ -933,25 +1010,35 @@ class CandidateViewSet(PermissionedModelViewSet):
             raise ValidationError({"detail": str(exc)}) from exc
         return self._apply_attempt_filters(qs, self.request.query_params)
 
+    def _department_scope_resolvers(self, permissions):
+        cache = {}
+
+        def current_attempt_resolver(candidate):
+            if candidate.id not in cache:
+                cache[candidate.id] = serializers.visible_candidate_attempt(
+                    candidate,
+                    self.request.user,
+                    permissions=permissions,
+                )
+            return cache[candidate.id]
+
+        def current_resume_resolver(candidate):
+            attempt = current_attempt_resolver(candidate)
+            return attempt.resume if attempt else None
+
+        return current_attempt_resolver, current_resume_resolver
+
     def _scope_queryset(self, qs):
         permissions = user_permission_codes(self.request.user)
         if "resume.view" in permissions:
             return qs
-        contact_id = getattr(self.request.user, "contact_id", None)
-        scope = Q(pk__in=[])
-        if contact_id and "attempt.view_received" in permissions:
-            scope |= Q(
-                workflow__attempts__contact_id=contact_id,
-                workflow__attempts__status__in=[
-                    m.AssignmentAttempt.STATUS_DISPATCHED_L2,
-                    m.AssignmentAttempt.STATUS_ASSIGNED_L3,
-                    m.AssignmentAttempt.STATUS_PASSED,
-                    m.AssignmentAttempt.STATUS_REJECTED,
-                ],
+        if "attempt.view_department" not in permissions:
+            return qs.none()
+        return qs.filter(
+            serializers.department_attempt_scope_q(
+                self.request.user, prefix="workflow__attempts__"
             )
-        if contact_id and "attempt.view_assigned" in permissions:
-            scope |= Q(workflow__attempts__sub_contact_id=contact_id)
-        return qs.filter(scope).distinct()
+        ).distinct()
 
     def _apply_attempt_filters(self, qs, params):
         def values(key):
@@ -970,9 +1057,7 @@ class CandidateViewSet(PermissionedModelViewSet):
 
         source_values = values("allocation_source")
         status_values = values("attempt_status")
-        contact_name = str(params.get("contact_name") or "").strip().casefold()
-        sub_contact_name = str(params.get("sub_contact_name") or "").strip().casefold()
-        if not any([source_values, status_values, contact_name, sub_contact_name]):
+        if not any([source_values, status_values]):
             return qs
         ids = []
         can_view_resume = "resume.view" in user_permission_codes(self.request.user)
@@ -989,33 +1074,26 @@ class CandidateViewSet(PermissionedModelViewSet):
                 continue
             if status_values and (not attempt or attempt.status not in status_values):
                 continue
-            visible_contact_name = (
-                attempt.contact_name_snapshot
-                or (attempt.contact.name if attempt.contact else "")
-                if attempt
-                else ""
-            ).casefold()
-            visible_sub_contact_name = (
-                attempt.sub_contact_name_snapshot
-                or (attempt.sub_contact.name if attempt.sub_contact else "")
-                if attempt
-                else ""
-            ).casefold()
-            if contact_name and not _pinyin_text_matches(visible_contact_name, contact_name):
-                continue
-            if sub_contact_name and not _pinyin_text_matches(
-                visible_sub_contact_name, sub_contact_name
-            ):
-                continue
             ids.append(candidate.id)
         return qs.filter(id__in=ids)
 
     @action(detail=False, methods=["get"], url_path="filter-options")
     def filter_options(self, request):
         """返回简历库表头选择器的当前可选值。"""
+        permissions = user_permission_codes(request.user)
+        kwargs = {}
+        if "resume.view" not in permissions:
+            attempt_resolver, resume_resolver = self._department_scope_resolvers(
+                permissions
+            )
+            kwargs = {
+                "current_resume_resolver": resume_resolver,
+                "current_attempt_resolver": attempt_resolver,
+            }
         return Response(
             system_status.candidate_filter_options(
-                self._scope_queryset(self._base_queryset())
+                self._scope_queryset(self._base_queryset()),
+                **kwargs,
             )
         )
 
@@ -1098,10 +1176,10 @@ class CandidateViewSet(PermissionedModelViewSet):
                 Q(workflow__candidate=candidate) | Q(resume__candidate=candidate)
             ).exists():
                 protected_history.append("AI 决策")
-            if m.AssignmentHandoff.objects.filter(
+            if m.AssignmentHandlingEvent.objects.filter(
                 attempt__workflow__candidate=candidate
             ).exists():
-                protected_history.append("转派历史")
+                protected_history.append("处理日志")
 
             if protected_history:
                 return Response(
@@ -1213,6 +1291,120 @@ class CandidateViewSet(PermissionedModelViewSet):
             }
         )
 
+    @action(detail=False, methods=["post"], url_path="bulk-transfer")
+    def bulk_transfer(self, request):
+        if not _can_transfer_departments(request.user):
+            return Response(
+                {"detail": "当前接口人没有部门转派权限"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        invalid_fields = _reject_unknown_body_fields(
+            request, {"candidate_ids", "target_department_id", "note"}
+        )
+        if invalid_fields:
+            return invalid_fields
+        candidate_ids = request.data.get("candidate_ids")
+        if not (
+            isinstance(candidate_ids, list)
+            and candidate_ids
+            and all(
+                isinstance(item, int) and not isinstance(item, bool) and item > 0
+                for item in candidate_ids
+            )
+        ):
+            return Response(
+                {"detail": "candidate_ids 必须是非空正整数数组"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        frozen_candidate_ids = list(candidate_ids)
+        target_department_id = request.data.get("target_department_id")
+        target_department = m.Department.objects.select_related("parent__parent").filter(
+            pk=target_department_id, level=2
+        ).first()
+        if not target_department:
+            return Response(
+                {"detail": "批量转派目标必须是有效二级部门"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        batch_operation_id = uuid.uuid4()
+        candidates = {
+            item.id: item
+            for item in self._scope_queryset(self._base_queryset()).filter(
+                id__in=candidate_ids
+            )
+        }
+        results = []
+        errors = []
+        transferred = skipped = failed = 0
+        permissions = user_permission_codes(request.user)
+        seen_candidate_ids = set()
+        for candidate_id in frozen_candidate_ids:
+            if candidate_id in seen_candidate_ids:
+                skipped += 1
+                results.append(
+                    {
+                        "candidate_id": candidate_id,
+                        "attempt_id": None,
+                        "status": "skipped",
+                        "detail": "同一批次候选人 ID 重复",
+                    }
+                )
+                continue
+            seen_candidate_ids.add(candidate_id)
+            candidate = candidates.get(candidate_id)
+            if not candidate:
+                failed += 1
+                errors.append(
+                    {"candidate_id": candidate_id, "detail": "候选人不存在或无权操作"}
+                )
+                continue
+            attempt = serializers.visible_candidate_attempt(
+                candidate, request.user, permissions=permissions
+            )
+            if not attempt or attempt.status != m.AssignmentAttempt.STATUS_DISPATCHED:
+                skipped += 1
+                results.append(
+                    {
+                        "candidate_id": candidate_id,
+                        "attempt_id": attempt.id if attempt else None,
+                        "status": "skipped",
+                        "detail": "当前简历不可转派",
+                    }
+                )
+                continue
+            try:
+                transferred_attempt = allocate_service.transfer_attempt(
+                    attempt,
+                    target_department,
+                    user=request.user,
+                    note=request.data.get("note", ""),
+                    batch_operation_id=batch_operation_id,
+                )
+            except ValueError as exc:
+                failed += 1
+                errors.append({"candidate_id": candidate_id, "detail": str(exc)})
+                continue
+            transferred += 1
+            results.append(
+                {
+                    "candidate_id": candidate_id,
+                    "attempt_id": transferred_attempt.id,
+                    "status": "transferred",
+                }
+            )
+        return Response(
+            {
+                "batch_operation_id": str(batch_operation_id),
+                "total": len(frozen_candidate_ids),
+                "transferred": transferred,
+                "skipped": skipped,
+                "failed": failed,
+                "results": results,
+                "errors": errors,
+            }
+        )
+
 
 class JobViewSet(PermissionedModelViewSet):
     serializer_class = serializers.JobSerializer
@@ -1274,73 +1466,30 @@ class JobViewSet(PermissionedModelViewSet):
         )
         if primary_department_values:
             qs = qs.filter(
-                Q(
-                    department__level=2,
-                    department__parent__level=1,
-                    department__parent__name__in=primary_department_values,
-                )
-                | Q(
-                    department__level=3,
-                    department__parent__level=2,
-                    department__parent__parent__level=1,
-                    department__parent__parent__name__in=primary_department_values,
-                )
+                department__level=2,
+                department__parent__level=1,
+                department__parent__name__in=primary_department_values,
             )
         elif p.get("primary_department_name"):
             value = p["primary_department_name"]
             qs = qs.filter(
-                Q(
-                    department__level=2,
-                    department__parent__level=1,
-                    department__parent__name__icontains=value,
-                )
-                | Q(
-                    department__level=3,
-                    department__parent__level=2,
-                    department__parent__parent__level=1,
-                    department__parent__parent__name__icontains=value,
-                )
+                department__level=2,
+                department__parent__level=1,
+                department__parent__name__icontains=value,
             )
         secondary_department_values = _query_list_values(
             p, "secondary_department_name_in"
         ) or _query_list_values(p, "department_name_in")
         if secondary_department_values:
             qs = qs.filter(
-                Q(
-                    department__level=2,
-                    department__name__in=secondary_department_values,
-                )
-                | Q(
-                    department__level=3,
-                    department__parent__level=2,
-                    department__parent__name__in=secondary_department_values,
-                )
+                department__level=2,
+                department__name__in=secondary_department_values,
             )
         elif p.get("secondary_department_name") or p.get("department_name"):
             value = p.get("secondary_department_name") or p["department_name"]
             qs = qs.filter(
-                Q(
-                    department__level=2,
-                    department__name__icontains=value,
-                )
-                | Q(
-                    department__level=3,
-                    department__parent__level=2,
-                    department__parent__name__icontains=value,
-                )
-            )
-        tertiary_department_values = _query_list_values(
-            p, "tertiary_department_name_in"
-        )
-        if tertiary_department_values:
-            qs = qs.filter(
-                department__level=3,
-                department__name__in=tertiary_department_values,
-            )
-        elif p.get("tertiary_department_name"):
-            qs = qs.filter(
-                department__level=3,
-                department__name__icontains=p["tertiary_department_name"],
+                department__level=2,
+                department__name__icontains=value,
             )
         location_values = _query_list_values(p, "location_in")
         if location_values:
@@ -1401,7 +1550,6 @@ class JobViewSet(PermissionedModelViewSet):
                 "secondary_department_name": options(
                     department_names("secondary")
                 ),
-                "tertiary_department_name": options(department_names("tertiary")),
                 "department_name": options(department_names("secondary")),
                 "location": options(job.location for job in jobs),
                 "education": options(job.education for job in jobs),
@@ -1448,6 +1596,31 @@ class SchoolViewSet(PermissionedModelViewSet):
         "destroy": "school.manage",
         "filter_options": "school.view",
     }
+
+    @staticmethod
+    def _queue_province_enrichment(school):
+        if school.province.strip() or not ai_config.is_ai_available():
+            return
+
+        def submit():
+            try:
+                submit_school_province_enrichment([school.id])
+            except Exception as exc:  # noqa: BLE001 - 主数据保存不受增强任务影响
+                logger.warning(
+                    "School province enrichment dispatch failed school_id=%s error_type=%s",
+                    school.id,
+                    type(exc).__name__,
+                )
+
+        transaction.on_commit(submit)
+
+    def perform_create(self, serializer):
+        school = serializer.save()
+        self._queue_province_enrichment(school)
+
+    def perform_update(self, serializer):
+        school = serializer.save()
+        self._queue_province_enrichment(school)
 
     def get_queryset(self):
         qs = m.School.objects.select_related("school_tag").order_by("name")
@@ -1587,6 +1760,22 @@ class DepartmentViewSet(PermissionedModelViewSet):
             qs = qs.filter(name__icontains=p["name"])
         return qs
 
+    def destroy(self, request, *args, **kwargs):
+        department = self.get_object()
+        if department.children.exists():
+            return Response(
+                {"detail": "存在下级部门不可删除"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            department.delete()
+        except ProtectedError:
+            return Response(
+                {"detail": "部门已有业务引用不可删除"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
 
 class ContactViewSet(PermissionedModelViewSet):
     serializer_class = serializers.ContactSerializer
@@ -1713,17 +1902,19 @@ class CandidateWorkflowViewSet(PermissionedReadOnlyModelViewSet):
 class AssignmentAttemptViewSet(PermissionedReadOnlyModelViewSet):
     serializer_class = serializers.AssignmentAttemptSerializer
     permission_codes_by_action = {
-        "list": None,
-        "retrieve": None,
+        "list": ["attempt.view_all", "attempt.view_department"],
+        "retrieve": ["attempt.view_all", "attempt.view_department"],
         "dispatch_welink": "attempt.dispatch",
         "bulk_dispatch": "attempt.dispatch",
-        "eligible_sub_contacts": "attempt.assign_sub_contact",
-        "assign_sub_contact": "attempt.assign_sub_contact",
+        "transfer": "attempt.transfer_department",
+        "transfer_options": "attempt.transfer_department",
         "confirm_review": "attempt.dispatch",
         "cancel_attempt": "attempt.dispatch",
         "cancel_review": "attempt.dispatch",
         "transfer_to_manual": "resume.manual_assign",
         "feedback": "attempt.feedback",
+        "feedback_reasons": "attempt.feedback",
+        "handling_events": ["attempt.view_all", "attempt.view_department"],
         "export_resumes": "attempt.export",
         "resume_preview": "attempt.export",
     }
@@ -1735,46 +1926,56 @@ class AssignmentAttemptViewSet(PermissionedReadOnlyModelViewSet):
             "workflow__candidate__highest_degree_tag",
             "resume__candidate",
             "resume__job__department__parent",
-            "department",
-            "contact",
-            "sub_department",
-            "sub_contact",
+            "initial_department__parent",
+            "current_department__parent__parent",
             "matched_rule",
             "agent_decision",
         ).prefetch_related(
+            "handling_events__from_department",
+            "handling_events__to_department",
             "resume__job__majors",
             "workflow__candidate__resumes__job__department__parent",
             "workflow__candidate__resumes__job__majors",
             "workflow__candidate__processing_scope_items",
         ).order_by("-created_at")
         permissions = user_permission_codes(self.request.user)
-        contact_id = getattr(self.request.user, "contact_id", None)
         if "attempt.view_all" not in permissions:
-            scope = Q(pk__in=[])
-            if contact_id and "attempt.view_received" in permissions:
-                scope |= Q(
-                    contact_id=contact_id,
-                    status__in=[
-                        m.AssignmentAttempt.STATUS_DISPATCHED_L2,
-                        m.AssignmentAttempt.STATUS_ASSIGNED_L3,
-                        m.AssignmentAttempt.STATUS_PASSED,
-                        m.AssignmentAttempt.STATUS_REJECTED,
-                    ],
-                )
-            if contact_id and "attempt.view_assigned" in permissions:
-                scope |= Q(sub_contact_id=contact_id)
-            qs = qs.filter(scope)
+            if "attempt.view_department" not in permissions:
+                return qs.none()
+            qs = qs.filter(serializers.department_attempt_scope_q(self.request.user))
         p = self.request.query_params
+        legacy_filters = sorted(
+            field
+            for field in [
+                "department",
+                "primary_department_id",
+                "contact",
+                "sub_contact",
+                "contact_name",
+                "sub_contact_name",
+            ]
+            if field in p
+        )
+        if legacy_filters:
+            from rest_framework.exceptions import ValidationError
+
+            raise ValidationError(
+                {"detail": f"不支持的旧筛选字段：{','.join(legacy_filters)}"}
+            )
         if p.get("status"):
             qs = qs.filter(status=p["status"])
         if p.get("source"):
             qs = qs.filter(source=p["source"])
-        if p.get("contact"):
-            qs = qs.filter(contact_id=p["contact"])
-        if p.get("sub_contact"):
-            qs = qs.filter(sub_contact_id=p["sub_contact"])
-        if p.get("department"):
-            qs = qs.filter(department_id=p["department"])
+        current_department_id = p.get("current_department_id")
+        if current_department_id:
+            qs = qs.filter(current_department_id=current_department_id)
+        primary_department_id = p.get("current_primary_department_id")
+        if primary_department_id:
+            qs = qs.filter(
+                Q(current_department_id=primary_department_id)
+                | Q(current_department__parent_id=primary_department_id)
+                | Q(current_department__parent__parent_id=primary_department_id)
+            )
         if p.get("candidate_name"):
             qs = qs.filter(resume__candidate__name__icontains=p["candidate_name"])
         if p.get("volunteer_rank"):
@@ -1791,38 +1992,36 @@ class AssignmentAttemptViewSet(PermissionedReadOnlyModelViewSet):
             )
         if p.get("department_name"):
             qs = qs.filter(
-                Q(department__name__icontains=p["department_name"])
-                | Q(department_name_snapshot__icontains=p["department_name"])
+                Q(current_department__name__icontains=p["department_name"])
+                | Q(current_department_name_snapshot__icontains=p["department_name"])
             )
-        if p.get("contact_name"):
-            query = p["contact_name"]
-            snapshot_ids = [
-                attempt.id
-                for attempt in qs
-                if _pinyin_text_matches(attempt.contact_name_snapshot, query)
-            ]
-            qs = qs.filter(
-                Q(contact__name__icontains=query)
-                | Q(contact__name_pinyin__icontains=query.lower())
-                | Q(contact__name_pinyin_initials__icontains=query.lower())
-                | Q(id__in=snapshot_ids)
-            )
-        if p.get("sub_contact_name"):
-            query = p["sub_contact_name"]
-            snapshot_ids = [
-                attempt.id
-                for attempt in qs
-                if _pinyin_text_matches(attempt.sub_contact_name_snapshot, query)
-            ]
-            qs = qs.filter(
-                Q(sub_contact__name__icontains=query)
-                | Q(sub_contact__name_pinyin__icontains=query.lower())
-                | Q(sub_contact__name_pinyin_initials__icontains=query.lower())
-                | Q(id__in=snapshot_ids)
-            )
+        if p.get("feedback_reason_code"):
+            qs = qs.filter(feedback_reason_code=p["feedback_reason_code"])
         if p.get("match_reason"):
             qs = qs.filter(match_reason__icontains=p["match_reason"])
         return qs
+
+    def _transfer_departments(self, request):
+        permissions = user_permission_codes(request.user)
+        departments = m.Department.objects.select_related("parent__parent").filter(
+            level__in=[2, 3]
+        )
+        if "attempt.view_all" in permissions:
+            return departments
+        contact = getattr(request.user, "contact", None)
+        own_department = getattr(contact, "department", None) if contact else None
+        if (
+            not contact
+            or not contact.is_active
+            or contact.contact_level != m.Contact.LEVEL_SECONDARY
+            or not contact.can_delegate
+            or not own_department
+            or own_department.level != 2
+        ):
+            return departments.none()
+        return departments.filter(
+            Q(level=2) | Q(level=3, parent_id=own_department.id)
+        )
 
     @action(detail=True, methods=["post"], url_path="dispatch")
     def dispatch_welink(self, request, pk=None):
@@ -1830,11 +2029,13 @@ class AssignmentAttemptViewSet(PermissionedReadOnlyModelViewSet):
         try:
             attempt = allocate_service.dispatch_attempt(attempt, user=request.user)
         except ValueError as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            return _attempt_mutation_error(exc)
         return Response(
             {
-                "detail": "已通过 WeLink 下发",
-                "attempt": serializers.AssignmentAttemptSerializer(attempt).data,
+                "detail": "已下发至部门",
+                "attempt": serializers.AssignmentAttemptSerializer(
+                    attempt, context={"request": request}
+                ).data,
             }
         )
 
@@ -1872,66 +2073,97 @@ class AssignmentAttemptViewSet(PermissionedReadOnlyModelViewSet):
             }
         )
 
-    @action(detail=True, methods=["post"], url_path="assign-sub-contact")
-    def assign_sub_contact(self, request, pk=None):
+    @action(detail=True, methods=["post"], url_path="transfer")
+    def transfer(self, request, pk=None):
         attempt = self.get_object()
-        sub_contact_id = (
-            request.data.get("sub_contact_id")
-            or request.data.get("sub_contact")
-            or request.data.get("contact_id")
-        )
-        if not sub_contact_id:
+        if not _can_transfer_departments(request.user):
             return Response(
-                {"detail": "sub_contact_id 为必填项"},
+                {"detail": "当前接口人没有部门转派权限"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        invalid_fields = _reject_unknown_body_fields(
+            request, {"target_department_id", "note"}
+        )
+        if invalid_fields:
+            return invalid_fields
+        target_department_id = request.data.get("target_department_id")
+        if not target_department_id:
+            return Response(
+                {"detail": "target_department_id 为必填项"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        sub_contact = m.Contact.objects.filter(pk=sub_contact_id).first()
-        if not sub_contact:
+        target_department = self._transfer_departments(request).filter(
+            pk=target_department_id
+        ).first()
+        if not target_department:
             return Response(
-                {"detail": "三级接口人不存在"}, status=status.HTTP_400_BAD_REQUEST
+                {"detail": "目标部门不存在或不在可转派范围内"},
+                status=status.HTTP_400_BAD_REQUEST,
             )
         try:
-            attempt = allocate_service.assign_sub_contact(
+            attempt = allocate_service.transfer_attempt(
                 attempt,
-                sub_contact,
+                target_department,
                 user=request.user,
                 note=request.data.get("note", ""),
             )
         except ValueError as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(serializers.AssignmentAttemptSerializer(attempt).data)
+            return _attempt_mutation_error(exc)
+        return Response(
+            serializers.AssignmentAttemptSerializer(
+                attempt, context={"request": request}
+            ).data
+        )
 
-    @action(detail=True, methods=["get"], url_path="eligible-sub-contacts")
-    def eligible_sub_contacts(self, request, pk=None):
+    @action(detail=True, methods=["get"], url_path="transfer-options")
+    def transfer_options(self, request, pk=None):
         attempt = self.get_object()
-        if attempt.status not in [
-            m.AssignmentAttempt.STATUS_DISPATCHED_L2,
-            m.AssignmentAttempt.STATUS_ASSIGNED_L3,
-        ]:
+        if not _can_transfer_departments(request.user):
             return Response(
-                {"detail": "当前分配状态不可转派三级接口人"},
+                {"detail": "当前接口人没有部门转派权限"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if attempt.status != m.AssignmentAttempt.STATUS_DISPATCHED:
+            return Response(
+                {"detail": "当前分配状态不可转派"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if not attempt.department_id:
-            return Response(
-                {"detail": "当前分配缺少二级部门"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        contacts = m.Contact.objects.select_related("department").filter(
-            contact_level=m.Contact.LEVEL_TERTIARY,
-            department__parent_id=attempt.department_id,
-            is_active=True,
-        ).order_by("department__name", "name", "id")
-        return Response(serializers.ContactSerializer(contacts, many=True).data)
+        departments = self._transfer_departments(request).order_by("level", "name", "id")
+        return Response(
+            {"results": serializers.DepartmentSerializer(departments, many=True).data}
+        )
+
+    @action(detail=False, methods=["get"], url_path="feedback-reasons")
+    def feedback_reasons(self, request):
+        return Response(
+            {
+                "results": [
+                    {"value": value, "label": label}
+                    for value, label in m.AssignmentAttempt.REJECTION_REASON_CHOICES
+                ]
+            }
+        )
+
+    @action(detail=True, methods=["get"], url_path="handling-events")
+    def handling_events(self, request, pk=None):
+        attempt = self.get_object()
+        payload = serializers.AssignmentAttemptSerializer(
+            attempt, context={"request": request}
+        ).data["handling_events"]
+        return Response({"results": payload})
 
     @action(detail=True, methods=["post"], url_path="confirm-review")
     def confirm_review(self, request, pk=None):
         attempt = self.get_object()
         try:
-            attempt = allocate_service.confirm_review(attempt)
+            attempt = allocate_service.confirm_review(attempt, user=request.user)
         except ValueError as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(serializers.AssignmentAttemptSerializer(attempt).data)
+            return _attempt_mutation_error(exc)
+        return Response(
+            serializers.AssignmentAttemptSerializer(
+                attempt, context={"request": request}
+            ).data
+        )
 
     @action(detail=True, methods=["post"], url_path="cancel")
     def cancel_attempt(self, request, pk=None):
@@ -1943,11 +2175,17 @@ class AssignmentAttemptViewSet(PermissionedReadOnlyModelViewSet):
             )
         try:
             attempt = allocate_service.cancel_attempt(
-                attempt, request.data.get("reason") or "hr_cancelled"
+                attempt,
+                request.data.get("reason") or "hr_cancelled",
+                user=request.user,
             )
         except ValueError as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(serializers.AssignmentAttemptSerializer(attempt).data)
+            return _attempt_mutation_error(exc)
+        return Response(
+            serializers.AssignmentAttemptSerializer(
+                attempt, context={"request": request}
+            ).data
+        )
 
     @action(detail=True, methods=["post"], url_path="cancel-review")
     def cancel_review(self, request, pk=None):
@@ -1959,48 +2197,75 @@ class AssignmentAttemptViewSet(PermissionedReadOnlyModelViewSet):
             )
         try:
             attempt = allocate_service.cancel_attempt(
-                attempt, request.data.get("reason") or "hr_cancelled_review"
+                attempt,
+                request.data.get("reason") or "hr_cancelled_review",
+                user=request.user,
             )
         except ValueError as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(serializers.AssignmentAttemptSerializer(attempt).data)
+            return _attempt_mutation_error(exc)
+        return Response(
+            serializers.AssignmentAttemptSerializer(
+                attempt, context={"request": request}
+            ).data
+        )
 
     @action(detail=True, methods=["post"], url_path="transfer-to-manual")
     def transfer_to_manual(self, request, pk=None):
         attempt = self.get_object()
-        contact_id = request.data.get("contact_id")
-        contact = m.Contact.objects.filter(pk=contact_id, is_active=True).first()
-        if not contact:
-            return Response({"detail": "目标接口人不存在或未启用"}, status=status.HTTP_400_BAD_REQUEST)
-        secondary_contact = None
-        if request.data.get("secondary_contact_id"):
-            secondary_contact = m.Contact.objects.filter(
-                pk=request.data["secondary_contact_id"], is_active=True
-            ).first()
+        invalid_fields = _reject_unknown_body_fields(
+            request, {"target_department_id", "manual_reason"}
+        )
+        if invalid_fields:
+            return invalid_fields
+        target_department = m.Department.objects.select_related("parent__parent").filter(
+            pk=request.data.get("target_department_id"), level__in=[2, 3]
+        ).first()
+        if not target_department:
+            return Response(
+                {"detail": "目标部门不存在或层级无效"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         try:
             manual_attempt = allocate_service.manual_assign(
                 attempt.resume,
-                contact,
+                target_department,
                 user=request.user,
                 manual_reason=request.data.get("manual_reason") or "AI 复核转人工分配",
-                secondary_contact=secondary_contact,
             )
         except ValueError as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(serializers.AssignmentAttemptSerializer(manual_attempt).data)
+            return _attempt_mutation_error(exc)
+        return Response(
+            serializers.AssignmentAttemptSerializer(
+                manual_attempt, context={"request": request}
+            ).data
+        )
 
     @action(detail=True, methods=["post"], url_path="feedback")
     def feedback(self, request, pk=None):
         attempt = self.get_object()
-        result = request.data.get("result") or request.data.get("feedback_result")
-        note = request.data.get("note") or request.data.get("feedback_note") or ""
+        invalid_fields = _reject_unknown_body_fields(
+            request, {"result", "reason_code", "note"}
+        )
+        if invalid_fields:
+            return invalid_fields
+        result = request.data.get("result")
+        note = request.data.get("note") or ""
+        reason_code = request.data.get("reason_code") or ""
         try:
             attempt = allocate_service.submit_feedback(
-                attempt, result, note, user=request.user
+                attempt,
+                result,
+                note,
+                reason_code=reason_code,
+                user=request.user,
             )
         except ValueError as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(serializers.AssignmentAttemptSerializer(attempt).data)
+            return _attempt_mutation_error(exc)
+        return Response(
+            serializers.AssignmentAttemptSerializer(
+                attempt, context={"request": request}
+            ).data
+        )
 
     @action(detail=False, methods=["get"], url_path="export")
     def export_resumes(self, request):
@@ -2065,7 +2330,6 @@ class AgentDispatchDecisionViewSet(PermissionedReadOnlyModelViewSet):
             "evaluated_job",
             "recommended_job",
             "recommended_department",
-            "recommended_contact",
         ).order_by("-created_at")
         p = self.request.query_params
         if p.get("recommendation"):
@@ -2358,24 +2622,10 @@ class AIConnectionSettingsView(APIView):
     permission_code = "settings.manage_ai_connection"
 
     def get(self, request):
-        contacts = m.Contact.objects.filter(is_active=True).select_related("department")
         return Response(
             {
                 "settings": ai_config.list_public_ai_config_items(),
-                "contacts": [
-                    {
-                        "id": contact.id,
-                        "name": contact.name,
-                        "employee_no": contact.employee_no,
-                        "contact_level": contact.contact_level,
-                        "department": contact.department_id,
-                        "department_name": contact.department.name if contact.department else "",
-                        "parent_department": (
-                            contact.department.parent_id if contact.department else None
-                        ),
-                    }
-                    for contact in contacts
-                ],
+                "departments": assignment_department_options(),
             }
         )
 

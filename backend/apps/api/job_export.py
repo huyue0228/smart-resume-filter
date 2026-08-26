@@ -25,7 +25,6 @@ def _job_row(job):
         job.entity,
         hierarchy.primary.name if hierarchy.primary else "",
         hierarchy.secondary.name if hierarchy.secondary else "",
-        hierarchy.tertiary.name if hierarchy.tertiary else "",
         job.category,
         job.public_name,
         "是" if job.is_public else "否",

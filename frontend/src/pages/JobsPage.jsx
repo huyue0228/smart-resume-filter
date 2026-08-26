@@ -58,11 +58,7 @@ export default function JobsPage() {
       return path.filter(Boolean).join(' / ')
     }
     return departments
-      .filter((department) => {
-        if (department.level === 2) return true
-        if (department.level !== 3) return false
-        return departmentsById.get(department.parent)?.level === 2
-      })
+      .filter((department) => department.level === 2)
       .map((department) => ({
         label: pathLabel(department),
         value: department.id,
@@ -97,18 +93,6 @@ export default function JobsPage() {
         param: 'secondary_department_name_in',
         multiple: true,
         options: 'secondary_department_name',
-      },
-      render: (value) => value || '-',
-    },
-    {
-      title: '三级部门',
-      dataIndex: 'tertiary_department_name',
-      width: 140,
-      filter: {
-        type: 'select',
-        param: 'tertiary_department_name_in',
-        multiple: true,
-        options: 'tertiary_department_name',
       },
       render: (value) => value || '-',
     },
@@ -312,9 +296,10 @@ export default function JobsPage() {
         <ProFormText name="job_family" label="岗位族" />
         <ProFormSelect
           name="department"
-          label="所属部门（二级/三级）"
+          label="所属二级部门"
           showSearch
           options={departmentOptions}
+          rules={[{ required: true, message: '请选择所属二级部门' }]}
         />
         <ProFormText name="location" label="工作地点" />
         <ProFormText name="education" label="学历要求" />

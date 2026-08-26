@@ -13,6 +13,7 @@ import {
   Skeleton,
   Space,
   Spin,
+  Table,
   Tag,
   Typography,
   message,
@@ -162,6 +163,101 @@ function EfficiencyStrip({ values = {}, onItemClick }) {
         </div>
       ))}
     </Card>
+  )
+}
+
+function HandlingDurationCard({ title, metric = {} }) {
+  return (
+    <Card size="small" className="analytics-handling-metric">
+      <Typography.Text type="secondary">{title}</Typography.Text>
+      <strong>{formatDuration(metric.avg)}</strong>
+      <Typography.Text type="secondary">
+        中位数 {formatDuration(metric.median)} · P90 {formatDuration(metric.p90)}
+      </Typography.Text>
+      <Typography.Text type="secondary">已完成样本 {formatCount(metric.sample_count)}</Typography.Text>
+    </Card>
+  )
+}
+
+function HandlingSpeedPanel({ value = {} }) {
+  const overall = value.overall || {}
+  const departmentRows = value.departments || []
+  const columns = [
+    {
+      title: '当前接收部门',
+      dataIndex: 'department_name',
+      key: 'department_name',
+      render: (name, row) => (
+        <Space direction="vertical" size={0}>
+          <Typography.Text strong>{name || '-'}</Typography.Text>
+          <Typography.Text type="secondary">{row.primary_department_name || '-'}</Typography.Text>
+        </Space>
+      ),
+    },
+    {
+      title: '平均处理时长',
+      dataIndex: ['processing_hours', 'avg'],
+      key: 'avg',
+      render: formatDuration,
+    },
+    {
+      title: '中位数',
+      dataIndex: ['processing_hours', 'median'],
+      key: 'median',
+      render: formatDuration,
+    },
+    {
+      title: 'P90',
+      dataIndex: ['processing_hours', 'p90'],
+      key: 'p90',
+      render: formatDuration,
+    },
+    {
+      title: '已完成样本',
+      dataIndex: ['processing_hours', 'sample_count'],
+      key: 'sample_count',
+      render: formatCount,
+    },
+    {
+      title: '待处理',
+      dataIndex: 'pending_count',
+      key: 'pending_count',
+      render: formatCount,
+    },
+    {
+      title: '最长待处理',
+      dataIndex: 'max_pending_age_hours',
+      key: 'max_pending_age_hours',
+      render: formatDuration,
+    },
+  ]
+
+  return (
+    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+      <div className="analytics-handling-grid">
+        <HandlingDurationCard title="HR 下发时长" metric={overall.hr_dispatch_hours} />
+        <HandlingDurationCard title="部门处理时长" metric={overall.department_processing_hours} />
+        <HandlingDurationCard title="总反馈时长" metric={overall.total_feedback_hours} />
+        <Card size="small" className="analytics-handling-metric">
+          <Typography.Text type="secondary">当前待处理</Typography.Text>
+          <strong>{formatCount(overall.pending_count)}</strong>
+          <Typography.Text type="secondary">
+            最长已等待 {formatDuration(overall.max_pending_age_hours)}
+          </Typography.Text>
+        </Card>
+      </div>
+      <Card size="small" title="部门处理时效" className="analytics-panel">
+        <Table
+          rowKey="department_id"
+          columns={columns}
+          dataSource={departmentRows}
+          pagination={false}
+          size="small"
+          scroll={{ x: 920 }}
+          locale={{ emptyText: '当前范围暂无部门处理记录' }}
+        />
+      </Card>
+    </Space>
   )
 }
 
@@ -463,6 +559,14 @@ export default function AnalyticsPage() {
                   ? (dimension, label) => openDrilldown(dimension, null, label)
                   : undefined}
               />
+            </section>
+
+            <section>
+              <SectionHeading
+                title="人工处理时效"
+                description="按自然时间统计下发、部门处理和最终反馈速度，系统自动路由不计入人工时长"
+              />
+              <HandlingSpeedPanel value={data.handling_speed} />
             </section>
 
             <section>

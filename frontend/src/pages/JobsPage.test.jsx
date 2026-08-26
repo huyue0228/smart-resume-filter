@@ -65,7 +65,7 @@ vi.mock('../components/SmartDataTable', () => ({
   default: ({ actionRef, columns, toolBarRender }) => {
     mocks.columns = columns
     actionRef.current = {
-      getFilters: () => ({ tertiary_department_name_in: '平台研发组' }),
+      getFilters: () => ({ secondary_department_name_in: '平台部' }),
     }
     return (
       <div>
@@ -106,7 +106,7 @@ describe('JobsPage', () => {
     ).toBe('true')
   })
 
-  it('shows and filters all three department levels', () => {
+  it('shows and filters the primary and secondary department levels', () => {
     render(<JobsPage />)
 
     expect(
@@ -116,11 +116,10 @@ describe('JobsPage', () => {
     ).toEqual([
       ['一级部门', 'primary_department_name_in'],
       ['二级部门', 'secondary_department_name_in'],
-      ['三级部门', 'tertiary_department_name_in'],
     ])
   })
 
-  it('offers valid secondary and tertiary departments with full paths', async () => {
+  it('offers only secondary departments with full paths', async () => {
     mocks.fetchDepartments.mockResolvedValue({
       data: {
         results: [
@@ -136,9 +135,11 @@ describe('JobsPage', () => {
 
     await waitFor(() => expect(mocks.departmentSelectProps?.options).toEqual([
       { label: '技术中心 / 平台部', value: 2 },
-      { label: '技术中心 / 平台部 / 平台研发组', value: 3 },
     ]))
-    expect(mocks.departmentSelectProps.label).toBe('所属部门（二级/三级）')
+    expect(mocks.departmentSelectProps.label).toBe('所属二级部门')
+    expect(mocks.departmentSelectProps.rules).toEqual([
+      { required: true, message: '请选择所属二级部门' },
+    ])
   })
 
   it('downloads all jobs matching the current table filters', async () => {
@@ -147,7 +148,7 @@ describe('JobsPage', () => {
     await userEvent.click(screen.getByRole('button', { name: '下载职位清单' }))
 
     await waitFor(() => expect(mocks.exportJobs).toHaveBeenCalledWith({
-      tertiary_department_name_in: '平台研发组',
+      secondary_department_name_in: '平台部',
     }))
     expect(mocks.downloadBlobFromResponse).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.any(Blob) }),

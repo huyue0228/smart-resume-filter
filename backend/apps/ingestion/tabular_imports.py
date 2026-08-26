@@ -51,7 +51,6 @@ IMPORT_TABLE_SCHEMAS = {
             "招聘主体",
             "一层部门",
             "二层部门",
-            "三级部门",
             "岗位类别",
             "对外发布名称",
             "是否对外发布",
@@ -69,7 +68,7 @@ IMPORT_TABLE_SCHEMAS = {
         label="院校分类",
         filename="院校分类标准模板.xlsx",
         sheet_name="院校分类",
-        headers=("学校", "院校标签", "所在省份"),
+        headers=("学校", "院校标签"),
     ),
     "contacts": TabularImportSchema(
         key="contacts",

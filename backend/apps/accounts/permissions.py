@@ -32,10 +32,9 @@ PERMISSION_TREE = [
         "name": "分配尝试",
         "children": [
             {"code": "attempt.view_all", "name": "查看全部分配"},
-            {"code": "attempt.view_received", "name": "查看本人接收分配"},
-            {"code": "attempt.view_assigned", "name": "查看本人转派分配"},
-            {"code": "attempt.dispatch", "name": "下发二级接口人"},
-            {"code": "attempt.assign_sub_contact", "name": "转派三级接口人"},
+            {"code": "attempt.view_department", "name": "查看所属部门分配"},
+            {"code": "attempt.dispatch", "name": "下发部门"},
+            {"code": "attempt.transfer_department", "name": "转派部门"},
             {"code": "attempt.feedback", "name": "提交反馈"},
             {"code": "attempt.export", "name": "导出简历"},
         ],
@@ -85,6 +84,7 @@ ROLE_PERMISSION_CODES = {
         "department.manage",
         "attempt.view_all",
         "attempt.dispatch",
+        "attempt.transfer_department",
         "attempt.export",
         "pipeline.run",
         "pipeline.view",
@@ -92,12 +92,13 @@ ROLE_PERMISSION_CODES = {
         "settings.manage_config",
     ],
     "二级接口人": [
-        "attempt.view_received",
-        "attempt.assign_sub_contact",
+        "attempt.view_department",
+        "attempt.transfer_department",
+        "attempt.feedback",
         "attempt.export",
     ],
     "三级接口人": [
-        "attempt.view_assigned",
+        "attempt.view_department",
         "attempt.feedback",
         "attempt.export",
     ],
@@ -116,7 +117,7 @@ def all_permission_codes():
     return [child["code"] for module in PERMISSION_TREE for child in module["children"]]
 
 
-def ensure_rbac_defaults():
+def ensure_permission_definitions():
     content_type = ContentType.objects.get_for_model(User)
     permissions = {}
     for module in PERMISSION_TREE:
@@ -127,10 +128,16 @@ def ensure_rbac_defaults():
                 defaults={"name": item["name"]},
             )
             permissions[item["code"]] = permission
+    return permissions
+
+
+def ensure_rbac_defaults():
+    permissions = ensure_permission_definitions()
 
     for role_name, codes in ROLE_PERMISSION_CODES.items():
-        group, _ = Group.objects.get_or_create(name=role_name)
-        group.permissions.set([permissions[code] for code in codes])
+        group, created = Group.objects.get_or_create(name=role_name)
+        if created:
+            group.permissions.set([permissions[code] for code in codes])
 
 
 def user_permission_codes(user):
@@ -142,10 +149,12 @@ def user_permission_codes(user):
         user.get_all_permissions()
     )
     prefix = f"{User._meta.app_label}."
+    known_codes = set(all_permission_codes())
     return {
         permission_code(value[len(prefix):])
         for value in codenames
         if value.startswith(prefix)
+        and permission_code(value[len(prefix):]) in known_codes
     }
 
 
