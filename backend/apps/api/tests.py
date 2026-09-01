@@ -1260,6 +1260,7 @@ class RbacApiTests(TestCase):
                 "model_name": "gpt-test",
                 "api_style": "responses",
                 "base_url": "https://model.internal/v1",
+                "structured_output_mode": "strict_schema",
             },
         ):
             test_response = self.client.post("/api/ai-connection/test/")
@@ -1473,6 +1474,7 @@ class RbacApiTests(TestCase):
                 "model_name": "delegated-model",
                 "api_style": "chat_json",
                 "base_url": "https://api.deepseek.com",
+                "structured_output_mode": "json_compat",
             },
         ):
             test_response = self.client.post("/api/ai-connection/test/")
@@ -1499,12 +1501,24 @@ class RbacApiTests(TestCase):
                 "model_name": "deepseek-v4-pro",
                 "api_style": "chat_json",
                 "base_url": "https://api.deepseek.com",
+                "structured_output_mode": "strict_schema",
             },
         ):
             response = self.client.post("/api/ai-connection/test/")
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.data["ok"])
+        self.assertEqual(response.data["structured_output_mode"], "strict_schema")
+        status_response = self.client.get("/api/ai-connection/")
+        self.assertEqual(
+            status_response.data["structured_output_mode"], "strict_schema"
+        )
+        self.assertEqual(
+            m.Config.objects.get(
+                key=ai_config.AI_CONNECTION_STRUCTURED_OUTPUT_MODE_KEY
+            ).value,
+            "strict_schema",
+        )
         self.assertNotIn("api_key", response.data)
 
     def test_environment_key_never_enables_ai_connection(self):

@@ -2681,7 +2681,9 @@ class AIConnectionTestView(APIView):
     def post(self, request):
         try:
             result = ai_service.test_model_connection()
-            tested_at = ai_config.mark_ai_connection_tested()
+            tested_at = ai_config.mark_ai_connection_tested(
+                structured_output_mode=result["structured_output_mode"]
+            )
         except ai_service.AIServiceError as exc:
             ai_config.invalidate_ai_connection_test()
             return Response({"ok": False, "code": exc.code, "detail": exc.message})

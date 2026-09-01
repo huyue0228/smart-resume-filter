@@ -2,6 +2,16 @@ import { useCallback, useEffect, useState } from 'react'
 import { Alert, AutoComplete, Button, Form, Input, Popconfirm, Select, Space, Tag, Typography, message } from 'antd'
 import { fetchAIConnection, fetchAIModels, testAIConnection, updateAIConnection } from '../../api/services'
 
+const structuredModeMeta = {
+  strict_schema: { color: 'success', label: '严格结构化' },
+  json_compat: { color: 'processing', label: 'JSON 兼容' },
+  legacy_compat: { color: 'warning', label: '结构化能力待重测' },
+}
+
+function getStructuredModeMeta(mode) {
+  return structuredModeMeta[mode] || structuredModeMeta.legacy_compat
+}
+
 export default function AIConnectionTab() {
   const [form] = Form.useForm()
   const [connection, setConnection] = useState(null)
@@ -11,6 +21,7 @@ export default function AIConnectionTab() {
   const [fetchingModels, setFetchingModels] = useState(false)
   const [modelOptions, setModelOptions] = useState([])
   const [testResult, setTestResult] = useState(null)
+  const modeMeta = getStructuredModeMeta(connection?.structured_output_mode)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -80,7 +91,12 @@ export default function AIConnectionTab() {
       const { data } = await testAIConnection()
       setTestResult(data)
       if (data.ok) {
-        setConnection((previous) => ({ ...previous, test_passed: true, tested_at: data.tested_at }))
+        setConnection((previous) => ({
+          ...previous,
+          test_passed: true,
+          tested_at: data.tested_at,
+          structured_output_mode: data.structured_output_mode,
+        }))
         message.success('模型连接测试成功')
       }
       else {
@@ -154,6 +170,7 @@ export default function AIConnectionTab() {
         <Tag color={connection?.test_passed ? 'success' : 'warning'}>
           {connection?.test_passed ? '当前连接已测试通过' : '当前连接尚未测试通过'}
         </Tag>
+        <Tag color={modeMeta.color}>{modeMeta.label}</Tag>
         <Button type="primary" loading={saving} onClick={() => save(false)}>
           保存连接配置
         </Button>
@@ -169,7 +186,9 @@ export default function AIConnectionTab() {
           type={testResult.ok ? 'success' : 'error'}
           showIcon
           message={testResult.detail}
-          description={testResult.ok ? `API 风格：${testResult.api_style}；模型：${testResult.model_name}；地址：${testResult.base_url}` : `错误码：${testResult.code || 'unknown'}`}
+          description={testResult.ok
+            ? `API 风格：${testResult.api_style}；结构化模式：${getStructuredModeMeta(testResult.structured_output_mode).label}；模型：${testResult.model_name}；地址：${testResult.base_url}`
+            : `错误码：${testResult.code || 'unknown'}`}
         />
       )}
       {connection?.tested_at && (
