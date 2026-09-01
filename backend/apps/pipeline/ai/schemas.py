@@ -8,6 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class ExperienceItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     role: str
     period: str
@@ -63,6 +65,8 @@ class DispatchRecommendationOutput(BaseModel):
 
 
 class ResumeScreeningOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     profile: ResumeProfileOutput
     decision: DispatchRecommendationOutput
 

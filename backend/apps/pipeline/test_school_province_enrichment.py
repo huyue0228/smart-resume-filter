@@ -79,6 +79,66 @@ class SchoolProvinceAIServiceTests(TestCase):
 
         self.assertEqual(result, {"北京大学": "北京", "南京大学": "江苏"})
 
+    def test_invalid_school_schema_is_corrected_once(self):
+        create = Mock(
+            side_effect=[
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(content='{"unexpected": []}')
+                        )
+                    ]
+                ),
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(
+                                content='{"schools": [{"name": "北京大学", "province": "北京"}]}'
+                            )
+                        )
+                    ]
+                ),
+            ]
+        )
+        client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+        )
+        model_config = SimpleNamespace(
+            api_style="chat_json",
+            model_name="test-model",
+            base_url="https://model.internal/v1",
+            api_key="",
+        )
+        runtime_config = SimpleNamespace(
+            retry_count=0,
+            retry_backoff_seconds=0,
+            timeout_seconds=30,
+            concurrency=2,
+        )
+        with patch.object(
+            school_province.ai_config,
+            "get_ai_model_config",
+            return_value=model_config,
+        ), patch.object(
+            school_province.ai_config,
+            "get_ai_runtime_config",
+            return_value=runtime_config,
+        ), patch.object(
+            school_province,
+            "_get_openai_client",
+            return_value=client,
+        ), patch.object(
+            school_province.concurrency,
+            "acquire_slot",
+            side_effect=[_Slot(), _Slot()],
+        ):
+            result = school_province.infer_school_provinces(["北京大学"])
+
+        self.assertEqual(result, {"北京大学": "北京"})
+        self.assertEqual(create.call_count, 2)
+        correction = create.call_args_list[1].kwargs["messages"][0]["content"]
+        self.assertIn("schools:missing", correction)
+
 
 class SchoolProvinceTaskTests(TestCase):
     @patch("apps.pipeline.tasks.ai_config.is_ai_available", return_value=True)

@@ -112,6 +112,15 @@ AI_CONNECTION_CONFIG_KEYS = {
 
 AI_CONNECTION_TEST_FINGERPRINT_KEY = "ai_connection_test_fingerprint"
 AI_CONNECTION_TESTED_AT_KEY = "ai_connection_tested_at"
+AI_CONNECTION_STRUCTURED_OUTPUT_MODE_KEY = "ai_connection_structured_output_mode"
+
+STRUCTURED_OUTPUT_MODE_STRICT = "strict_schema"
+STRUCTURED_OUTPUT_MODE_JSON_COMPAT = "json_compat"
+STRUCTURED_OUTPUT_MODE_LEGACY = "legacy_compat"
+STRUCTURED_OUTPUT_MODES = {
+    STRUCTURED_OUTPUT_MODE_STRICT,
+    STRUCTURED_OUTPUT_MODE_JSON_COMPAT,
+}
 
 
 @dataclass(frozen=True)
@@ -246,7 +255,11 @@ def invalidate_ai_connection_test():
     from apps.core import models as m
 
     m.Config.objects.filter(
-        key__in=[AI_CONNECTION_TEST_FINGERPRINT_KEY, AI_CONNECTION_TESTED_AT_KEY]
+        key__in=[
+            AI_CONNECTION_TEST_FINGERPRINT_KEY,
+            AI_CONNECTION_TESTED_AT_KEY,
+            AI_CONNECTION_STRUCTURED_OUTPUT_MODE_KEY,
+        ]
     ).delete()
     # 模型连接失效后不能沿用旧连接下的 Prompt 测试结论。
     from apps.pipeline import prompt_management
@@ -254,9 +267,23 @@ def invalidate_ai_connection_test():
     prompt_management.clear_shared_draft_test()
 
 
-def mark_ai_connection_tested():
+def mark_ai_connection_tested(*, structured_output_mode=None):
     from apps.core import models as m
 
+    if structured_output_mode is not None:
+        if structured_output_mode not in STRUCTURED_OUTPUT_MODES:
+            raise ValueError("结构化输出模式不正确")
+        previous_mode = _connection_value_by_key(
+            AI_CONNECTION_STRUCTURED_OUTPUT_MODE_KEY
+        )
+        m.Config.objects.update_or_create(
+            key=AI_CONNECTION_STRUCTURED_OUTPUT_MODE_KEY,
+            defaults={"value": structured_output_mode},
+        )
+        if previous_mode != structured_output_mode:
+            from apps.pipeline import prompt_management
+
+            prompt_management.clear_shared_draft_test()
     fingerprint = _connection_fingerprint()
     tested_at = timezone.now().isoformat()
     m.Config.objects.update_or_create(
@@ -268,6 +295,26 @@ def mark_ai_connection_tested():
         defaults={"value": tested_at},
     )
     return tested_at
+
+
+def get_structured_output_mode(*, api_style=None):
+    """返回当前连接的运行模式；旧连接沿用升级前对应 API 风格。"""
+    stored = _connection_value_by_key(AI_CONNECTION_STRUCTURED_OUTPUT_MODE_KEY)
+    if stored in STRUCTURED_OUTPUT_MODES:
+        return stored
+    if api_style is None:
+        api_style = _connection_value("api_style") or "chat_json"
+    # 旧版 Responses 已使用 SDK typed parse，Chat 则使用 JSON Object。
+    if api_style == "responses":
+        return STRUCTURED_OUTPUT_MODE_STRICT
+    return STRUCTURED_OUTPUT_MODE_JSON_COMPAT
+
+
+def get_structured_output_status():
+    stored = _connection_value_by_key(AI_CONNECTION_STRUCTURED_OUTPUT_MODE_KEY)
+    if stored in STRUCTURED_OUTPUT_MODES:
+        return stored
+    return STRUCTURED_OUTPUT_MODE_LEGACY
 
 
 def is_ai_connection_tested():
@@ -315,6 +362,7 @@ def get_ai_connection_status():
         "api_key_source": "system_config" if stored_key else "not_configured",
         "test_passed": is_ai_connection_tested(),
         "tested_at": tested_at,
+        "structured_output_mode": get_structured_output_status(),
     }
 
 

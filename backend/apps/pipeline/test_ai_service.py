@@ -448,7 +448,9 @@ class AIResumeScreeningServiceTests(TestCase):
         http_client = Mock()
         client = SimpleNamespace(
             responses=SimpleNamespace(
-                create=Mock(return_value=SimpleNamespace())
+                parse=Mock(
+                    return_value=SimpleNamespace(output_parsed=screening_output())
+                )
             )
         )
 
@@ -462,9 +464,11 @@ class AIResumeScreeningServiceTests(TestCase):
 
     def test_openai_client_is_reused_for_same_worker_connection(self):
         http_client = Mock()
-        create = Mock(return_value=SimpleNamespace())
+        parse = Mock(
+            return_value=SimpleNamespace(output_parsed=screening_output())
+        )
         client = SimpleNamespace(
-            responses=SimpleNamespace(create=create)
+            responses=SimpleNamespace(parse=parse)
         )
 
         with patch.object(service.httpx, "Client", return_value=http_client) as httpx_client, patch(
@@ -475,7 +479,7 @@ class AIResumeScreeningServiceTests(TestCase):
 
         httpx_client.assert_called_once_with(verify=False)
         openai_client.assert_called_once()
-        self.assertEqual(create.call_count, 2)
+        self.assertEqual(parse.call_count, 2)
 
     def test_client_cache_key_tracks_connection_but_not_model_name(self):
         model_config = ai_config.get_ai_model_config()

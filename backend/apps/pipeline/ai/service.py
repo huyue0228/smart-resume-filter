@@ -14,14 +14,11 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone as datetime_timezone
-from email.utils import parsedate_to_datetime
 from typing import Optional
 
 import httpx
 from django.conf import settings
 from django.utils import timezone
-from pydantic import ValidationError
 
 from apps.core import models as m
 from apps.core.departments import secondary_department
@@ -30,6 +27,12 @@ from apps.pipeline import ai_config
 
 from . import concurrency, prompt_harness
 from .schemas import ResumeScreeningOutput
+from .structured_output import (
+    AIServiceError,
+    call_structured_model,
+    probe_structured_output_mode,
+    safe_model_error as _safe_model_error,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -69,83 +72,6 @@ def _sanitize_screening_output(output):
     return ResumeScreeningOutput.model_validate(
         _strip_nul_bytes(output.model_dump())
     )
-
-
-class AIServiceError(Exception):
-    """可持久化到 AgentDispatchDecision 的受控错误。"""
-
-    def __init__(self, code, message, *, profile=None):
-        message = _strip_nul_bytes(str(message))
-        super().__init__(message)
-        self.code = code
-        self.message = message
-        self.profile = profile
-
-
-def _safe_model_error(exc):
-    """第三方 SDK 的原始异常可能带请求地址或鉴权上下文，不能进入审计或日志。"""
-    name = type(exc).__name__.lower()
-    response = getattr(exc, "response", None)
-    status_code = getattr(exc, "status_code", None) or getattr(
-        response, "status_code", None
-    )
-    if "timeout" in name:
-        return "llm_timeout", "模型请求超时，请检查网络、服务状态或超时配置"
-    if status_code in {401, 403} or "authentication" in name or "permission" in name:
-        return "ai_connection_error", "模型认证失败，请检查 API Key 与服务权限"
-    if status_code == 404 or "notfound" in name:
-        return "ai_connection_error", "模型或 API 地址不可用，请检查模型名称和 Base URL"
-    if status_code == 429 or "ratelimit" in name:
-        return "ai_rate_limited", "模型服务限流，请稍后重试或调整并发"
-    if "connection" in name or "connect" in name or "network" in name:
-        return "ai_connection_error", "模型连接失败，请检查 Base URL、网络、代理和证书"
-    return "ai_connection_error", "模型服务调用失败，请通过服务端日志查看错误类型"
-
-
-def _model_failure_kind(exc):
-    """返回并发反馈类型、是否可重试及 Retry-After 秒数。"""
-    response = getattr(exc, "response", None)
-    status_code = getattr(exc, "status_code", None) or getattr(
-        response, "status_code", None
-    )
-    name = type(exc).__name__.lower()
-    retry_after = 0.0
-    headers = getattr(response, "headers", None)
-    if headers:
-        raw_retry_after = headers.get("retry-after")
-        try:
-            retry_after = float(raw_retry_after or 0)
-        except (TypeError, ValueError):
-            try:
-                retry_at = parsedate_to_datetime(raw_retry_after)
-                if retry_at.tzinfo is None:
-                    retry_at = retry_at.replace(tzinfo=datetime_timezone.utc)
-                retry_after = max(
-                    0.0,
-                    (retry_at - datetime.now(datetime_timezone.utc)).total_seconds(),
-                )
-            except (TypeError, ValueError, OverflowError):
-                retry_after = 0.0
-    if status_code == 429 or "ratelimit" in name:
-        return "rate_limit", True, retry_after
-    if (
-        (status_code is not None and int(status_code) >= 500)
-        or "timeout" in name
-        or "connection" in name
-        or "connect" in name
-        or "network" in name
-    ):
-        return "transient", True, retry_after
-    return "neutral", False, retry_after
-
-
-def _release_model_slot(slot, outcome, *, retry_after=0):
-    try:
-        slot.release(outcome, retry_after=retry_after)
-    except concurrency.AIConcurrencyError as exc:
-        raise AIServiceError(
-            "ai_limiter_unavailable", "AI 并发控制器不可用，请检查 Redis"
-        ) from exc
 
 
 def _client_cache_key(model_config, runtime_config):
@@ -218,7 +144,7 @@ atexit.register(close_cached_ai_clients)
 
 
 def test_model_connection():
-    """以最小请求验证管理员保存的模型连接，不记录或返回 API Key。"""
+    """使用真实业务 Schema 验证连接并探测严格/兼容输出能力。"""
     model_config = ai_config.get_ai_model_config()
     runtime_config = ai_config.get_ai_runtime_config()
     try:
@@ -228,20 +154,33 @@ def test_model_connection():
 
     try:
         client = _get_openai_client(OpenAI, model_config, runtime_config)
-        if model_config.api_style == "chat_json":
-            client.chat.completions.create(
-                model=model_config.model_name,
-                messages=[{"role": "user", "content": "Reply with OK."}],
-                max_tokens=4,
-                stream=False,
-            )
-        else:
-            client.responses.create(
-                model=model_config.model_name,
-                input="Reply with OK.",
-                max_output_tokens=4,
-                store=False,
-            )
+        structured_output_mode = probe_structured_output_mode(
+            client=client,
+            model_config=model_config,
+            schema_model=ResumeScreeningOutput,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "这是结构化能力测试，只返回符合指定 Schema 的 JSON。",
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "返回一个最小但完整的测试结果：所有文本可为空，列表可为空，"
+                        "recommendation 使用 review，所有分数使用 0。"
+                    ),
+                },
+            ],
+        )
+    except AIServiceError as exc:
+        logger.warning(
+            "AI connection test failed model=%s api_style=%s code=%s error_type=%s",
+            model_config.model_name,
+            model_config.api_style,
+            exc.code,
+            type(exc.__cause__ or exc).__name__,
+        )
+        raise
     except Exception as exc:  # SDK 供应商异常类型随版本变化，统一输出脱敏摘要
         code, detail = _safe_model_error(exc)
         logger.warning(
@@ -256,6 +195,7 @@ def test_model_connection():
         "model_name": model_config.model_name,
         "api_style": model_config.api_style,
         "base_url": model_config.base_url,
+        "structured_output_mode": structured_output_mode,
     }
 
 
@@ -468,7 +408,6 @@ def _call_model(
     model_config = ai_config.get_ai_model_config(prompt_version=prompt_version)
     runtime_config = ai_config.get_ai_runtime_config()
     try:
-        import openai
         from openai import OpenAI
     except ImportError as exc:
         raise AIServiceError("ai_not_configured", "服务端未安装 OpenAI SDK") from exc
@@ -483,7 +422,6 @@ def _call_model(
     system_with_protocol = prompt_harness.append_structured_output_protocol(
         system, ResumeScreeningOutput
     )
-    attempts = max(1, runtime_config.retry_count + 1)
     try:
         client = _get_openai_client(OpenAI, model_config, runtime_config)
     except Exception as exc:
@@ -496,98 +434,19 @@ def _call_model(
             type(exc).__name__,
         )
         raise AIServiceError(code, message) from exc
-    for index in range(attempts):
-        caught_exc = None
-        try:
-            slot = concurrency.acquire_slot(
-                model_config,
-                runtime_config,
-                run_id=processing_run_id,
-                cancelled=cancelled,
-            )
-        except concurrency.AIConcurrencyError as exc:
-            raise AIServiceError(
-                "ai_limiter_unavailable", "AI 并发控制器不可用或任务已取消"
-            ) from exc
-        try:
-            if model_config.api_style == "chat_json":
-                response = client.chat.completions.create(
-                    model=model_config.model_name,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": system_with_protocol,
-                        },
-                        {"role": "user", "content": user},
-                    ],
-                    response_format={"type": "json_object"},
-                    stream=False,
-                )
-                content = response.choices[0].message.content
-                if not content:
-                    _release_model_slot(slot, "success")
-                    raise AIServiceError(
-                        "ai_invalid_output", "模型未返回 JSON 内容"
-                    )
-                output = ResumeScreeningOutput.model_validate_json(content)
-                _release_model_slot(slot, "success")
-                return output
-
-            response = client.responses.parse(
-                model=model_config.model_name,
-                input=[
-                    {"role": "system", "content": system_with_protocol},
-                    {"role": "user", "content": user},
-                ],
-                text_format=ResumeScreeningOutput,
-                store=False,
-            )
-            if response.output_parsed is None:
-                _release_model_slot(slot, "success")
-                raise AIServiceError("ai_invalid_output", "模型未返回可解析的结构化结果")
-            _release_model_slot(slot, "success")
-            return response.output_parsed
-        except AIServiceError:
-            if not slot.released:
-                _release_model_slot(slot, "neutral")
-            raise
-        except (openai.APITimeoutError,) as exc:
-            caught_exc = exc
-            code, message = "llm_timeout", "模型请求超时，请检查网络、服务状态或超时配置"
-            error_type = type(exc).__name__
-        except (ValidationError, ValueError, TypeError) as exc:
-            _release_model_slot(slot, "success")
-            raise AIServiceError("ai_invalid_output", "AI 返回内容不符合结构化要求") from exc
-        except openai.APIError as exc:
-            caught_exc = exc
-            code, message = _safe_model_error(exc)
-            error_type = type(exc).__name__
-        except Exception as exc:
-            caught_exc = exc
-            code, message = _safe_model_error(exc)
-            error_type = type(exc).__name__
-        failure_kind, retryable, retry_after = _model_failure_kind(caught_exc)
-        _release_model_slot(slot, failure_kind, retry_after=retry_after)
-        if failure_kind == "rate_limit":
-            concurrency.record_rate_limit(processing_run_id)
-        logger.warning(
-            "AI screening call failed model=%s attempt=%s/%s code=%s error_type=%s",
-            model_config.model_name,
-            index + 1,
-            attempts,
-            code,
-            error_type,
-        )
-        if not retryable or index + 1 >= attempts:
-            raise AIServiceError(code, message)
-        concurrency.record_retry(processing_run_id)
-        delay = concurrency.retry_delay(
-            runtime_config,
-            index,
-            retry_after=retry_after,
-        )
-        if delay:
-            time.sleep(delay)
+    return call_structured_model(
+        client=client,
+        model_config=model_config,
+        runtime_config=runtime_config,
+        messages=[
+            {"role": "system", "content": system_with_protocol},
+            {"role": "user", "content": user},
+        ],
+        schema_model=ResumeScreeningOutput,
+        processing_run_id=processing_run_id,
+        cancelled=cancelled,
+        operation="AI screening",
+    )
 
 
 def _validate_specialist_evidence(output, text):
