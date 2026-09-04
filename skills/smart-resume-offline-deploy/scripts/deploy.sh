@@ -23,7 +23,7 @@ COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}"
 IMAGE_TAR="${IMAGE_TAR:-smart-resume-filter-images-amd64.tar}"
 DEPLOY_MODE="${DEPLOY_MODE:-auto}"
 PERSISTENT_SECRET_KEYS=(DJANGO_SECRET_KEY POSTGRES_PASSWORD RESTIC_PASSWORD)
-GENERATED_SECRET_KEYS=("${PERSISTENT_SECRET_KEYS[@]}" USAGE_METRICS_TOKEN)
+GENERATED_SECRET_KEYS=("${PERSISTENT_SECRET_KEYS[@]}" USAGE_METRICS_TOKEN AGENT_KERNEL_TOKEN)
 
 compose() {
   docker compose --project-name "$PROJECT_NAME" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
@@ -201,7 +201,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
   cp .env.example "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   initialize_secret_values
-  echo "已创建 ${ENV_FILE}。静态运行参数已预置，四项密钥已自动生成。"
+  echo "已创建 ${ENV_FILE}。静态运行参数已预置，五项密钥已自动生成。"
   echo "请确认 DJANGO_ALLOWED_HOSTS、生产域名 DNS/证书/HTTPS 反向代理，并确保 BACKUP_TARGET_PATH 对应的外置/异机存储已挂载。"
   echo "前端仅支持 W3 登录。请补齐 OAuth2 必填项并设置 W3_OAUTH2_ENABLED=True；下次执行会在 Docker 变更前校验且不显示密钥。"
   echo "OAuth2 必填键：CLIENT_ID、AUTHORIZE_URL、TOKEN_URL、USERINFO_URL、REDIRECT_URI、EMPLOYEE_NO_FIELD、EMAIL_FIELD、CLIENT_AUTH_METHOD、TIMEOUT_SECONDS、TRANSACTION_TTL_SECONDS（均使用 W3_OAUTH2_ 前缀）。"
@@ -213,6 +213,7 @@ chmod 600 "$ENV_FILE"
 initialize_secret_values
 require_value DJANGO_SECRET_KEY
 require_value USAGE_METRICS_TOKEN
+require_value AGENT_KERNEL_TOKEN
 require_value DJANGO_ALLOWED_HOSTS
 require_value POSTGRES_PASSWORD
 require_value RESTIC_PASSWORD
@@ -258,9 +259,9 @@ if [[ "$DEPLOY_MODE" == "source" ]]; then
   fi
 fi
 
-for service in db redis backend worker ai-worker frontend backup-scheduler; do
+for service in agent-kernel db redis backend worker ai-worker frontend backup-scheduler; do
   if ! compose config --services | grep -Fxq "$service"; then
-    echo "Compose 缺少必需服务：${service}。AI 分配需要 default worker 和 ai-worker 同时运行。"
+    echo "Compose 缺少必需服务：${service}。Agent 处理需要 Kernel、default worker 和 ai-worker 同时运行。"
     exit 1
   fi
 done

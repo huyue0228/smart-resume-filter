@@ -4,7 +4,7 @@ This file gives Codex working context for this repository. The project was origi
 
 ## Project Overview
 
-This is an intelligent resume screening system for campus recruitment. The core candidate workflow is: deduplication and volunteer-order resolution -> resume classification, assignment, and dispatch. School classification, job-demand entry, and department-contact maintenance provide the prerequisite data for assignment; assignment supports both Rule and AI modes.
+This is an intelligent resume screening system for campus recruitment. The core candidate workflow is: deduplication and volunteer-order resolution -> Django Policy Gate -> fixed business references -> Go Agent Kernel screening -> Django validation, assignment, and dispatch. School classification, job-demand entry, and department-contact maintenance provide prerequisite data. New processing tasks do not expose selectable Rule/AI modes.
 
 Tech stack:
 
@@ -14,20 +14,7 @@ Tech stack:
 
 ## Docs Workflow
 
-The four design documents under `docs/` are the source of truth for product and implementation decisions. Before changing backend, frontend, database models, or workflow behavior, read the relevant design document first and keep implementation aligned with it.
-
-Routine bug fixes, UI polish, tests, and internal refactors do not require an automatic documentation sync. Update the design documents only when the change introduces or changes a product requirement, public API contract, database schema, architecture/workflow behavior, deployment process, or when the user explicitly asks for documentation changes. Do not automatically stage, commit, or push code or documentation; only do so when the user explicitly requests it.
-
-When modifying design documents under `docs/`:
-
-1. Read the current related docs before editing; do not rely on memory.
-2. Update the target document, keeping the original requirement intent unless the user explicitly changes it.
-3. Ask the document-sync agent to check and synchronize related wording across `需求描述.md`, `后端设计.md`, `数据库设计.md`, and `前端设计.md`.
-4. Ask the same persistent reviewer agent to review the document changes. Reuse the existing reviewer in the session; only create a new reviewer if the old one is unavailable.
-5. Run `git diff --check -- docs/需求描述.md docs/后端设计.md docs/前端设计.md docs/数据库设计.md` and use `rg` when needed to check for stale wording.
-6. Leave the reviewed documentation changes in the working tree unless the user explicitly asks to stage, commit, or push them.
-
-Do not create additional design documents casually. Prefer updating the four established documents to avoid multi-document drift.
+Do not automatically synchronize the four design documents under `docs/`. Update documentation only when the user explicitly asks for documentation work. Do not automatically stage, commit, or push code or documentation.
 
 ## Common Commands
 
@@ -84,20 +71,20 @@ Use focused verification for the files changed:
 
 ## Pipeline Notes
 
-- Entry point: `backend/apps/pipeline/runner.py`; API submits `ProcessingRun` records through `create_runs()` and workers execute them through `execute_run()`.
-- The `all` order is intentionally `step3`, `step4`, `step1`, `step2`; do not assume numeric order. Step3/Step4 prepare or verify prerequisite data before the candidate flow. A normal resume upload runs `step1`, then `step2`.
+- Entry point: `backend/apps/pipeline/runner.py`; API submits one mode-free `ProcessingRun` through `create_run()` and workers execute it through `execute_run()`.
+- `all` and normal resume processing run `step1`, `step2`, `step3`, `step4` in order: deduplication, Policy Gate, frozen business references, then Agent evaluation.
 - Step implementations live in `backend/apps/pipeline/services/`.
-- `strategies.py` owns deterministic Rule matching. Formal AI screening lives under `backend/apps/pipeline/ai/` and must never fall back to Rule. The only runtime model connection source is the `settings.manage_ai_connection`-protected system settings page; the shared intranet Base URL, selectable API style, model ID and optional access token are stored there without provider/Profile templates. The backend reads OpenAI-compatible `GET /models` for model choices while keeping the field directly editable. AI mode requires a text-extractable PDF.
-- AI Agent screening is a hard-rule-constrained recommendation flow: it only evaluates the candidate's current effective volunteer, never skips volunteer order or school admission rules, and never automatically falls back to Rule after AI failure.
-- AI failures, timeouts, parse failures, invalid output, missing references, and guardrail blocks should be recorded for HR handling. HR chooses retry AI, switch to Rule, manual assignment, or archive handling.
-- Frontend submits one `/api/pipeline/run/` request with a single explicit `mode` (`rule` or `ai`) and optional `scope` via `frontend/src/components/useProcessRunner.jsx`; the backend creates one mode-fixed run and executes it through the sequential Celery orchestration. AI is selectable only while the current full model-connection fingerprint has a successful test.
+- Django owns deterministic admission/capacity/reference policy, final writes, and audit. The independent compiled Go component under `agent-kernel/` owns the model tool loop and has no database or business-write tools. The only runtime model connection source is the `settings.manage_ai_connection`-protected system settings page.
+- Agent screening evaluates only the current effective volunteer and a frozen job/department reference. It never skips volunteer order or admission policy and never falls back to the historical Rule implementation.
+- Agent failures, timeouts, parse failures, invalid output, missing references, and guardrail blocks should be recorded for HR handling. HR chooses retry Agent, manual assignment, or archive handling.
+- Frontend submits one `/api/pipeline/run/` request with a `step` and optional `scope` via `frontend/src/components/useProcessRunner.jsx`; the backend creates one version-pinned Agent run and executes it through the sequential Celery orchestration. New tasks are accepted only while the current model connection and Agent Kernel are ready.
 
 ## API Notes
 
 - Main API code is under `backend/apps/api/`.
 - Standard pagination lives in `backend/apps/api/pagination.py`; list APIs support `page_size` with a max of 500.
 - Routes use DRF `DefaultRouter` for resumes, candidates, jobs, schools, departments, contacts, workflow attempts, agent decisions, and runs.
-- Explicit endpoints include `auth/logout/`, `auth/w3/status/`, `auth/w3/start/`, `auth/w3/callback/`, `auth/w3/complete/`, `me/`, `permissions/`, `import/`, `import/undo/`, and `pipeline/run/`.
+- Explicit endpoints include `auth/logout/`, `auth/w3/status/`, `auth/w3/start/`, `auth/w3/callback/`, `auth/w3/complete/`, `me/`, `permissions/`, `import/`, and `pipeline/run/`. Import undo is removed; candidate bulk deletion is `/api/candidates/bulk-delete/`.
 - `AssignmentAttemptViewSet` has a `dispatch_welink` method with `url_path="dispatch"`. Do not rename it to `dispatch`, because that would override DRF ViewSet dispatch.
 - Resume export and preview helpers return Django `HttpResponse`, not DRF `Response`. Keep zip headers such as `X-Export-Count` / `X-Export-Missing` and preview header `X-Resume-Filename` stable for the frontend.
 - Candidate export, resume direct preview, assignment-attempt scoped preview, and visible-column list filters are covered in `backend/apps/api/tests.py`; keep those tests aligned when changing table columns or query params.
@@ -111,7 +98,7 @@ Use focused verification for the files changed:
 - API wrappers live in `frontend/src/api/`.
 - Layout and permission-code menu filtering live in `frontend/src/layouts/BasicLayout.jsx`.
 - `RoleContext.jsx` holds the current token-backed user, `/api/me/` permissions, roles, contact binding, and data-scope helpers. Do not reintroduce demo role switching.
-- Rule/AI selection is made by both the resume-upload dialog and the resume-processing dialog, and submitted as one explicit mode (`processing_mode` for uploads, `mode` for `/api/pipeline/run/`). Rule is always available; AI is enabled only when the current model connection test is valid. Allocation subpages only filter existing attempts by source.
+- Resume upload and manual processing do not expose a Rule/AI selector. `/api/import/` rejects `processing_mode`, and `/api/pipeline/run/` rejects `mode`/`modes`; historical attempt sources remain readable for audit.
 - Import UI is decentralized through `frontend/src/components/ImportButton.jsx`; there is no standalone import page.
 - Shared table header filters and resizable column wiring live in `frontend/src/components/DataTableControls.jsx` and `frontend/src/components/ResizableHeaderCell.jsx`; reuse them for dense data tables instead of rebuilding per page.
 - PDF preview UI lives in `frontend/src/components/ResumePreview.jsx` and supports direct resume previews and assignment-attempt scoped previews.

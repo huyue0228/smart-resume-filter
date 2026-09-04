@@ -21,7 +21,7 @@ sha256sum -c SHA256SUMS
 bash smart-resume-offline-deploy-skill/scripts/deploy.sh
 ```
 
-首次执行只创建 `.env` 和四项随机密钥后退出；补齐生产域名、反向代理、W3 和备份路径配置后，再次执行同一条部署命令完成镜像导入、初始化和启动。检测到已有安全的 `USAGE_METRICS_TOKEN` 时不会轮换；旧环境缺少该项时只补齐新密钥，不替换其它密钥。
+首次执行只创建 `.env` 和五项随机密钥后退出；补齐生产域名、反向代理、W3 和备份路径配置后，再次执行同一条部署命令完成镜像导入、初始化和启动。检测到已有安全的 `USAGE_METRICS_TOKEN`、`AGENT_KERNEL_TOKEN` 时不会轮换；旧环境缺少其中一项时只补齐新密钥，不替换其它密钥。
 
 启动后必须同时存在 `worker`（消费 `default`）、`ai-worker`（threads 池消费 `ai`）和 `backup-scheduler`（默认每小时备份）；AI 任务只有在两个 worker 都运行时才会被调度和执行。
 

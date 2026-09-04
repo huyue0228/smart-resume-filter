@@ -5,13 +5,14 @@ from datetime import timedelta
 from fractions import Fraction
 
 from django.db import transaction
-from django.db.models import F, Max
+from django.db.models import Count, F, Max
 from django.utils import timezone
 
 from apps.core import models as m
 from apps.core import analytics_scope, system_status
 from apps.core.departments import secondary_department as _secondary_department
 from apps.pipeline import ai_config
+from apps.pipeline.agent_kernel import gateway as agent_gateway
 from apps.pipeline.ai import service as ai_service
 
 from ..cancellation import raise_if_cancel_requested
@@ -46,6 +47,11 @@ AI_ATTENTION_REASON_CODES = {
     "reference_not_found": "ai_reference_invalidated",
     "guardrail_blocked": "ai_reference_invalidated",
     "ai_reference_invalidated": "ai_reference_invalidated",
+    "agent_model_config_unavailable": "ai_connection_error",
+    "agent_kernel_unavailable": "ai_connection_error",
+    "agent_budget_exhausted": "ai_invalid_output",
+    "agent_evidence_invalid": "ai_invalid_output",
+    "agent_invalid_output": "ai_invalid_output",
     "job_responsibility_missing": "job_responsibility_missing",
     "task_execution_error": "ai_connection_error",
 }
@@ -376,6 +382,47 @@ def _select_job_capacity(processing_run, jobs, *, reserve):
         selected.save(update_fields=["used_count"])
     jobs_by_id = {job.id: job for job in jobs}
     return jobs_by_id[selected.job_id], selected
+
+
+def _select_job_for_agent_preparation(processing_run, jobs):
+    """按已占用量和本任务已冻结引用分摊岗位，但不提前消耗 HC。"""
+
+    if not processing_run:
+        return sorted(jobs, key=lambda item: item.id)[0]
+    capacities = list(
+        m.ProcessingRunJobCapacity.objects.select_for_update()
+        .filter(run=processing_run, job_id__in=[job.id for job in jobs])
+        .order_by("job_id")
+    )
+    prepared_counts = {
+        item["prepared_job_id"]: item["count"]
+        for item in processing_run.scope_items.filter(
+            prepared_job_id__in=[job.id for job in jobs],
+            result_type="",
+        )
+        .values("prepared_job_id")
+        .annotate(count=Count("id"))
+    }
+    available = [
+        capacity
+        for capacity in capacities
+        if capacity.capacity > 0
+        and capacity.used_count + prepared_counts.get(capacity.job_id, 0)
+        < capacity.capacity
+    ]
+    if not available:
+        return None
+    selected = min(
+        available,
+        key=lambda item: (
+            Fraction(
+                item.used_count + prepared_counts.get(item.job_id, 0) + 1,
+                item.capacity,
+            ),
+            item.job_id,
+        ),
+    )
+    return {job.id: job for job in jobs}[selected.job_id]
 
 
 def _mapped_classification_reason(mapping, job):
@@ -774,6 +821,13 @@ def _create_agent_decision(workflow, resume, result):
         decision_version=getattr(
             result, "decision_version", versions["decision_version"]
         ),
+        kernel_pin_id=getattr(result, "kernel_pin_id", "") or versions["kernel_pin_id"],
+        kernel_build=getattr(result, "kernel_build", "") or versions["kernel_build"],
+        protocol_version=getattr(result, "protocol_version", "")
+        or versions["protocol_version"],
+        toolset_version=getattr(result, "toolset_version", "")
+        or versions["toolset_version"],
+        safe_trace=getattr(result, "safe_trace", None) or {},
     )
 
 
@@ -784,6 +838,10 @@ def _ai_audit_versions(processing_run=None):
             "model_name": processing_run.model_name,
             "prompt_version": processing_run.prompt_version,
             "decision_version": processing_run.decision_version,
+            "kernel_pin_id": processing_run.pin_id,
+            "kernel_build": processing_run.kernel_build,
+            "protocol_version": processing_run.protocol_version,
+            "toolset_version": processing_run.toolset_version,
         }
     try:
         config = ai_config.get_ai_model_config()
@@ -792,11 +850,19 @@ def _ai_audit_versions(processing_run=None):
             "model_name": "",
             "prompt_version": "resume-screening-v2",
             "decision_version": "decision-v1",
+            "kernel_pin_id": "",
+            "kernel_build": "",
+            "protocol_version": "",
+            "toolset_version": "",
         }
     return {
         "model_name": config.model_name,
         "prompt_version": config.prompt_version,
         "decision_version": config.decision_version,
+        "kernel_pin_id": "",
+        "kernel_build": "",
+        "protocol_version": "",
+        "toolset_version": "",
     }
 
 
@@ -807,6 +873,7 @@ def _create_agent_failure_decision(
     error_code,
     error_message,
     profile=None,
+    safe_trace=None,
 ):
     return m.AgentDispatchDecision.objects.create(
         workflow=workflow,
@@ -827,6 +894,7 @@ def _create_agent_failure_decision(
         risk_flags=[error_code],
         error_code=error_code,
         error_message=error_message,
+        safe_trace=safe_trace or {},
         **_ai_audit_versions(getattr(workflow, "_processing_run", None)),
     )
 
@@ -864,7 +932,7 @@ def _process_ai_recommendation(
     _touch_workflow(workflow, resume, "ai")
     try:
         department = _secondary_department(job.department)
-        result = ai_service.screen_resume(
+        result = agent_gateway.evaluate_resume(
             resume,
             job,
             department=department,
@@ -877,6 +945,7 @@ def _process_ai_recommendation(
             error_code=exc.code,
             error_message=exc.message,
             profile=exc.profile,
+            safe_trace=exc.safe_trace,
         )
         _archive(
             workflow,
@@ -912,11 +981,24 @@ def _apply_ai_result(workflow, resume, *, matched_rule, result):
         except JobMappingError as exc:
             _archive(workflow, _archive_reason_for_mapping_code(exc.code), exc.detail)
             return None
+        evaluated_job = next(
+            (job for job in job_pool if result.job and job.id == result.job.id),
+            None,
+        )
+        if not evaluated_job:
+            _archive(
+                workflow,
+                m.CandidateWorkflow.ARCHIVE_AGENT_NO_RECOMMENDATION,
+                "Agent 评估所用岗位引用已失效",
+            )
+            return None
         selected_job, capacity_reservation = _select_job_capacity(
-            getattr(workflow, "_processing_run", None), job_pool, reserve=True
+            getattr(workflow, "_processing_run", None),
+            [evaluated_job],
+            reserve=True,
         )
         if not selected_job:
-            _save_mapped_classification(resume, job_pool[0], mapping, "ai")
+            _save_mapped_classification(resume, evaluated_job, mapping, "ai")
             _block_current_volunteer(
                 workflow,
                 m.CandidateWorkflow.BLOCK_JOB_HC_EXHAUSTED,
@@ -1206,7 +1288,7 @@ def process_ai_scope_item(run_id, scope_item_id):
         )
     else:
         try:
-            result = ai_service.screen_resume(
+            result = agent_gateway.evaluate_resume(
                 resume,
                 job,
                 department=department,
@@ -1281,6 +1363,7 @@ def process_ai_scope_item(run_id, scope_item_id):
                     error_code=ai_error.code,
                     error_message=ai_error.message,
                     profile=ai_error.profile,
+                    safe_trace=ai_error.safe_trace,
                 )
                 error_message = decision.error_message
             else:
@@ -1375,12 +1458,12 @@ def _create_next_auto_attempt(
 ):
     """为候选人创建下一条自动分配尝试。
 
-    这是 Rule/AI 共用的自动分配入口。共同硬规则先于策略执行：
+    这是 Agent 主流程与历史规则记录续办共用的内部入口。共同硬规则先于策略执行：
     1. 院校准入不通过则直接归档，不进入岗位/专业匹配。
     2. 每次只处理当前有效志愿；收到未通过反馈后，workflow.current_rank 才推进。
     3. 当前志愿必须能匹配岗位和二级部门，才生成尝试。
 
-    AI 只评估当前有效志愿；任何 AI 失败都不会跳志愿或回退 Rule。
+    Agent 只评估当前有效志愿；任何 Agent 失败都不会跳志愿或回退历史规则实现。
     """
     workflow._processing_run = processing_run
     candidate = workflow.candidate
@@ -1613,7 +1696,7 @@ def _prepare_ai_target(resume, processing_run=None):
     except JobMappingError as exc:
         return None, None, exc.code, exc.detail
     _save_mapped_classification(resume, job_pool[0], mapping, "ai")
-    job, _capacity = _select_job_capacity(processing_run, job_pool, reserve=False)
+    job = _select_job_for_agent_preparation(processing_run, job_pool)
     if not job:
         return (
             job_pool[0],
@@ -2410,7 +2493,7 @@ def cancel_attempt(attempt, reason="hr_cancelled", *, user=None):
                 else m.CandidateWorkflow.ARCHIVE_HR_CANCELLED
             ),
             (
-                "HR 已取消 AI 复核/下发建议，可重试 AI、切换 Rule 或手动分配"
+                "HR 已取消 Agent 复核/下发建议，可重试 Agent 或手动分配"
                 if attempt.source == m.AssignmentAttempt.SOURCE_AI
                 else "HR 已取消当前待下发尝试，可重新处理或手动分配"
             ),

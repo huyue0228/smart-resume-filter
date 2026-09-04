@@ -38,12 +38,13 @@ def _strip_nul_bytes(value):
 class AIServiceError(Exception):
     """可持久化到 AgentDispatchDecision 的受控错误。"""
 
-    def __init__(self, code, message, *, profile=None):
+    def __init__(self, code, message, *, profile=None, safe_trace=None):
         message = _strip_nul_bytes(str(message))
         super().__init__(message)
         self.code = code
         self.message = message
         self.profile = profile
+        self.safe_trace = safe_trace or {}
 
 
 class StructuredOutputIssue(Exception):

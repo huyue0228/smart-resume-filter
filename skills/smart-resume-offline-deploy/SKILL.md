@@ -38,9 +38,9 @@ bash skills/smart-resume-offline-deploy/scripts/deploy.sh
 
 若 Skill 随离线包存放在包根目录下一层，则将上面的 `skills/smart-resume-offline-deploy` 改为实际 Skill 目录名。
 
-3. 镜像、端口、worker/OCR、数据库名/用户、备份周期和保留策略已经写入模板。脚本首次运行会创建权限为 `600` 的 `.env`，并自动生成互不复用的 `DJANGO_SECRET_KEY`、`POSTGRES_PASSWORD`、`RESTIC_PASSWORD` 和 `USAGE_METRICS_TOKEN`，密钥不回显。部署人员需把实际域名写入 `DJANGO_ALLOWED_HOSTS`，按下一节完成 DNS、证书和 HTTPS 反向代理，确认异机/外置存储已经挂载到预设的 `/mnt/smart-resume-filter-backups`，并补齐 W3 OAuth2 配置；挂载点不同时只修改 `BACKUP_TARGET_PATH`。
+3. 镜像、端口、worker/OCR、数据库名/用户、备份周期和保留策略已经写入模板。脚本首次运行会创建权限为 `600` 的 `.env`，并自动生成互不复用的 `DJANGO_SECRET_KEY`、`POSTGRES_PASSWORD`、`RESTIC_PASSWORD`、`USAGE_METRICS_TOKEN` 和 `AGENT_KERNEL_TOKEN`，密钥不回显。部署人员需把实际域名写入 `DJANGO_ALLOWED_HOSTS`，按下一节完成 DNS、证书和 HTTPS 反向代理，确认异机/外置存储已经挂载到预设的 `/mnt/smart-resume-filter-backups`，并补齐 W3 OAuth2 配置；挂载点不同时只修改 `BACKUP_TARGET_PATH`。
 4. `DEPLOY_MODE=auto`（默认）在存在 `smart-resume-filter-images-amd64.tar` 时选择离线模式，否则从当前源码构建。可显式指定 `DEPLOY_MODE=offline` 或 `DEPLOY_MODE=source`。
-5. 离线模式要求交付包内的 `docker-compose.yml` 只使用 `image:`，不得保留 `build:`；源码模式使用当前项目的 Compose 构建后端、前端、PostgreSQL、Redis 和备份工具镜像。
+5. 离线模式要求交付包内的 `docker-compose.yml` 只使用 `image:`，不得保留 `build:`；源码模式使用当前项目的 Compose 构建 Agent Kernel、后端、前端、PostgreSQL、Redis 和备份工具镜像。
 6. 首次部署才会执行 `init` 写入基础权限、账号和预置数据。检测到已有部署时，脚本只更新镜像并启动服务，迁移由 backend 自动完成，不会重置管理员在系统设置中维护的配置。
 7. 部署不决定 AI 功能是否启用、模型连接或 API Key。服务启动后，由拥有权限的管理员在「系统设置 → AI 模型连接」配置并测试；不要在部署对话、脚本参数或日志中提供 API Key。
 8. 生产只提供 W3 登录，因此 W3 OAuth2 是可用部署的必要条件。模板中的 `W3_OAUTH2_ENABLED=False` 只是首次生成 `.env` 时的安全占位；正式部署前必须通过安全渠道补齐配置并改为 `True`，同时保持 `DJANGO_DEBUG=False`。部署脚本会在任何 Docker 变更前执行校验，DEBUG 开启、W3 关闭、缺少必填项、端点非 HTTPS、客户端认证方式无效或回调路径不精确均立即停止。本地密码 API 与 Django Admin 路由均已删除；DEBUG 开发令牌不是生产应急入口。

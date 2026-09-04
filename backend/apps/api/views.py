@@ -41,7 +41,6 @@ from apps.core import models as m
 from apps.core import analytics_scope, candidate_summary, system_status
 from apps.core.departments import resolve_department_hierarchy
 from apps.core.name_pinyin import name_to_pinyin
-from apps.ingestion import snapshot
 from apps.ingestion.sources import (
     RESUME_SUBDIR,
     import_files,
@@ -52,6 +51,7 @@ from apps.ingestion.tabular_imports import (
     get_import_table_schema,
 )
 from apps.pipeline import ai_config, cancellation, prompt_management, runner
+from apps.pipeline.agent_kernel import gateway as agent_gateway
 from apps.pipeline.ai import prompt_harness
 from apps.pipeline.tasks import (
     execute_runs_sequence_task,
@@ -548,21 +548,6 @@ class MeView(APIView):
         return Response(serializers.CurrentUserSerializer(request.user).data)
 
 
-class AllocationModeView(APIView):
-    permission_classes = [HasPermissionCode]
-    permission_code = ["pipeline.run", "resume.import"]
-
-    def get(self, request):
-        ai_ready = ai_config.is_ai_available()
-        return Response(
-            {
-                "default_mode": "rule",
-                "available_modes": ai_config.available_allocation_modes(),
-                "ai_ready": ai_ready,
-            }
-        )
-
-
 class ImportView(APIView):
     """数据导入：multipart 上传 4 张表 + 简历包。"""
 
@@ -584,20 +569,13 @@ class ImportView(APIView):
             return Response(
                 {"detail": f"导入失败: {exc}"}, status=status.HTTP_400_BAD_REQUEST
             )
+        if "processing_mode" in request.data:
+            return Response(
+                {"detail": "简历处理内核由系统固定，不接受 processing_mode"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         mode = request.data.get("mode", "incremental")
-        # 含简历数据的上传：先存撤销快照（上传前状态），再导入
         takes_resume = bool(files.get("resume_list") or files.get("resume_package"))
-        processing_mode = None
-        if takes_resume:
-            try:
-                processing_mode = ai_config.validate_allocation_mode(
-                    request.data.get("processing_mode")
-                )
-            except ValueError as exc:
-                return Response(
-                    {"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST
-                )
-            snapshot.take_snapshot(label="上传简历前")
         try:
             counts = import_files(files, mode=mode)
         except Exception as exc:  # noqa: BLE001
@@ -635,10 +613,9 @@ class ImportView(APIView):
                 )
                 school_province_enrichment["status"] = "queue_failed"
         processing_runs = []
-        if takes_resume and candidate_ids:
+        if takes_resume and candidate_ids and agent_gateway.is_agent_ready():
             run = runner.create_run(
                 "resume_process",
-                mode=processing_mode,
                 scope={"candidate_ids": candidate_ids, "source": "resume_import"},
                 created_by=request.user,
             )
@@ -655,13 +632,21 @@ class ImportView(APIView):
                 f"，已提交 {school_province_enrichment['school_count']} 所院校"
                 "省份后台补全"
             )
+        if takes_resume and candidate_ids and not processing_runs:
+            detail += "，Agent 尚未就绪，简历已保留为待处理"
         return Response(
             {
                 "detail": detail,
                 "counts": counts,
                 "warnings": warnings,
-                "undo_available": takes_resume,
                 "school_province_enrichment": school_province_enrichment,
+                "agent_processing": (
+                    "submitted"
+                    if processing_runs
+                    else "pending"
+                    if takes_resume and candidate_ids
+                    else "not_requested"
+                ),
                 "processing_runs": serializers.ProcessingRunSerializer(
                     processing_runs, many=True
                 ).data,
@@ -701,29 +686,6 @@ class ImportTemplateView(APIView):
             f"filename*=UTF-8''{encoded_name}"
         )
         return response
-
-
-class ImportUndoView(APIView):
-    """单级撤销最近一次简历上传（含其处理结果）。"""
-
-    permission_classes = [HasPermissionCode]
-    permission_code = "resume.import"
-
-    def get(self, request):
-        snap = snapshot.latest_snapshot()
-        return Response(
-            {
-                "available": snap is not None,
-                "label": snap.label if snap else "",
-                "created_at": snap.created_at if snap else None,
-            }
-        )
-
-    def post(self, request):
-        ok = snapshot.restore_latest()
-        return Response(
-            {"detail": "已撤销上次上传" if ok else "无可撤销的上传", "ok": ok}
-        )
 
 
 class ResumeViewSet(PermissionedReadOnlyModelViewSet):
@@ -928,6 +890,7 @@ class CandidateViewSet(PermissionedModelViewSet):
         "update": "resume.import",
         "partial_update": "resume.import",
         "destroy": "resume.import",
+        "bulk_delete": "resume.import",
         "export_resumes": ["resume.view", "attempt.export"],
         "export_fields": ["resume.view", "attempt.export"],
         "filter_options": ["resume.view", "attempt.view_department"],
@@ -1153,10 +1116,11 @@ class CandidateViewSet(PermissionedModelViewSet):
     def export_fields(self, request):
         return Response(export_fields_payload())
 
-    def destroy(self, request, *args, **kwargs):
-        """只允许清理尚未产生流程历史的候选人。"""
+    @staticmethod
+    def _delete_candidate(candidate):
+        """删除一个无受保护历史的候选人；返回失败原因或空字符串。"""
+
         with transaction.atomic():
-            candidate = self.get_object()
             candidate = m.Candidate.objects.select_for_update().get(pk=candidate.pk)
             workflow = (
                 m.CandidateWorkflow.objects.select_for_update()
@@ -1182,24 +1146,92 @@ class CandidateViewSet(PermissionedModelViewSet):
                 protected_history.append("处理日志")
 
             if protected_history:
-                return Response(
-                    {
-                        "detail": (
-                            "无法删除候选人：已存在受保护历史（"
-                            f"{'、'.join(protected_history)}）"
-                        )
-                    },
-                    status=status.HTTP_409_CONFLICT,
+                return (
+                    "无法删除候选人：已存在受保护历史（"
+                    f"{'、'.join(protected_history)}）"
                 )
 
             try:
                 candidate.delete()
             except ProtectedError:
-                return Response(
-                    {"detail": "无法删除候选人：已存在受保护的关联记录"},
-                    status=status.HTTP_409_CONFLICT,
-                )
+                return "无法删除候选人：已存在受保护的关联记录"
+        return ""
+
+    def destroy(self, request, *args, **kwargs):
+        """只允许清理尚未产生流程历史的候选人。"""
+
+        detail = self._delete_candidate(self.get_object())
+        if detail:
+            return Response(
+                {"detail": detail},
+                status=status.HTTP_409_CONFLICT,
+            )
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=False, methods=["post"], url_path="bulk-delete")
+    def bulk_delete(self, request):
+        """按冻结候选人 ID 批量删除，逐条返回成功和失败结果。"""
+
+        invalid_fields = _reject_unknown_body_fields(request, {"candidate_ids"})
+        if invalid_fields:
+            return invalid_fields
+        candidate_ids = request.data.get("candidate_ids")
+        valid = (
+            isinstance(candidate_ids, list)
+            and bool(candidate_ids)
+            and len(candidate_ids) <= 500
+            and all(
+                isinstance(item, int) and not isinstance(item, bool) and item > 0
+                for item in candidate_ids
+            )
+        )
+        if not valid:
+            return Response(
+                {"detail": "candidate_ids 必须是最多 500 项的非空正整数数组"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        frozen_ids = list(dict.fromkeys(candidate_ids))
+        visible = {
+            candidate.id: candidate
+            for candidate in self._scope_queryset(self._base_queryset()).filter(
+                id__in=frozen_ids
+            )
+        }
+        results = []
+        deleted = failed = 0
+        for candidate_id in frozen_ids:
+            candidate = visible.get(candidate_id)
+            if not candidate:
+                failed += 1
+                results.append(
+                    {
+                        "candidate_id": candidate_id,
+                        "status": "failed",
+                        "detail": "候选人不存在或无权操作",
+                    }
+                )
+                continue
+            detail = self._delete_candidate(candidate)
+            if detail:
+                failed += 1
+                results.append(
+                    {
+                        "candidate_id": candidate_id,
+                        "status": "failed",
+                        "detail": detail,
+                    }
+                )
+                continue
+            deleted += 1
+            results.append({"candidate_id": candidate_id, "status": "deleted"})
+        return Response(
+            {
+                "total": len(frozen_ids),
+                "deleted": deleted,
+                "failed": failed,
+                "results": results,
+            }
+        )
 
     @action(detail=False, methods=["post"], url_path="bulk-dispatch")
     def bulk_dispatch(self, request):
@@ -2340,9 +2372,9 @@ class AgentDispatchDecisionViewSet(PermissionedReadOnlyModelViewSet):
 
     @action(detail=True, methods=["post"], url_path="retry")
     def retry(self, request, pk=None):
-        if not ai_config.is_ai_available():
+        if not agent_gateway.is_agent_ready():
             return Response(
-                {"detail": "当前模型连接尚未测试成功，不能重试 AI"},
+                {"detail": "Agent Kernel 或模型连接尚未就绪，不能重试"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         decision = self.get_object()
@@ -2350,7 +2382,6 @@ class AgentDispatchDecisionViewSet(PermissionedReadOnlyModelViewSet):
             allocate_service.validate_agent_decision_retry(decision)
             run = runner.create_run(
                 "step2",
-                mode="ai",
                 scope={
                     "candidate_ids": [decision.workflow.candidate_id],
                     "source": "ai_retry",
@@ -2376,7 +2407,7 @@ class ProcessingRunViewSet(PermissionedReadOnlyModelViewSet):
     permission_code = "pipeline.view"
 
     def get_queryset(self):
-        qs = m.ProcessingRun.objects.select_related("created_by", "undone_by").prefetch_related("stages")
+        qs = m.ProcessingRun.objects.select_related("created_by").prefetch_related("stages")
         if self.request.query_params.get("active") == "true":
             qs = qs.filter(status__in=["pending", "running", "waiting_conflict", "cancelling"])
         return qs
@@ -2400,9 +2431,9 @@ class PipelineRunView(APIView):
 
     def post(self, request):
         step = request.data.get("step", "all")
-        if "modes" in request.data:
+        if "mode" in request.data or "modes" in request.data:
             return Response(
-                {"detail": "单次处理只能选择一个 mode，不接受 modes"},
+                {"detail": "处理内核由系统固定，不接受 mode 或 modes"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         scope = request.data.get("scope") or {}
@@ -2469,14 +2500,13 @@ class PipelineRunView(APIView):
                 {"detail": "candidate_filters 必须是对象"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        try:
-            mode = ai_config.validate_allocation_mode(request.data.get("mode"))
-        except ValueError as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        try:
-            run = runner.create_run(
-                step, mode=mode, scope=scope, created_by=request.user
+        if not agent_gateway.is_agent_ready():
+            return Response(
+                {"detail": "Agent Kernel 或模型连接尚未就绪"},
+                status=status.HTTP_409_CONFLICT,
             )
+        try:
+            run = runner.create_run(step, scope=scope, created_by=request.user)
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         runs = [run]

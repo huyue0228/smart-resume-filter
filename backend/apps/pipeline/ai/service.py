@@ -254,6 +254,26 @@ class ScreeningResult:
     model_name: str
     prompt_version: str
     decision_version: str
+    kernel_pin_id: str = ""
+    kernel_build: str = ""
+    protocol_version: str = ""
+    toolset_version: str = ""
+    safe_trace: Optional[dict] = None
+
+
+@dataclass(frozen=True)
+class PreparedScreening:
+    """Django 控制面完成的确定性准备结果。"""
+
+    resume: m.Resume
+    job: m.Job
+    department: Optional[m.Department]
+    profile: m.ResumeProfile
+    checksum: str
+    text: str
+    ocr_used: bool
+    job_context: dict
+    model_config: ai_config.AIModelConfig
 
 
 def _resume_path(resume):
@@ -490,23 +510,17 @@ def _score(output, text):
     return round(max(0.0, min(1.0, confidence)), 4), breakdown
 
 
-def screen_resume(
+def prepare_screening(
     resume,
     job,
     *,
     department=None,
     force=False,
-    processing_run_id=None,
-    cancelled=None,
     prompt_version=None,
 ):
-    """读取当前志愿 PDF，按 Rule 阶段固定引用执行 AI 深度筛选。"""
+    """在 Django 内完成 PDF/OCR、固定引用和画像缓存准备。"""
 
-    # 工作职责是 AI 深度匹配的必需上下文；缺失时不读取 PDF，也不调用模型。
     job_context = _current_job_context(job)
-
-    # 生产链路由 Step3 显式传入冻结部门引用；部门不进入模型提示词，
-    # 也不由模型选择。
     if department is None:
         department = secondary_department(job.department)
 
@@ -534,32 +548,30 @@ def screen_resume(
     profile.parse_error = ""
     profile.parsed_at = timezone.now()
     profile.save()
-
-    # 画像缓存只避免重复 PDF 解析结果失效；每次主动运行仍重新评估当前岗位主数据。
-    # cache_valid 保留为可观测判断，决策级复用由调用方基于版本和引用完成。
     _ = cache_valid
-    try:
-        output = _sanitize_screening_output(
-            _call_model(
-                resume,
-                text,
-                job_context,
-                processing_run_id=processing_run_id,
-                cancelled=cancelled,
-                prompt_version=model_config.prompt_version,
-            )
-        )
-        _validate_specialist_evidence(output, text)
-        confidence, breakdown = _score(output, text)
-    except AIServiceError as exc:
-        if exc.profile is None:
-            exc.profile = profile
-        profile.parse_error = exc.message if exc.code == "ai_invalid_output" else ""
-        profile.save(update_fields=["parse_error", "updated_at"])
-        raise
+    return PreparedScreening(
+        resume=resume,
+        job=job,
+        department=department,
+        profile=profile,
+        checksum=checksum,
+        text=text,
+        ocr_used=ocr_used,
+        job_context=job_context,
+        model_config=model_config,
+    )
+
+
+def complete_screening(prepared, output, *, kernel_metadata=None):
+    """对 Kernel 建议再次校验、计分并持久化画像。"""
+
+    profile = prepared.profile
+    output = _sanitize_screening_output(output)
+    _validate_specialist_evidence(output, prepared.text)
+    confidence, breakdown = _score(output, prepared.text)
 
     data = output.profile
-    # AI 仅提取教育经历供候选人多标签展示；第一/最高学历及准入结论仍由 Step2 固化。
+    # Agent 提取的教育经历只用于展示；学历和院校准入仍由 Policy Gate 固化。
     profile.education_experiences = [item.model_dump() for item in data.educations]
     profile.project_experiences = [item.model_dump() for item in data.projects]
     profile.internship_experiences = [item.model_dump() for item in data.internships]
@@ -571,7 +583,7 @@ def screen_resume(
         dict.fromkeys(
             [
                 *data.risk_flags,
-                *(["ocr_fallback"] if ocr_used else []),
+                *(["ocr_fallback"] if prepared.ocr_used else []),
             ]
         )
     )
@@ -581,15 +593,66 @@ def screen_resume(
     profile.save()
     from apps.pipeline.services.classify_school import sync_candidate_school_tags
 
-    sync_candidate_school_tags(resume.candidate)
+    sync_candidate_school_tags(prepared.resume.candidate)
+    kernel_metadata = kernel_metadata or {}
     return ScreeningResult(
         profile=profile,
         output=output,
-        job=job,
-        department=department,
+        job=prepared.job,
+        department=prepared.department,
         confidence=confidence,
         score_breakdown=breakdown,
-        model_name=model_config.model_name,
-        prompt_version=model_config.prompt_version,
-        decision_version=model_config.decision_version,
+        model_name=prepared.model_config.model_name,
+        prompt_version=prepared.model_config.prompt_version,
+        decision_version=prepared.model_config.decision_version,
+        kernel_pin_id=kernel_metadata.get("pin_id", ""),
+        kernel_build=kernel_metadata.get("kernel_build", ""),
+        protocol_version=kernel_metadata.get("protocol_version", ""),
+        toolset_version=kernel_metadata.get("toolset_version", ""),
+        safe_trace=kernel_metadata.get("safe_trace"),
     )
+
+
+def mark_screening_error(prepared, exc):
+    """把受控错误关联到画像，供调用方生成可审计失败决策。"""
+
+    if exc.profile is None:
+        exc.profile = prepared.profile
+    prepared.profile.parse_error = (
+        exc.message if exc.code in {"ai_invalid_output", "agent_invalid_output"} else ""
+    )
+    prepared.profile.save(update_fields=["parse_error", "updated_at"])
+
+
+def screen_resume(
+    resume,
+    job,
+    *,
+    department=None,
+    force=False,
+    processing_run_id=None,
+    cancelled=None,
+    prompt_version=None,
+):
+    """兼容适配器：在 Django 进程内完成一次受控模型评估。"""
+
+    prepared = prepare_screening(
+        resume,
+        job,
+        department=department,
+        force=force,
+        prompt_version=prompt_version,
+    )
+    try:
+        output = _call_model(
+            resume,
+            prepared.text,
+            prepared.job_context,
+            processing_run_id=processing_run_id,
+            cancelled=cancelled,
+            prompt_version=prepared.model_config.prompt_version,
+        )
+        return complete_screening(prepared, output)
+    except AIServiceError as exc:
+        mark_screening_error(prepared, exc)
+        raise

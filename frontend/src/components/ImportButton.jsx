@@ -2,7 +2,6 @@ import { useState } from 'react'
 import { Modal, Upload, Radio, Button, Space, Alert, message } from 'antd'
 import { DownloadOutlined, InboxOutlined, ImportOutlined } from '@ant-design/icons'
 import { downloadImportTemplate, importData } from '../api/services'
-import AllocationModeToggle from './AllocationModeToggle'
 import { downloadBlobFromResponse } from '../utils/download'
 
 const { Dragger } = Upload
@@ -18,16 +17,12 @@ export default function ImportButton({
   buttonText = '导入',
   title,
   onDone,
-  selectProcessingMode = false,
-  aiReady = false,
-  onBeforeOpen,
   templateType,
   templateFilename = '标准导入模板.xlsx',
 }) {
   const [open, setOpen] = useState(false)
   const [files, setFiles] = useState({})
   const [mode, setMode] = useState('incremental')
-  const [processingMode, setProcessingMode] = useState('rule')
   const [loading, setLoading] = useState(false)
   const [templateLoading, setTemplateLoading] = useState(false)
   const [result, setResult] = useState('')
@@ -35,7 +30,6 @@ export default function ImportButton({
   const reset = () => {
     setFiles({})
     setMode('incremental')
-    setProcessingMode('rule')
     setResult('')
   }
 
@@ -50,7 +44,6 @@ export default function ImportButton({
     const formData = new FormData()
     picked.forEach((f) => formData.append(f.key, files[f.key]))
     formData.append('mode', mode)
-    if (selectProcessingMode) formData.append('processing_mode', processingMode)
 
     setLoading(true)
     setResult('')
@@ -89,11 +82,7 @@ export default function ImportButton({
       <Button
         type="primary"
         icon={<ImportOutlined />}
-        onClick={async () => {
-          await onBeforeOpen?.()
-          setProcessingMode('rule')
-          setOpen(true)
-        }}
+        onClick={() => setOpen(true)}
       >
         {buttonText}
       </Button>
@@ -162,26 +151,6 @@ export default function ImportButton({
               <Radio value="replace">清空重导</Radio>
             </Radio.Group>
           </div>
-
-          {selectProcessingMode && (
-            <div>
-              分配模式：
-              <AllocationModeToggle
-                className="srf-allocation-mode-toggle--inline"
-                value={processingMode}
-                aiReady={aiReady}
-                onChange={setProcessingMode}
-              />
-              {!aiReady && (
-                <Alert
-                  type="info"
-                  showIcon
-                  message="AI 模型连接尚未测试成功，本次只能使用 Rule。"
-                  style={{ marginTop: 12 }}
-                />
-              )}
-            </div>
-          )}
 
           {result && <Alert type="success" showIcon message={result} />}
         </Space>

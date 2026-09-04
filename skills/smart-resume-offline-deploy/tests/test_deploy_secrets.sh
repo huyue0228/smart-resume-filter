@@ -31,7 +31,7 @@ if [[ "${1:-}" == "volume" && "${2:-}" == "ls" ]]; then
   exit 0
 fi
 if [[ "${1:-}" == "compose" && "$*" == *"config --services"* ]]; then
-  printf 'db\nredis\nbackend\nworker\nai-worker\nfrontend\nbackup-scheduler\n'
+  printf 'agent-kernel\ndb\nredis\nbackend\nworker\nai-worker\nfrontend\nbackup-scheduler\n'
   exit 0
 fi
 
@@ -76,7 +76,7 @@ if ! run_deploy 1 "$first_output"; then
 fi
 
 secret_values=()
-for key in DJANGO_SECRET_KEY POSTGRES_PASSWORD RESTIC_PASSWORD USAGE_METRICS_TOKEN; do
+for key in DJANGO_SECRET_KEY POSTGRES_PASSWORD RESTIC_PASSWORD USAGE_METRICS_TOKEN AGENT_KERNEL_TOKEN; do
   value="$(env_value "${PACKAGE_ROOT}/.env" "$key")"
   assert_random_secret "$key" "$value"
   grep -Fq "$value" "$first_output" && {
@@ -137,6 +137,8 @@ if ! run_deploy 2 "$upgrade_output" FAKE_EXISTING_RESOURCES=1; then
 fi
 usage_token="$(env_value "${PACKAGE_ROOT}/.env" USAGE_METRICS_TOKEN)"
 assert_random_secret USAGE_METRICS_TOKEN "$usage_token"
+kernel_token="$(env_value "${PACKAGE_ROOT}/.env" AGENT_KERNEL_TOKEN)"
+assert_random_secret AGENT_KERNEL_TOKEN "$kernel_token"
 for existing_pair in \
   "DJANGO_SECRET_KEY=existing-django-secret" \
   "POSTGRES_PASSWORD=existing-postgres-secret" \
@@ -159,6 +161,10 @@ fi
   echo "失败：已有 USAGE_METRICS_TOKEN 被无故轮换。"
   exit 1
 }
+[[ "$(env_value "${PACKAGE_ROOT}/.env" AGENT_KERNEL_TOKEN)" == "$kernel_token" ]] || {
+  echo "失败：已有 AGENT_KERNEL_TOKEN 被无故轮换。"
+  exit 1
+}
 
 sed 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=auto-generate-on-first-deploy/' \
   "${PACKAGE_ROOT}/.env" > "${PACKAGE_ROOT}/.env.invalid"
@@ -175,6 +181,10 @@ grep -Fq "请恢复原 .env" "$blocked_output" || {
 }
 [[ "$(env_value "${PACKAGE_ROOT}/.env" USAGE_METRICS_TOKEN)" == "$usage_token" ]] || {
   echo "失败：阻断路径修改了已有 USAGE_METRICS_TOKEN。"
+  exit 1
+}
+[[ "$(env_value "${PACKAGE_ROOT}/.env" AGENT_KERNEL_TOKEN)" == "$kernel_token" ]] || {
+  echo "失败：阻断路径修改了已有 AGENT_KERNEL_TOKEN。"
   exit 1
 }
 

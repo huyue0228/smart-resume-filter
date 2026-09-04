@@ -31,8 +31,26 @@ x-backend-env: &backend-env
   RESUME_OCR_DPI: ${RESUME_OCR_DPI:-200}
   RESUME_OCR_TIMEOUT_SECONDS: ${RESUME_OCR_TIMEOUT_SECONDS:-120}
   RESUME_OCR_CONCURRENCY: ${RESUME_OCR_CONCURRENCY:-2}
+  AGENT_KERNEL_MODE: remote
+  AGENT_KERNEL_URL: http://agent-kernel:8090
+  AGENT_KERNEL_TOKEN: ${AGENT_KERNEL_TOKEN:?Set AGENT_KERNEL_TOKEN in .env}
+  AGENT_KERNEL_BUILD: ${APP_VERSION:-latest}
+  AGENT_KERNEL_MODEL_INSECURE_SKIP_VERIFY: ${AGENT_KERNEL_MODEL_INSECURE_SKIP_VERIFY:-False}
 
 services:
+  agent-kernel:
+    image: smart-resume-filter-agent-kernel:${APP_VERSION:-latest}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    environment:
+      AGENT_KERNEL_ADDRESS: :8090
+      AGENT_KERNEL_TOKEN: ${AGENT_KERNEL_TOKEN:?Set AGENT_KERNEL_TOKEN in .env}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8090/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
   db:
     image: smart-resume-filter-postgres:${POSTGRES_VERSION:-16}
     platform: ${DOCKER_PLATFORM:-linux/amd64}
@@ -74,6 +92,8 @@ services:
     volumes:
       - media_data:/app/media
     depends_on:
+      agent-kernel:
+        condition: service_healthy
       db:
         condition: service_healthy
       redis:
@@ -111,6 +131,8 @@ services:
     volumes:
       - media_data:/app/media
     depends_on:
+      agent-kernel:
+        condition: service_healthy
       backend:
         condition: service_healthy
       redis:

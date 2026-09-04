@@ -1,17 +1,13 @@
 import { Checkbox, Modal, Space, Typography } from 'antd'
-import AllocationModeToggle from '../../components/AllocationModeToggle'
 
 export default function ResumeProcessModal({
   open,
   processing,
-  allocationAvailability,
-  selectedMode,
   processCurrentSelected,
   processCandidateCount,
   processStatusSelection,
   statusOptions,
   onCurrentSelectedChange,
-  onModeChange,
   onStatusChange,
   onConfirm,
   onCancel,
@@ -24,10 +20,7 @@ export default function ResumeProcessModal({
       cancelText="取消"
       confirmLoading={processing}
       okButtonProps={{
-        disabled: (
-          (!processCurrentSelected && !processStatusSelection.length)
-          || (selectedMode === 'ai' && !allocationAvailability.ai_ready)
-        ),
+        disabled: !processCurrentSelected && !processStatusSelection.length,
       }}
       onOk={onConfirm}
       onCancel={onCancel}
@@ -36,17 +29,9 @@ export default function ResumeProcessModal({
         <Typography.Text>
           选择当前勾选的候选人，或按简历状态重新处理。两种范围互斥，系统会保留历史分配与反馈记录。
         </Typography.Text>
-        <Space direction="vertical" size={6}>
-          <Typography.Text strong>分配模式</Typography.Text>
-          <AllocationModeToggle
-            value={selectedMode}
-            aiReady={allocationAvailability.ai_ready}
-            onChange={onModeChange}
-          />
-          {!allocationAvailability.ai_ready && (
-            <Typography.Text type="secondary">AI 当前不可用，本次只能选择 Rule。</Typography.Text>
-          )}
-        </Space>
+        <Typography.Text type="secondary">
+          系统将使用 Agent Kernel 处理；确定性业务约束由后端统一校验。
+        </Typography.Text>
         <Checkbox
           checked={processCurrentSelected}
           disabled={!processCandidateCount}

@@ -16,6 +16,7 @@ from apps.core.models import (
     ProcessingRunStage,
 )
 from apps.pipeline import ai_config
+from apps.pipeline.agent_kernel.contracts import build_runtime_pin
 
 from .cancellation import RunCancelled, raise_if_cancel_requested
 from .services import allocate, dedup
@@ -28,15 +29,15 @@ STEP_FUNCS = {
     "step3": lambda mode, scope, run: allocate.run_allocation_precheck(
         scope, mode, processing_run=run
     ),
-    "step4": lambda mode, scope, run: "AI 深度筛选由候选人任务执行",
+    "step4": lambda mode, scope, run: "Agent Kernel 筛选由候选人任务执行",
 }
 
 RESUME_PROCESS_STEP = "resume_process"
 STAGE_LABELS = {
     "step1": "查重与志愿排序",
     "step2": "院校分类与学历/院校准入",
-    "step3": "岗位与分配前置检查",
-    "step4": "AI 深度筛选与分配",
+    "step3": "Policy Gate 与固定业务引用",
+    "step4": "Agent Kernel 证据化筛选与分配",
 }
 
 STEP_ORDER = ["step1", "step2", "step3", "step4"]
@@ -65,19 +66,15 @@ def _scope_summary(scope, candidate_ids):
     return summary
 
 
-def _stage_steps(step, mode):
+def _stage_steps(step):
     if step == RESUME_PROCESS_STEP:
-        steps = ["step1", "step2", "step3"]
-        return [*steps, "step4"] if mode == "ai" else steps
+        return ["step1", "step2", "step3", "step4"]
     if step == "all":
-        return STEP_ORDER if mode == "ai" else STEP_ORDER[:-1]
+        return STEP_ORDER
     if step == "step2":
-        steps = ["step2", "step3"]
-        return [*steps, "step4"] if mode == "ai" else steps
-    if step == "step3" and mode == "ai":
+        return ["step2", "step3", "step4"]
+    if step == "step3":
         return ["step3", "step4"]
-    if step == "step4" and mode != "ai":
-        raise ValueError("Step4 仅允许在 AI 模式运行")
     return [step]
 
 
@@ -90,23 +87,28 @@ def _job_hc_coefficient():
 
 
 @transaction.atomic
-def create_run(step, mode="rule", scope=None, created_by=None):
+def create_run(step, scope=None, created_by=None):
     if step not in {"all", RESUME_PROCESS_STEP} and step not in STEP_FUNCS:
         raise ValueError(f"未知步骤: {step}")
-    if mode not in ["rule", "ai"]:
-        raise ValueError(f"未知模式: {mode}")
+    mode = "ai"  # 数据库存量值保持兼容；新任务不存在可选运行模式。
     scope = deepcopy(scope or {})
     candidate_ids = _candidate_ids_for_run(step, scope)
     # candidate_ids 保存在范围明细表；scope 只保留触发时的可审计筛选快照。
     scope.pop("candidate_ids", None)
-    versions = {}
-    if mode == "ai":
-        config = ai_config.get_ai_model_config()
-        versions = {
-            "model_name": config.model_name,
-            "prompt_version": config.prompt_version,
-            "decision_version": config.decision_version,
-        }
+    config = ai_config.get_ai_model_config()
+    pin = build_runtime_pin(config)
+    versions = {
+        "model_name": config.model_name,
+        "prompt_version": config.prompt_version,
+        "decision_version": config.decision_version,
+        "kernel_build": pin.kernel_build,
+        "protocol_version": pin.protocol_version,
+        "toolset_version": pin.toolset_version,
+        "result_schema_version": pin.result_schema_version,
+        "policy_version": pin.policy_version,
+        "model_config_revision": pin.model_config_revision,
+        "pin_id": pin.pin_id,
+    }
     coefficient = _job_hc_coefficient()
     run = ProcessingRun.objects.create(
         step=step,
@@ -158,7 +160,7 @@ def create_run(step, mode="rule", scope=None, created_by=None):
                 step=stage_step,
                 label=STAGE_LABELS[stage_step],
             )
-            for index, stage_step in enumerate(_stage_steps(step, mode), start=1)
+            for index, stage_step in enumerate(_stage_steps(step), start=1)
         ]
     )
     return run
@@ -222,7 +224,7 @@ AI_SCOPE_TERMINAL_STATUSES = [
 
 
 def prepare_ai_stage(run, scope):
-    """初始化 Step4；Step2/Step3 已完成院校准入并冻结 Rule 引用。"""
+    """初始化 Step4；Step2/Step3 已完成 Policy Gate 并冻结业务引用。"""
     raise_if_cancel_requested(run)
     stage = run.stages.get(step="step4")
     now = timezone.now()
@@ -492,7 +494,7 @@ def execute_run(run_id):
     async_ai_scheduled = False
     try:
         messages = []
-        for stage in _stage_steps(step, mode):
+        for stage in _stage_steps(step):
             if stage == "step4" and mode == "ai":
                 prepare_ai_stage(run, scope)
                 if settings.CELERY_TASK_ALWAYS_EAGER:
@@ -507,7 +509,7 @@ def execute_run(run_id):
         if async_ai_scheduled:
             run.refresh_from_db()
             return run
-        if mode == "ai" and "step4" in _stage_steps(step, mode):
+        if mode == "ai" and "step4" in _stage_steps(step):
             run.refresh_from_db()
             return run
         message = " | ".join(messages)

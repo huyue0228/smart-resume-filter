@@ -101,9 +101,6 @@ export function restoreAIPromptVersion(version, lockVersion) {
     { lock_version: lockVersion },
   )
 }
-export function fetchAllocationMode() {
-  return client.get('/allocation-mode/')
-}
 export function fetchSchoolTagRules(params) {
   return client.get('/school-tag-rules/', { params })
 }
@@ -169,14 +166,6 @@ export function downloadImportTemplate(templateType) {
     responseType: 'blob',
   })
 }
-// 撤销（单级）：GET 查状态，POST 执行
-export function fetchUndoStatus() {
-  return client.get('/import/undo/')
-}
-export function undoLastImport() {
-  return client.post('/import/undo/')
-}
-
 // ---- Resumes ----
 // GET /api/resumes/  DRF paginated { count, results: [...] }
 export function fetchResumes(params) {
@@ -210,6 +199,9 @@ export function fetchCandidateExportFields() {
 }
 export function deleteCandidate(id) {
   return client.delete(`/candidates/${id}/`)
+}
+export function bulkDeleteCandidates(candidateIds) {
+  return client.post('/candidates/bulk-delete/', { candidate_ids: candidateIds })
 }
 export function exportCandidates(ids, params) {
   return client.get('/candidates/export/', {
@@ -267,7 +259,7 @@ export function deleteContact(id) {
 }
 
 // ---- Pipeline ----
-// POST /api/pipeline/run/  body { step, mode, scope }; mode is selected per run
+// POST /api/pipeline/run/  body { step, scope }; 执行内核由后端固定
 // returns { id, step, mode, status, message }
 export function runPipeline(body) {
   return client.post('/pipeline/run/', body)

@@ -100,7 +100,6 @@ const roleState = vi.hoisted(() => ({
   isSecondaryContact: false,
 }))
 const runProcess = vi.hoisted(() => vi.fn())
-const fetchAllocationMode = vi.hoisted(() => vi.fn())
 
 vi.mock('@ant-design/pro-components', () => ({
   PageContainer: ({ children }) => <div>{children}</div>,
@@ -233,18 +232,16 @@ vi.mock('../components/SmartDataTable', () => ({
 
 vi.mock('../api/services', () => ({
   deleteCandidate: vi.fn(),
+  bulkDeleteCandidates: vi.fn(),
   exportCandidates: vi.fn(),
   fetchCandidates: vi.fn(),
   fetchCandidateFilterOptions: vi.fn(),
   fetchCandidateExportFields: vi.fn(),
-  fetchUndoStatus: vi.fn(),
-  undoLastImport: vi.fn(),
   fetchContacts: vi.fn(),
   fetchManualAssignmentOptions: vi.fn(),
   manualAssignResume: vi.fn(),
   fetchAgentDecisions: vi.fn().mockResolvedValue({ data: { results: [] } }),
   retryAgentDecision: vi.fn(),
-  fetchAllocationMode,
   dispatchAllocation: vi.fn(),
   confirmReviewAllocation: vi.fn(),
   cancelAllocation: vi.fn(),
@@ -296,10 +293,6 @@ describe('ResumesPage detail', () => {
     roleState.isSecondaryContact = false
     runProcess.mockReset()
     runProcess.mockResolvedValue({ success: true })
-    fetchAllocationMode.mockReset()
-    fetchAllocationMode.mockResolvedValue({
-      data: { default_mode: 'rule', available_modes: ['rule'], ai_ready: false },
-    })
     fetchCandidateExportFields.mockReset()
     fetchCandidateExportFields.mockResolvedValue({ data: exportCatalog })
     exportCandidates.mockReset()
@@ -679,10 +672,9 @@ describe('ResumesPage detail', () => {
     await userEvent.click(screen.getByRole('button', { name: '开始处理' }))
 
     await waitFor(() => expect(runProcess).toHaveBeenCalledWith(
-      [{ step: 'step2', label: '院校分类 → Rule 前检 → AI 深度筛选' }],
-      expect.any(String),
+      [{ step: 'step2', label: '院校准入 → 固定业务引用 → Agent 筛选' }],
+      '正在提交 Agent 简历处理任务',
       {
-        mode: 'rule',
         scope: {
           candidate_ids: [1, 2],
           force_reprocess: true,
@@ -706,10 +698,9 @@ describe('ResumesPage detail', () => {
     await userEvent.click(screen.getByRole('button', { name: '开始处理' }))
 
     await waitFor(() => expect(runProcess).toHaveBeenCalledWith(
-      [{ step: 'step2', label: '院校分类 → Rule 前检 → AI 深度筛选' }],
-      expect.any(String),
+      [{ step: 'step2', label: '院校准入 → 固定业务引用 → Agent 筛选' }],
+      '正在提交 Agent 简历处理任务',
       {
-        mode: 'rule',
         scope: {
           system_statuses: ['screening_passed'],
           candidate_filters: {
@@ -732,10 +723,9 @@ describe('ResumesPage detail', () => {
     await userEvent.click(screen.getByRole('button', { name: '开始处理' }))
 
     await waitFor(() => expect(runProcess).toHaveBeenCalledWith(
-      [{ step: 'step2', label: '院校分类 → Rule 前检 → AI 深度筛选' }],
-      expect.any(String),
+      [{ step: 'step2', label: '院校准入 → 固定业务引用 → Agent 筛选' }],
+      '正在提交 Agent 简历处理任务',
       {
-        mode: 'rule',
         scope: {
           system_statuses: ['raw'],
           candidate_filters: {
@@ -747,23 +737,20 @@ describe('ResumesPage detail', () => {
     ))
   })
 
-  it('allows selecting AI per processing run only when the connection is ready', async () => {
+  it('uses the fixed Agent Kernel without a client-side mode selector', async () => {
     roleState.permissions = new Set(['pipeline.run'])
-    fetchAllocationMode.mockResolvedValue({
-      data: { default_mode: 'rule', available_modes: ['rule', 'ai'], ai_ready: true },
-    })
     render(<MemoryRouter><ResumesPage /></MemoryRouter>)
 
     await userEvent.click(screen.getByRole('button', { name: /处理简历/ }))
-    await userEvent.click(await screen.findByText('AI'))
+    expect(screen.getByText(/系统将使用 Agent Kernel/)).not.toBeNull()
+    expect(screen.queryByRole('radio')).toBeNull()
     await userEvent.click(screen.getByRole('checkbox', { name: '待处理' }))
     await userEvent.click(screen.getByRole('button', { name: '开始处理' }))
 
     await waitFor(() => expect(runProcess).toHaveBeenCalledWith(
-      [{ step: 'step2', label: '院校分类 → Rule 前检 → AI 深度筛选' }],
-      '正在重新处理简历（AI）',
+      [{ step: 'step2', label: '院校准入 → 固定业务引用 → Agent 筛选' }],
+      '正在提交 Agent 简历处理任务',
       {
-        mode: 'ai',
         scope: {
           system_statuses: ['raw'],
           candidate_filters: {},

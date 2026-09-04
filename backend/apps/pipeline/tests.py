@@ -2,6 +2,7 @@ from unittest.mock import patch
 from types import SimpleNamespace
 
 from django.test import TestCase
+from django.db import transaction
 from django.db.models.deletion import ProtectedError
 from django.utils import timezone
 
@@ -108,11 +109,10 @@ class AllocationDesignContractTests(TestCase):
         with self.assertRaisesRegex(ValueError, "岗位必须绑定二级部门"):
             self.job.save(update_fields=["department"])
 
-    def test_resume_process_freezes_scope_and_exposes_rule_first_stages(self):
+    def test_resume_process_freezes_scope_and_exposes_agent_stages(self):
         user = User.objects.create_user(username="hr-run-owner", password="pass")
         run = runner.create_run(
             "resume_process",
-            mode="rule",
             scope={"candidate_ids": [self.candidate.id], "source": "resume_import"},
             created_by=user,
         )
@@ -124,10 +124,14 @@ class AllocationDesignContractTests(TestCase):
         )
         self.assertEqual(
             list(run.stages.values_list("step", flat=True)),
-            ["step1", "step2", "step3"],
+            ["step1", "step2", "step3", "step4"],
         )
 
-        runner.execute_run(run.id)
+        with patch(
+            "apps.pipeline.services.allocate.agent_gateway.evaluate_resume",
+            return_value=self._ai_result(),
+        ):
+            runner.execute_run(run.id)
 
         run.refresh_from_db()
         self.assertEqual(run.status, "success")
@@ -135,27 +139,20 @@ class AllocationDesignContractTests(TestCase):
         self.assertTrue(run.last_heartbeat_at)
         self.assertEqual(
             list(run.stages.values_list("status", flat=True)),
-            ["success", "success", "success"],
+            ["success", "success", "success", "success"],
         )
 
-    def test_explicit_rule_run_creates_one_run(self):
-        run = runner.create_run(
-            "step2",
-            mode="rule",
-            scope={"candidate_ids": [self.candidate.id]},
-        )
-
-        self.assertEqual(run.mode, "rule")
-        self.assertEqual(
-            list(run.scope_items.values_list("candidate_id", flat=True)),
-            [self.candidate.id],
-        )
-        self.assertNotIn("parallel_modes", run.scope)
+    def test_runner_has_no_mode_parameter(self):
+        with self.assertRaisesRegex(TypeError, "unexpected keyword argument 'mode'"):
+            runner.create_run(
+                "step2",
+                mode="rule",
+                scope={"candidate_ids": [self.candidate.id]},
+            )
 
     def test_explicit_ai_run_freezes_mode_at_submission_time(self):
         run = runner.create_run(
             "step2",
-            mode="ai",
             scope={"candidate_ids": [self.candidate.id]},
         )
 
@@ -176,7 +173,6 @@ class AllocationDesignContractTests(TestCase):
         workflow = m.CandidateWorkflow.objects.create(candidate=self.candidate)
         run = runner.create_run(
             "step2",
-            mode="rule",
             scope={"candidate_ids": [self.candidate.id], "force_reprocess": True},
         )
         workflow.status = m.CandidateWorkflow.STATUS_IN_PROGRESS
@@ -216,11 +212,14 @@ class AllocationDesignContractTests(TestCase):
         )
         run = runner.create_run(
             "step2",
-            mode="rule",
             scope={"candidate_ids": [self.candidate.id], "force_reprocess": True},
         )
 
-        runner.execute_run(run.id)
+        with patch(
+            "apps.pipeline.services.allocate.agent_gateway.evaluate_resume",
+            return_value=self._ai_result(),
+        ):
+            runner.execute_run(run.id)
 
         attempt = m.AssignmentAttempt.objects.get()
         self.assertEqual(attempt.resume, self.resume)
@@ -1634,6 +1633,14 @@ class AllocationDesignContractTests(TestCase):
 
 class JobCapacityAllocationTests(TestCase):
     def setUp(self):
+        ai_config.save_ai_connection_config(
+            {
+                "api_style": "responses",
+                "model_name": "gpt-test",
+                "base_url": "https://model.internal/v1",
+                "api_key": "test-key",
+            }
+        )
         self.department_a = m.Department.objects.create(name="研发一部", level=2)
         self.department_b = m.Department.objects.create(name="研发二部", level=2)
         self.job_a = m.Job.objects.create(
@@ -1658,10 +1665,47 @@ class JobCapacityAllocationTests(TestCase):
         )
         return candidate, resume
 
-    def test_run_snapshot_distributes_by_hc_and_exhausted_candidate_reenters_new_run(self):
+    def _agent_result(self, resume, job, *, department=None, **_kwargs):
+        profile, _ = m.ResumeProfile.objects.get_or_create(
+            resume=resume,
+            defaults={"parse_status": "parsed", "raw_text": "候选人简历正文"},
+        )
+        decision = SimpleNamespace(
+            recommendation="dispatch",
+            summary="建议下发",
+            reason="简历证据与当前岗位匹配",
+            evidence=["候选人简历正文"],
+            risks=[],
+            ai_specialist_match=False,
+            ai_specialist_confidence=0,
+            ai_specialist_evidence=[],
+        )
+        return SimpleNamespace(
+            profile=profile,
+            output=SimpleNamespace(
+                decision=decision,
+                profile=SimpleNamespace(risk_flags=[]),
+            ),
+            job=job,
+            department=department,
+            confidence=0.9,
+            score_breakdown={
+                "major_match": 0.9,
+                "skills_match": 0.9,
+                "experience_evidence": 0.9,
+                "job_requirement": 0.9,
+                "resume_quality": 0.9,
+            },
+        )
+
+    @patch("apps.pipeline.services.allocate.agent_gateway.evaluate_resume")
+    def test_run_snapshot_distributes_by_hc_and_exhausted_candidate_reenters_new_run(
+        self, mock_evaluate
+    ):
+        mock_evaluate.side_effect = self._agent_result
         candidates = [self._candidate(index)[0] for index in range(1, 5)]
         run = runner.create_run(
-            "step2", mode="rule",
+            "step2",
             scope={"candidate_ids": [candidate.id for candidate in candidates]},
         )
 
@@ -1693,7 +1737,7 @@ class JobCapacityAllocationTests(TestCase):
         )
 
         rerun = runner.create_run(
-            "step2", mode="rule",
+            "step2",
             scope={"candidate_ids": [exhausted.id], "force_reprocess": True},
         )
         runner.execute_run(rerun.id)
@@ -1703,12 +1747,14 @@ class JobCapacityAllocationTests(TestCase):
             system_status.PENDING_DISPATCH,
         )
 
-    def test_capacity_release_and_manual_assignment_bypass(self):
+    @patch("apps.pipeline.services.allocate.agent_gateway.evaluate_resume")
+    def test_capacity_release_and_manual_assignment_bypass(self, mock_evaluate):
+        mock_evaluate.side_effect = self._agent_result
         self.job_b.is_active = False
         self.job_b.save(update_fields=["is_active"])
         first, _first_resume = self._candidate(10)
         run = runner.create_run(
-            "step2", mode="rule", scope={"candidate_ids": [first.id]}
+            "step2", scope={"candidate_ids": [first.id]}
         )
         runner.execute_run(run.id)
         attempt = first.workflow.attempts.get()
@@ -1725,13 +1771,49 @@ class JobCapacityAllocationTests(TestCase):
         manual_attempt = allocate.manual_assign(second_resume, self.department_a)
         self.assertIsNone(manual_attempt.capacity_reservation_id)
 
+    def test_agent_result_never_switches_to_a_job_it_did_not_evaluate(self):
+        candidate, resume = self._candidate(12)
+        run = runner.create_run("step2", scope={"candidate_ids": [candidate.id]})
+        capacity_a = run.job_capacities.get(job=self.job_a)
+        capacity_a.used_count = capacity_a.capacity
+        capacity_a.save(update_fields=["used_count"])
+        workflow = m.CandidateWorkflow.objects.create(
+            candidate=candidate,
+            status=m.CandidateWorkflow.STATUS_IN_PROGRESS,
+            current_resume=resume,
+            current_rank=1,
+        )
+        workflow._processing_run = run
+
+        with transaction.atomic():
+            attempt = allocate._apply_ai_result(
+                workflow,
+                resume,
+                matched_rule=None,
+                result=self._agent_result(
+                    resume,
+                    self.job_a,
+                    department=self.department_a,
+                ),
+            )
+
+        workflow.refresh_from_db()
+        resume.refresh_from_db()
+        decision = workflow.agent_decisions.get()
+        self.assertIsNone(attempt)
+        self.assertEqual(workflow.block_reason, m.CandidateWorkflow.BLOCK_JOB_HC_EXHAUSTED)
+        self.assertEqual(resume.job, self.job_a)
+        self.assertEqual(decision.evaluated_job, self.job_a)
+        self.assertEqual(decision.recommended_job, self.job_a)
+        self.assertEqual(run.job_capacities.get(job=self.job_b).used_count, 0)
+
     def test_ambiguous_and_missing_internal_position_are_archived_with_codes(self):
         self.job_b.public_name = "软件开发工程师"
         self.job_b.position_name = "另一个内部职位"
         self.job_b.save(update_fields=["public_name", "position_name"])
         ambiguous, _resume = self._candidate(20)
         ambiguous_run = runner.create_run(
-            "step2", mode="rule", scope={"candidate_ids": [ambiguous.id]}
+            "step2", scope={"candidate_ids": [ambiguous.id]}
         )
         runner.execute_run(ambiguous_run.id)
         self.assertEqual(
@@ -1749,7 +1831,7 @@ class JobCapacityAllocationTests(TestCase):
         self.job_a.save(update_fields=["position_name"])
         missing, _resume = self._candidate(21)
         missing_run = runner.create_run(
-            "step2", mode="rule", scope={"candidate_ids": [missing.id]}
+            "step2", scope={"candidate_ids": [missing.id]}
         )
         runner.execute_run(missing_run.id)
         self.assertEqual(

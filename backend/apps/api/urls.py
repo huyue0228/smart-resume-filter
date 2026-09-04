@@ -33,7 +33,6 @@ urlpatterns = [
     path("auth/w3/callback/", views.W3OAuth2CallbackView.as_view()),
     path("auth/w3/complete/", views.W3OAuth2CompleteView.as_view()),
     path("me/", views.MeView.as_view()),
-    path("allocation-mode/", views.AllocationModeView.as_view()),
     path("permissions/", views.PermissionTreeView.as_view()),
     path("ai-connection/", views.AIConnectionConfigView.as_view()),
     path("ai-connection/settings/", views.AIConnectionSettingsView.as_view()),
@@ -62,7 +61,6 @@ urlpatterns = [
         "import/templates/<str:template_type>/",
         views.ImportTemplateView.as_view(),
     ),
-    path("import/undo/", views.ImportUndoView.as_view()),
     path("pipeline/run/", views.PipelineRunView.as_view()),
     path(
         "analytics/recruitment-overview/",

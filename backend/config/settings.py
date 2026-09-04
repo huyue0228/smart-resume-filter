@@ -113,6 +113,17 @@ RESUME_OCR_TIMEOUT_SECONDS = int(
 )
 RESUME_OCR_CONCURRENCY = int(os.environ.get("RESUME_OCR_CONCURRENCY", "2"))
 
+# 独立 Agent Kernel。DEBUG 本地开发默认 embedded；非 DEBUG 默认必须走独立进程。
+AGENT_KERNEL_MODE = os.environ.get(
+    "AGENT_KERNEL_MODE", "embedded" if DEBUG else "remote"
+)
+AGENT_KERNEL_URL = os.environ.get("AGENT_KERNEL_URL", "http://127.0.0.1:8090")
+AGENT_KERNEL_TOKEN = os.environ.get("AGENT_KERNEL_TOKEN", "")
+AGENT_KERNEL_BUILD = os.environ.get("AGENT_KERNEL_BUILD", "dev")
+AGENT_KERNEL_MODEL_INSECURE_SKIP_VERIFY = env_bool(
+    "AGENT_KERNEL_MODEL_INSECURE_SKIP_VERIFY", False
+)
+
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # DRF：W3 登录和 DEBUG 开发命令签发的会话都使用 Token。

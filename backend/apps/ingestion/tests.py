@@ -16,7 +16,6 @@ from apps.ingestion.sources import (
     import_files,
     normalize_highest_education,
 )
-from apps.ingestion.snapshot import restore_latest, take_snapshot
 from apps.ingestion.tabular_imports import (
     get_import_table_schema,
     validate_table_headers,
@@ -59,61 +58,6 @@ def _excel_file_without_name(rows):
 
 
 class ResumeImportDesignContractTests(TestCase):
-    def test_snapshot_restores_department_attempt_and_handling_event(self):
-        department = m.Department.objects.create(name="平台组", level=2)
-        candidate = m.Candidate.objects.create(
-            identity_hash="snapshot-candidate",
-            name="张三",
-            phone="13800000000",
-        )
-        resume = m.Resume.objects.create(
-            candidate=candidate,
-            apply_id="SNAPSHOT1001",
-            position_name="后端工程师",
-        )
-        workflow = m.CandidateWorkflow.objects.create(
-            candidate=candidate,
-            current_resume=resume,
-            current_rank=1,
-        )
-        attempt = m.AssignmentAttempt.objects.create(
-            workflow=workflow,
-            resume=resume,
-            attempt_no=1,
-            initial_department=department,
-            current_department=department,
-        )
-        workflow.passed_attempt = attempt
-        workflow.save(update_fields=["passed_attempt"])
-        event = m.AssignmentHandlingEvent.objects.create(
-            attempt=attempt,
-            event_type=m.AssignmentHandlingEvent.EVENT_ATTEMPT_CREATED,
-            to_department=department,
-            to_department_name_snapshot=department.name,
-            is_system_auto=True,
-        )
-        event_id = event.id
-
-        take_snapshot(label="部门分配快照")
-        m.AssignmentHandlingEvent.objects.all().delete()
-        m.AssignmentAttempt.objects.all().delete()
-        m.CandidateWorkflow.objects.all().delete()
-        m.Resume.objects.all().delete()
-        m.Candidate.objects.all().delete()
-
-        self.assertTrue(restore_latest())
-
-        restored_workflow = m.CandidateWorkflow.objects.get(
-            candidate__identity_hash="snapshot-candidate"
-        )
-        restored_attempt = restored_workflow.attempts.get()
-        restored_event = restored_attempt.handling_events.get(pk=event_id)
-        self.assertEqual(restored_workflow.passed_attempt, restored_attempt)
-        self.assertEqual(restored_attempt.initial_department, department)
-        self.assertEqual(restored_attempt.current_department, department)
-        self.assertEqual(restored_event.to_department, department)
-        self.assertTrue(restored_event.is_system_auto)
-
     def test_school_import_tracks_blank_province_for_background_enrichment(self):
         schools = _excel_file(
             [

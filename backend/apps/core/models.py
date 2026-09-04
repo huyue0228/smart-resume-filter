@@ -513,7 +513,7 @@ class CandidateWorkflow(models.Model):
         related_name="current_workflows",
     )
     current_rank = models.PositiveSmallIntegerField(null=True, blank=True)
-    dispatch_strategy = models.CharField(max_length=16, default="rule")
+    dispatch_strategy = models.CharField(max_length=16, default="ai")
     archive_reason = models.CharField(
         max_length=64, choices=ARCHIVE_REASON_CHOICES, blank=True
     )
@@ -622,7 +622,7 @@ class AssignmentAttempt(models.Model):
         Resume, on_delete=models.PROTECT, related_name="assignment_attempts"
     )
     attempt_no = models.PositiveIntegerField()
-    source = models.CharField(max_length=16, choices=SOURCE_CHOICES, default=SOURCE_RULE)
+    source = models.CharField(max_length=16, choices=SOURCE_CHOICES, default=SOURCE_AI)
     status = models.CharField(
         max_length=32, choices=STATUS_CHOICES, default=STATUS_PENDING_DISPATCH
     )
@@ -888,6 +888,11 @@ class AgentDispatchDecision(models.Model):
     model_name = models.CharField(max_length=64, blank=True)
     prompt_version = models.CharField(max_length=32, blank=True)
     decision_version = models.CharField(max_length=32, blank=True)
+    kernel_pin_id = models.CharField(max_length=64, blank=True, db_index=True)
+    kernel_build = models.CharField(max_length=64, blank=True)
+    protocol_version = models.CharField(max_length=32, blank=True)
+    toolset_version = models.CharField(max_length=48, blank=True)
+    safe_trace = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -997,7 +1002,7 @@ class ProcessingRun(models.Model):
     scope = models.JSONField(default=dict, blank=True, help_text="处理范围/筛选条件")
     scope_summary = models.JSONField(default=dict, blank=True, help_text="可对外展示的处理范围摘要")
     step = models.CharField(max_length=16)
-    mode = models.CharField(max_length=8, default="rule")
+    mode = models.CharField(max_length=8, default="ai")
     status = models.CharField(max_length=24, default="pending")
     current_stage = models.CharField(max_length=32, blank=True)
     celery_task_id = models.CharField(max_length=64, blank=True)
@@ -1027,19 +1032,18 @@ class ProcessingRun(models.Model):
     model_name = models.CharField(max_length=64, blank=True)
     prompt_version = models.CharField(max_length=32, blank=True)
     decision_version = models.CharField(max_length=32, blank=True)
+    kernel_build = models.CharField(max_length=64, blank=True)
+    protocol_version = models.CharField(max_length=32, blank=True)
+    toolset_version = models.CharField(max_length=48, blank=True)
+    result_schema_version = models.CharField(max_length=32, blank=True)
+    policy_version = models.CharField(max_length=32, blank=True)
+    model_config_revision = models.CharField(max_length=64, blank=True)
+    pin_id = models.CharField(max_length=64, blank=True, db_index=True)
     job_hc_coefficient_snapshot = models.PositiveSmallIntegerField(default=1)
     created_at = models.DateTimeField(auto_now_add=True)
     started_at = models.DateTimeField(null=True, blank=True)
     last_heartbeat_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
-    undone_at = models.DateTimeField(null=True, blank=True)
-    undone_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="processing_runs_undone",
-    )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,
@@ -1096,7 +1100,7 @@ class ProcessingRunJobCapacity(models.Model):
 
 
 class ProcessingRunStage(models.Model):
-    """一个处理任务中的可观测阶段，支持 Rule-first 多阶段连续展示。"""
+    """一个处理任务中的可观测阶段，支持 Policy/Agent 多阶段连续展示。"""
 
     run = models.ForeignKey(
         ProcessingRun, on_delete=models.CASCADE, related_name="stages"
@@ -1239,17 +1243,3 @@ class Config(models.Model):
 
     def __str__(self):
         return self.key
-
-
-class ImportSnapshot(models.Model):
-    """单级撤销快照：每次上传简历前，序列化候选、投递和分配工作流。
-
-    仅保留最近一份（单级撤销）。
-    """
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    label = models.CharField(max_length=128, blank=True)
-    payload = models.TextField(help_text="django serialize 的 json")
-
-    class Meta:
-        ordering = ["-created_at"]

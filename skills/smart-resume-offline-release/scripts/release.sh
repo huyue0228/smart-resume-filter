@@ -80,11 +80,12 @@ CHECKSUM_PATH="${ARCHIVE_PATH}.sha256"
 IMAGE_TAR="${PACKAGE_DIR}/smart-resume-filter-images-amd64.tar"
 
 BACKEND_IMAGE="smart-resume-filter-backend:${VERSION}"
+KERNEL_IMAGE="smart-resume-filter-agent-kernel:${VERSION}"
 FRONTEND_IMAGE="smart-resume-filter-frontend:${VERSION}"
 POSTGRES_IMAGE="smart-resume-filter-postgres:16"
 REDIS_IMAGE="smart-resume-filter-redis:7"
 BACKUP_IMAGE="smart-resume-filter-backup:${VERSION}"
-IMAGES=("$BACKEND_IMAGE" "$FRONTEND_IMAGE" "$POSTGRES_IMAGE" "$REDIS_IMAGE" "$BACKUP_IMAGE")
+IMAGES=("$KERNEL_IMAGE" "$BACKEND_IMAGE" "$FRONTEND_IMAGE" "$POSTGRES_IMAGE" "$REDIS_IMAGE" "$BACKUP_IMAGE")
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || die "缺少命令：$1"
@@ -102,6 +103,14 @@ check_usage_metrics_contract() {
     die "部署脚本未自动生成 USAGE_METRICS_TOKEN"
   grep -Fq 'require_value USAGE_METRICS_TOKEN' "$deploy_script" || \
     die "部署脚本未校验 USAGE_METRICS_TOKEN"
+  grep -Fxq 'AGENT_KERNEL_TOKEN=auto-generate-on-first-deploy' "$env_template" || \
+    die "环境变量模板缺少 AGENT_KERNEL_TOKEN 自动生成占位值"
+  grep -Fq 'AGENT_KERNEL_TOKEN: ${AGENT_KERNEL_TOKEN:?Set AGENT_KERNEL_TOKEN in .env}' "$compose_template" || \
+    die "Compose 模板未向 Agent Kernel 传入认证令牌"
+  grep -Eq 'GENERATED_SECRET_KEYS=.*AGENT_KERNEL_TOKEN' "$deploy_script" || \
+    die "部署脚本未自动生成 AGENT_KERNEL_TOKEN"
+  grep -Fq 'require_value AGENT_KERNEL_TOKEN' "$deploy_script" || \
+    die "部署脚本未校验 AGENT_KERNEL_TOKEN"
 }
 
 check_prerequisites() {
@@ -183,6 +192,7 @@ APP_VERSION=${VERSION}
 DOCKER_PLATFORM=${TARGET_PLATFORM}
 DJANGO_SECRET_KEY=build-only-not-for-deployment
 USAGE_METRICS_TOKEN=build-only-not-for-deployment
+AGENT_KERNEL_TOKEN=build-only-not-for-deployment
 DJANGO_ALLOWED_HOSTS=localhost
 POSTGRES_DB=srf
 POSTGRES_USER=srf_user
@@ -193,9 +203,9 @@ EOF
 
 cd "$REPO_ROOT"
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
-  log "构建五个 ${TARGET_PLATFORM} 镜像"
+  log "构建六个 ${TARGET_PLATFORM} 镜像"
   docker compose --env-file "$BUILD_ENV" config --images
-  docker compose --env-file "$BUILD_ENV" build db redis backend frontend backup-scheduler
+  docker compose --env-file "$BUILD_ENV" build agent-kernel db redis backend frontend backup-scheduler
 else
   log "跳过构建，复用同版本镜像"
 fi
@@ -205,6 +215,7 @@ for image_name in "${IMAGES[@]}"; do
   check_image_architecture "$image_name"
 done
 docker run --rm --platform "$TARGET_PLATFORM" "$BACKEND_IMAGE" python manage.py check
+docker run --rm --platform "$TARGET_PLATFORM" --entrypoint /bin/sh "$KERNEL_IMAGE" -c 'test -x /usr/local/bin/agent-kernel'
 docker run --rm --platform "$TARGET_PLATFORM" "$FRONTEND_IMAGE" nginx -t
 
 log "组装离线包"

@@ -23,20 +23,17 @@ import {
   DownloadOutlined,
   PlayCircleOutlined,
   SendOutlined,
-  UndoOutlined,
 } from '@ant-design/icons'
 import {
   deleteCandidate,
+  bulkDeleteCandidates,
   exportCandidates,
   fetchCandidates,
   fetchCandidateFilterOptions,
-  fetchUndoStatus,
-  undoLastImport,
   fetchManualAssignmentOptions,
   manualAssignResume,
   fetchAgentDecisions,
   retryAgentDecision,
-  fetchAllocationMode,
   dispatchAllocation,
   confirmReviewAllocation,
   cancelAllocation,
@@ -67,12 +64,6 @@ const RESUME_IMPORT_FIELDS = [
   { key: 'resume_package', label: '② 简历包 (.zip，文件名含应聘ID)', accept: '.zip' },
 ]
 
-const DEFAULT_ALLOCATION_AVAILABILITY = {
-  default_mode: 'rule',
-  available_modes: ['rule'],
-  ai_ready: false,
-}
-
 const PROCESSING_RESULT_LABELS = {
   success: '处理完成',
   completed: '处理完成',
@@ -102,7 +93,7 @@ const REASON_CODE_OPTIONS = {
   ai_rate_limited: 'AI 限流',
   ai_invalid_output: 'AI 输出不合法',
   ai_reference_invalidated: 'AI 引用已失效',
-  rule_assigned: 'Rule 分配成功',
+  rule_assigned: '历史规则分配成功',
   ai_dispatched: 'AI 建议下发',
   ai_review: 'AI 待复核',
   ai_archived: 'AI 建议归档',
@@ -143,7 +134,7 @@ const SYSTEM_STATUS_OPTIONS = {
     text: '待处理',
     color: 'default',
     status: 'Default',
-    description: '没有完成过 Rule/AI 筛选；仅提交或排队不算处理',
+    description: '没有完成过 Agent 筛选；仅提交或排队不算处理',
   },
   archived: {
     text: '已归档',
@@ -199,7 +190,7 @@ const ATTEMPT_STATUS = {
 }
 
 const SOURCE_TEXT = {
-  rule: '规则',
+  rule: '历史规则',
   ai: 'AI',
   manual: '手动',
 }
@@ -323,7 +314,6 @@ export default function ResumesPage() {
   const canExport = hasPermission('resume.view') || hasPermission('attempt.export')
   const canSelectCandidates = canDispatch || canTransfer || canExport || canImport
   const { run } = useProcessRunner()
-  const [undo, setUndo] = useState({ available: false })
   const [detailRecord, setDetailRecord] = useState(null)
   const [previewRecord, setPreviewRecord] = useState(null)
   const [agentDecisions, setAgentDecisions] = useState([])
@@ -337,8 +327,6 @@ export default function ResumesPage() {
   const [processStatusSelection, setProcessStatusSelection] = useState([])
   const [processCurrentSelected, setProcessCurrentSelected] = useState(false)
   const [processCandidateSnapshot, setProcessCandidateSnapshot] = useState([])
-  const [allocationAvailability, setAllocationAvailability] = useState(DEFAULT_ALLOCATION_AVAILABILITY)
-  const [processMode, setProcessMode] = useState('rule')
   const [lastQuery, setLastQuery] = useState({})
   const [selectedRowKeys, setSelectedRowKeys] = useState([])
   const [selectedCandidates, setSelectedCandidates] = useState([])
@@ -421,35 +409,6 @@ export default function ResumesPage() {
       setManualModal((prev) => ({ ...prev, loading: false }))
     }
   }
-
-  const refreshUndo = async () => {
-    try {
-      const { data } = await fetchUndoStatus()
-      setUndo(data || { available: false })
-    } catch {
-      setUndo({ available: false })
-    }
-  }
-
-  const refreshAllocationAvailability = useCallback(async () => {
-    if (!canRunPipeline && !canImport) return DEFAULT_ALLOCATION_AVAILABILITY
-    try {
-      const { data } = await fetchAllocationMode()
-      const availability = data || DEFAULT_ALLOCATION_AVAILABILITY
-      setAllocationAvailability(availability)
-      if (!availability.ai_ready) setProcessMode('rule')
-      return availability
-    } catch {
-      setAllocationAvailability(DEFAULT_ALLOCATION_AVAILABILITY)
-      setProcessMode('rule')
-      return DEFAULT_ALLOCATION_AVAILABILITY
-    }
-  }, [canImport, canRunPipeline])
-
-  useEffect(() => {
-    if (canImport) refreshUndo()
-    refreshAllocationAvailability()
-  }, [canImport, refreshAllocationAvailability])
 
   useEffect(() => {
     if (!detailRecord) {
@@ -740,34 +699,16 @@ export default function ResumesPage() {
     }
   }
 
-  // 导入接口已在服务端创建完整 Rule-first 后台任务，页面无需等待执行完成。
+  // 导入与 Agent 处理解耦；Agent 未就绪时数据仍会保留为待处理。
   const handleImported = async (data) => {
-    await refreshUndo()
     await actionRef.current?.reloadOptions()
     actionRef.current?.reload()
     if (data?.processing_runs?.length) {
       message.success('简历已导入并提交后台处理，可继续操作并在任务中心查看进度')
     }
-  }
-
-  const handleUndo = () => {
-    Modal.confirm({
-      title: '撤销上次上传',
-      content: '将删除最近一次上传的简历及其处理结果，回到上传前状态。确定撤销？',
-      okText: '撤销',
-      okButtonProps: { danger: true },
-      onOk: async () => {
-        try {
-          const { data } = await undoLastImport()
-          message.success(data?.detail || '已撤销')
-          await refreshUndo()
-          await actionRef.current?.reloadOptions()
-          actionRef.current?.reload()
-        } catch {
-          message.error('撤销失败')
-        }
-      },
-    })
+    else if (data?.agent_processing === 'pending') {
+      message.info('简历已导入；Agent 就绪后可从简历库批量处理')
+    }
   }
 
   const handleDelete = (record) => {
@@ -802,32 +743,22 @@ export default function ResumesPage() {
       okButtonProps: { danger: true },
       onOk: async () => {
         setBulkDeleting(true)
-        const failed = []
-        let deleted = 0
         try {
-          for (const candidateId of candidateIds) {
-            try {
-              await deleteCandidate(candidateId)
-              deleted += 1
-            } catch (error) {
-              failed.push({
-                id: candidateId,
-                detail: error?.response?.data?.detail || '删除失败',
-              })
-            }
-          }
-          setSelectedRowKeys(failed.map((item) => item.id))
-          setSelectedCandidates((rows) => rows.filter((row) => failed.some((item) => item.id === row.id)))
-          if (deleted) {
+          const { data } = await bulkDeleteCandidates(candidateIds)
+          const failedItems = (data?.results || []).filter((item) => item.status === 'failed')
+          const failedIds = failedItems.map((item) => item.candidate_id)
+          setSelectedRowKeys(failedIds)
+          setSelectedCandidates((rows) => rows.filter((row) => failedIds.includes(row.id)))
+          if (data?.deleted) {
             await actionRef.current?.reloadOptions()
             actionRef.current?.reload()
           }
-          if (failed.length) {
+          if (data?.failed) {
             message.warning(
-              `已删除 ${deleted} 名，${failed.length} 名未删除：${failed[0].detail}`,
+              `已删除 ${data.deleted} 名，${data.failed} 名未删除：${failedItems[0]?.detail || '存在受保护历史'}`,
             )
           } else {
-            message.success(`已删除 ${deleted} 名候选人`)
+            message.success(`已删除 ${data?.deleted || 0} 名候选人`)
           }
         } finally {
           setBulkDeleting(false)
@@ -887,9 +818,7 @@ export default function ResumesPage() {
     setProcessCandidateSnapshot([...selectedRowKeys])
     setProcessCurrentSelected(false)
     setProcessStatusSelection([])
-    setProcessMode('rule')
     setProcessModalOpen(true)
-    refreshAllocationAvailability()
   }
 
   const handleCurrentSelectedChange = (event) => {
@@ -909,10 +838,6 @@ export default function ResumesPage() {
       message.warning('请先勾选当前选中或需要处理的简历状态')
       return
     }
-    if (processMode === 'ai' && !allocationAvailability.ai_ready) {
-      message.warning('当前模型连接尚未测试成功，不能选择 AI 分配')
-      return
-    }
     setProcessing(true)
     try {
       const scope = buildResumeProcessingScope({
@@ -922,9 +847,9 @@ export default function ResumesPage() {
         lastQuery,
       })
       const r = await run(
-        [{ step: 'step2', label: '院校分类 → Rule 前检 → AI 深度筛选' }],
-        `正在重新处理简历（${processMode === 'ai' ? 'AI' : '规则'}）`,
-        { scope, mode: processMode },
+        [{ step: 'step2', label: '院校准入 → 固定业务引用 → Agent 筛选' }],
+        '正在提交 Agent 简历处理任务',
+        { scope },
       )
       if (r.success) {
         message.success('已提交重新处理任务，可继续操作并在任务中心查看进度')
@@ -1326,9 +1251,6 @@ export default function ResumesPage() {
             fields={RESUME_IMPORT_FIELDS}
             templateType="resume_list"
             templateFilename="简历信息列表标准模板.xlsx"
-            selectProcessingMode
-            aiReady={allocationAvailability.ai_ready}
-            onBeforeOpen={refreshAllocationAvailability}
             onDone={handleImported}
           />,
           canRunPipeline && <Button
@@ -1354,14 +1276,6 @@ export default function ResumesPage() {
             onClick={openBulkTransfer}
           >
             批量转派
-          </Button>,
-          canImport && <Button
-            key="undo"
-            icon={<UndoOutlined />}
-            disabled={!undo.available}
-            onClick={handleUndo}
-          >
-            撤销上次上传
           </Button>,
         ].filter(Boolean)}
         params={externalRequestParams}
@@ -1485,14 +1399,11 @@ export default function ResumesPage() {
       <ResumeProcessModal
         open={processModalOpen}
         processing={processing}
-        allocationAvailability={allocationAvailability}
-        selectedMode={processMode}
         processCurrentSelected={processCurrentSelected}
         processCandidateCount={processCandidateSnapshot.length}
         processStatusSelection={processStatusSelection}
         statusOptions={SYSTEM_STATUS_OPTIONS}
         onCurrentSelectedChange={handleCurrentSelectedChange}
-        onModeChange={setProcessMode}
         onStatusChange={handleProcessStatusChange}
         onConfirm={handleConfirmProcess}
         onCancel={() => {
@@ -1804,17 +1715,14 @@ export default function ResumesPage() {
                       <Space>
                         <a onClick={() => setAgentDecisionDetail(decision)}>详情</a>
                         {(decision.error_code || decision.recommendation === 'archive') && hasPermission('attempt.dispatch') && (
-                          <Tooltip title={!allocationAvailability.ai_ready ? '模型连接尚未测试成功' : ''}>
-                            <Button
-                              type="link"
-                              size="small"
-                              disabled={!allocationAvailability.ai_ready}
-                              loading={retryingDecisionId === decision.id}
-                              onClick={() => handleRetryAgentDecision(decision)}
-                            >
-                              重试 AI
-                            </Button>
-                          </Tooltip>
+                          <Button
+                            type="link"
+                            size="small"
+                            loading={retryingDecisionId === decision.id}
+                            onClick={() => handleRetryAgentDecision(decision)}
+                          >
+                            重试 Agent
+                          </Button>
                         )}
                       </Space>
                     ),
@@ -1826,7 +1734,7 @@ export default function ResumesPage() {
         )}
       </Drawer>
       <Modal
-        title="AI 筛选决策详情"
+        title="Agent 筛选决策详情"
         open={Boolean(agentDecisionDetail)}
         width={760}
         footer={null}
@@ -1841,7 +1749,7 @@ export default function ResumesPage() {
               {agentDecisionDetail.confidence_score == null ? '-' : `${Math.round(agentDecisionDetail.confidence_score * 100)}%`}
             </Descriptions.Item>
             <Descriptions.Item label="固定评估岗位">{agentDecisionDetail.evaluated_job_name || '-'}</Descriptions.Item>
-            <Descriptions.Item label="Rule 固定二级部门">{agentDecisionDetail.recommended_department_name || '-'}</Descriptions.Item>
+            <Descriptions.Item label="Policy 固定二级部门">{agentDecisionDetail.recommended_department_name || '-'}</Descriptions.Item>
             <Descriptions.Item label="摘要" span={2}>{agentDecisionDetail.summary || '-'}</Descriptions.Item>
             <Descriptions.Item label="理由" span={2}>{agentDecisionDetail.reason || '-'}</Descriptions.Item>
             <Descriptions.Item label="简历证据" span={2}>{(agentDecisionDetail.evidence || []).join('；') || '-'}</Descriptions.Item>

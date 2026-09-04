@@ -1,4 +1,4 @@
-"""Rule 专业审核策略；岗位精确映射由独立领域服务负责。"""
+"""历史 Rule 记录续办兼容策略；新任务只允许进入 Agent Kernel。"""
 
 from apps.core import models as m
 
@@ -6,7 +6,7 @@ from .services.job_mapping import JobMappingError, normalized, resolve_job_pool
 
 
 class RuleStrategy:
-    """规则模式：按岗位名称命中岗位需求，并执行确定性专业校验。
+    """续办历史 Rule 尝试时执行确定性专业校验。
 
     Rule 策略仍然不做 AI 语义扩展，但会使用 HR 可维护的专业大类词表做
     第一层确定性归类：候选人最高学历专业和岗位需求专业映射到同一启用

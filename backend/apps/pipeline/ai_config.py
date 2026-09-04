@@ -336,21 +336,6 @@ def current_ai_connection_fingerprint():
     return _connection_fingerprint()
 
 
-def available_allocation_modes():
-    modes = ["rule"]
-    if is_ai_connection_tested():
-        modes.append("ai")
-    return modes
-
-
-def validate_allocation_mode(mode):
-    if mode not in {"rule", "ai"}:
-        raise ValueError("分配模式必须是 rule 或 ai")
-    if mode == "ai" and not is_ai_connection_tested():
-        raise ValueError("当前模型连接尚未测试成功，不能选择 AI 分配")
-    return mode
-
-
 def get_ai_connection_status():
     stored_key = _connection_value("api_key")
     tested_at = _connection_value_by_key(AI_CONNECTION_TESTED_AT_KEY) or ""

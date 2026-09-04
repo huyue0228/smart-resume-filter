@@ -257,7 +257,7 @@ class PromptManagementApiTests(TestCase):
         )
 
     def test_run_submission_freezes_active_prompt_version(self):
-        first = runner.create_run("step2", mode="ai", scope={})
+        first = runner.create_run("step2", scope={})
         self.assertEqual(first.prompt_version, "resume-screening-v2")
         tested = self._mark_draft_tested()
         published = self.client.post(
@@ -267,7 +267,7 @@ class PromptManagementApiTests(TestCase):
         )
         self.assertEqual(published.status_code, 200)
 
-        second = runner.create_run("step2", mode="ai", scope={})
+        second = runner.create_run("step2", scope={})
 
         self.assertEqual(first.prompt_version, "resume-screening-v2")
         self.assertEqual(second.prompt_version, published.data["active"]["version"])

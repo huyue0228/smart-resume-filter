@@ -10,7 +10,7 @@ const downloadBlobFromResponse = vi.hoisted(() => vi.fn())
 vi.mock('../api/services', () => ({ downloadImportTemplate, importData }))
 vi.mock('../utils/download', () => ({ downloadBlobFromResponse }))
 
-describe('ImportButton processing mode', () => {
+describe('ImportButton', () => {
   beforeEach(() => {
     importData.mockReset()
     importData.mockResolvedValue({ data: { detail: '导入完成' } })
@@ -19,27 +19,24 @@ describe('ImportButton processing mode', () => {
     downloadBlobFromResponse.mockReset()
   })
 
-  it('submits the selected AI mode for resume uploads when AI is ready', async () => {
+  it('submits resume uploads without a client-selected processing mode', async () => {
     const user = userEvent.setup()
     render(
       <ImportButton
         buttonText="上传简历"
         fields={[{ key: 'resume_package', label: '简历包', accept: '.zip' }]}
-        selectProcessingMode
-        aiReady
       />,
     )
 
     await user.click(screen.getByRole('button', { name: /上传简历/ }))
     const input = document.querySelector('input[type="file"]')
     await user.upload(input, new File(['resume'], '简历包.zip', { type: 'application/zip' }))
-    await user.click(screen.getByText('AI'))
     await user.click(screen.getByRole('button', { name: '开始导入' }))
 
     await waitFor(() => expect(importData).toHaveBeenCalledTimes(1))
     const formData = importData.mock.calls[0][0]
     expect(formData.get('mode')).toBe('incremental')
-    expect(formData.get('processing_mode')).toBe('ai')
+    expect(formData.has('processing_mode')).toBe(false)
     expect(formData.get('resume_package').name).toBe('简历包.zip')
   })
 

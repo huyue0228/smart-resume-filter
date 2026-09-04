@@ -11,7 +11,7 @@ description: 为 smart-resume-filter 构建、验证、封装并交付 linux/amd
 bash skills/smart-resume-offline-release/scripts/release.sh
 ```
 
-脚本自动完成：生成时间戳版本、构建五个 `linux/amd64` 镜像（含备份工具镜像）、容器内检查、导出镜像、生成纯 `image:` Compose 离线包、计算双层 SHA-256、回读镜像、复制到移动硬盘并复验。
+脚本自动完成：生成时间戳版本、构建六个 `linux/amd64` 镜像（含 Agent Kernel 与备份工具镜像）、容器内检查、导出镜像、生成纯 `image:` Compose 离线包、计算双层 SHA-256、回读镜像、复制到移动硬盘并复验。
 
 ## 参数
 

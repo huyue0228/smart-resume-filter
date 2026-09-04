@@ -86,7 +86,7 @@ describe('ProcessingTaskCenter', () => {
     await userEvent.click(expandButtons[1])
 
     expect(screen.getAllByRole('button', { name: '收起成功子项' })).toHaveLength(2)
-    expect(screen.getAllByText(/AI 业务子项合计可小于处理完成总数/)).toHaveLength(2)
+    expect(screen.getAllByText(/Agent 子项合计可小于处理完成总数/)).toHaveLength(2)
     const disabledDispatch = screen.getAllByRole('button', {
       name: '筛选本任务待下发简历 0 名',
     })

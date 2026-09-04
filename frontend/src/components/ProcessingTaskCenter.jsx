@@ -29,9 +29,8 @@ const STATUS_META = {
   needs_attention: { text: '存在需处理项', color: 'warning' },
   partial_failed: { text: '部分失败', color: 'warning' },
   failed: { text: '失败', color: 'error' },
-  undone: { text: '已撤销', color: 'default' },
 }
-const FINISHED_STATUSES = new Set(['success', 'needs_attention', 'partial_failed', 'failed', 'cancelled', 'undone'])
+const FINISHED_STATUSES = new Set(['success', 'needs_attention', 'partial_failed', 'failed', 'cancelled'])
 const ATTENTION_STATUSES = new Set(['needs_attention', 'partial_failed', 'failed'])
 
 function formatTime(value) {
@@ -67,7 +66,7 @@ function progressOf(run) {
 
 function taskTitle(run) {
   if (run.step === 'resume_process') return '上传后候选人处理'
-  if (run.step === 'step2') return '院校分类、Rule 前检与分配'
+  if (run.step === 'step2') return '院校准入、Policy 前检与 Agent 分配'
   return run.step || '处理任务'
 }
 
@@ -155,7 +154,7 @@ function TaskResultMetrics({ run, onOpenCandidates }) {
             })}
           </div>
           <Typography.Text type="secondary">
-            AI 业务子项合计可小于处理完成总数；Rule 前置结束项不会产生 AI recommendation。
+            Agent 子项合计可小于处理完成总数；Policy 前置结束项不会产生 Agent 建议。
           </Typography.Text>
         </div>
       ) : null}
@@ -224,7 +223,7 @@ function TaskTable({ runs, cancellingId, onCancel, onOpenCandidates }) {
             <Typography.Text type="secondary">#{run.id}</Typography.Text>
           </div>
           <Typography.Text type="secondary">
-            {run.mode === 'ai' ? 'AI 分配' : '规则分配'} · {run.created_by_username_snapshot || '系统'}
+            {run.mode === 'ai' ? 'Agent 分配' : '历史规则分配'} · {run.created_by_username_snapshot || '系统'}
           </Typography.Text>
         </div>
       ),
@@ -345,7 +344,7 @@ function TaskCard({ run, cancellingId, onCancel, onOpenCandidates }) {
 
         <div className="processing-task-meta">
           <span><UserOutlined /> {run.created_by_username_snapshot || '系统'}</span>
-          <span><RobotOutlined /> {run.mode === 'ai' ? 'AI 分配' : '规则分配'}</span>
+          <span><RobotOutlined /> {run.mode === 'ai' ? 'Agent 分配' : '历史规则分配'}</span>
           <span>提交于 {formatTime(run.created_at)}</span>
         </div>
 
@@ -390,7 +389,7 @@ function TaskCard({ run, cancellingId, onCancel, onOpenCandidates }) {
 
         {run.mode === 'ai' && run.ai_concurrency_limit ? (
           <Typography.Text type="secondary" className="processing-task-audit">
-            AI 自适应并发 {run.ai_effective_concurrency || 1}/{run.ai_concurrency_limit}
+            Agent 自适应并发 {run.ai_effective_concurrency || 1}/{run.ai_concurrency_limit}
             {' · '}模型重试 {run.ai_retry_count || 0}
             {' · '}429 限流 {run.ai_rate_limit_count || 0}
           </Typography.Text>

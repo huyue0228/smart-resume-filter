@@ -152,7 +152,7 @@ class AIParallelPipelineTests(TestCase):
     def test_manual_revision_change_during_model_call_discards_ai_result(self):
         candidate, resume = self._candidate(1)
         run = runner.create_run(
-            "step2", mode="ai", scope={"candidate_ids": [candidate.id]}
+            "step2", scope={"candidate_ids": [candidate.id]}
         )
 
         def change_workflow(*_args, **_kwargs):
@@ -177,7 +177,7 @@ class AIParallelPipelineTests(TestCase):
     def test_eager_ai_run_uses_candidate_task_counters_and_default_ceiling(self):
         candidate, resume = self._candidate(88)
         run = runner.create_run(
-            "step2", mode="ai", scope={"candidate_ids": [candidate.id]}
+            "step2", scope={"candidate_ids": [candidate.id]}
         )
 
         with patch.object(
@@ -203,7 +203,7 @@ class AIParallelPipelineTests(TestCase):
         candidate.save(update_fields=["highest_major"])
         m.JobMajor.objects.create(job=self.job, major="电气工程")
         run = runner.create_run(
-            "step2", mode="ai", scope={"candidate_ids": [candidate.id]}
+            "step2", scope={"candidate_ids": [candidate.id]}
         )
 
         with patch.object(
@@ -229,7 +229,6 @@ class AIParallelPipelineTests(TestCase):
         limited_candidate, _ = self._candidate(90)
         run = runner.create_run(
             "step2",
-            mode="ai",
             scope={"candidate_ids": [timeout_candidate.id, limited_candidate.id]},
         )
 
@@ -264,7 +263,7 @@ class AIParallelPipelineTests(TestCase):
         self.job.is_active = False
         self.job.save(update_fields=["is_active"])
         run = runner.create_run(
-            "step2", mode="ai", scope={"candidate_ids": [candidate.id]}
+            "step2", scope={"candidate_ids": [candidate.id]}
         )
 
         with patch.object(allocate.ai_service, "screen_resume") as screen:
@@ -282,7 +281,7 @@ class AIParallelPipelineTests(TestCase):
         self.job.responsibilities = ""
         self.job.save(update_fields=["responsibilities"])
         run = runner.create_run(
-            "step2", mode="ai", scope={"candidate_ids": [candidate.id]}
+            "step2", scope={"candidate_ids": [candidate.id]}
         )
 
         with patch.object(allocate.ai_service, "_extract_pdf") as extract_pdf, patch.object(
@@ -324,7 +323,7 @@ class AIParallelPipelineTests(TestCase):
         )
         candidate, _resume = self._candidate(94)
         run = runner.create_run(
-            "step2", mode="ai", scope={"candidate_ids": [candidate.id]}
+            "step2", scope={"candidate_ids": [candidate.id]}
         )
 
         runner.execute_run(run.id)
@@ -349,7 +348,7 @@ class AIParallelPipelineTests(TestCase):
             )
         candidate, _resume = self._candidate(95)
         run = runner.create_run(
-            "step2", mode="ai", scope={"candidate_ids": [candidate.id]}
+            "step2", scope={"candidate_ids": [candidate.id]}
         )
 
         runner.execute_run(run.id)
@@ -376,7 +375,6 @@ class AIParallelPipelineTests(TestCase):
         routed_candidate, routed_resume = self._candidate(93)
         run = runner.create_run(
             "step2",
-            mode="ai",
             scope={"candidate_ids": [boundary_candidate.id, routed_candidate.id]},
         )
 
@@ -451,7 +449,7 @@ class AIParallelPipelineTests(TestCase):
 
         candidate, resume = self._candidate(97)
         run = runner.create_run(
-            "step2", mode="ai", scope={"candidate_ids": [candidate.id]}
+            "step2", scope={"candidate_ids": [candidate.id]}
         )
 
         with patch.object(
@@ -482,7 +480,6 @@ class AIParallelPipelineTests(TestCase):
         candidates = [self._candidate(index)[0] for index in range(2, 42)]
         run = runner.create_run(
             "step2",
-            mode="ai",
             scope={"candidate_ids": [candidate.id for candidate in candidates]},
         )
         run.status = "running"
@@ -504,7 +501,7 @@ class AIParallelPipelineTests(TestCase):
     def test_dispatch_publish_failure_rolls_back_queued_state(self):
         candidate, _resume = self._candidate(99)
         run = runner.create_run(
-            "step2", mode="ai", scope={"candidate_ids": [candidate.id]}
+            "step2", scope={"candidate_ids": [candidate.id]}
         )
         run.status = "running"
         run.save(update_fields=["status"])

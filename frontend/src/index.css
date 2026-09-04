@@ -132,21 +132,6 @@ body {
   object-fit: contain;
 }
 
-.srf-allocation-mode-toggle {
-  vertical-align: middle;
-}
-
-.srf-allocation-mode-toggle--inline {
-  margin-inline-start: 8px;
-}
-
-.srf-allocation-mode-toggle .ant-segmented-item-label {
-  min-width: 44px;
-  padding-inline: 10px;
-  font-weight: 600;
-  text-align: center;
-}
-
 .srf-app-layout .ant-pro-layout-header {
   border-block-end: 1px solid var(--srf-border);
   box-shadow: none;

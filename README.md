@@ -1,10 +1,10 @@
 # 海纳智聘
 
-“海纳智聘”是面向校园招聘的智能简历筛选平台。候选人采用 Rule-first 主流程：「Step1 查重与志愿排序 → Step2 院校分类及学历/院校准入 → Step3 Rule 前置检查 → Step4 AI 深度筛选（仅 AI 模式）」。岗位需求、部门和接口人是独立维护的基础数据。系统按正式项目方式建设：后端启用登录与 RBAC 权限校验，前端菜单和按钮由后端权限码驱动；AI Agent 与专项强制分流已接入，W3 OAuth2 认证适配层已就绪，真实 W3 参数和 WeLink 下发仍待外部联调。
+“海纳智聘”是面向校园招聘的智能简历筛选平台。候选人主流程为「查重与志愿排序 → 院校和学历 Policy Gate → 固定当前岗位/部门引用 → Agent Kernel 证据化筛选 → Django 校验并落库」。岗位需求、部门和接口人是独立维护的基础数据。Django 负责认证、RBAC、业务约束和最终写入；独立 Go Agent Kernel 只运行模型和白名单只读工具，返回无写权限的结构化建议。
 
-设计文档以 [`docs/需求描述.md`](docs/需求描述.md)、[`docs/后端设计.md`](docs/后端设计.md)、[`docs/数据库设计.md`](docs/数据库设计.md)、[`docs/前端设计.md`](docs/前端设计.md) 为准。
+`docs/` 保留既有产品设计材料，供追溯历史决策；当前工程边界和运行约定以源码、迁移与 `AGENTS.md` 为准，不自动同步四份设计文档。
 
-当前实现已包含：候选人聚合简历库、招聘分析看板、精确处理结果/原因筛选、可拖拽列宽、PDF 预览和筛选导出、W3 OAuth2 登录与项目 Token 会话、RBAC、加密增量备份与隔离恢复演练，以及 Rule-first 流程、真实 PDF/OCR 解析、OpenAI 结构化输出、后台智能路由审计和 HR 处置闭环。
+当前实现已包含：候选人聚合简历库、批量删除、招聘分析看板、精确处理结果/原因筛选、可拖拽列宽、PDF 预览和筛选导出、W3 OAuth2 登录与项目 Token 会话、RBAC、加密增量备份与隔离恢复演练，以及真实 PDF/OCR 解析、Agent Kernel 只读工具循环、版本钉死、证据复核、后台智能路由审计和 HR 处置闭环。
 
 > 上生产前仍需完成真实数据隐私评审、模型评测、容量压测和外部系统联调；本轮不包含 worker heartbeat 超时恢复、Prometheus/集中日志/告警、3 万条压测、CI 或浏览器 E2E。
 
@@ -19,6 +19,7 @@
 ## 技术栈
 
 - 后端：Django 4.2、Django REST Framework、Celery。
+- 智能内核：Go 1.23 编译二进制，使用版本化 CaseEnvelope/Proposal 协议。
 - 前端：Vite、React 18、Ant Design Pro、JavaScript `.jsx`。
 - 本地开发：SQLite + Celery eager，同步执行任务，不依赖 Redis。
 - 生产预期：PostgreSQL + Redis + Celery `default` worker + threads `ai` worker。
@@ -27,6 +28,7 @@
 
 ```text
 backend/    Django + DRF 后端，包含 accounts/core/ingestion/pipeline/api
+agent-kernel/ 独立 Go 智能内核；无数据库连接和业务写权限
 frontend/   Vite + React 前端
 docs/       四篇核心设计文档与原始材料
 ```
@@ -69,6 +71,7 @@ npm run dev
 
 - PostgreSQL：业务数据库。
 - Redis：Celery broker/result backend。
+- Agent Kernel：独立 Go 二进制，只访问任务信封、白名单只读工具和管理员已配置的模型服务。
 - Django backend 镜像：基于 `python:3.12.3-slim`，内置后端源码、Python 依赖、Gunicorn、PostgreSQL/Redis 客户端。
 - Celery workers：复用 backend 镜像；普通 worker 消费 `default` 队列，threads AI worker 消费 `ai` 队列。
 - Nginx frontend 镜像：先用 Node 构建 React，再用 Nginx 托管静态资源并反代 `/api` 到 backend。
@@ -113,7 +116,7 @@ git checkout --detach <交付说明中的发布标签或 commit>
 
 ### 3. 创建服务器 `.env`
 
-推荐直接使用项目部署脚本。首次运行会创建权限为 `600` 的 `.env`，自动生成四项独立随机密钥，然后退出等待确认目标服务器信息：
+推荐直接使用项目部署脚本。首次运行会创建权限为 `600` 的 `.env`，自动生成五项独立随机密钥，然后退出等待确认目标服务器信息：
 
 ```bash
 bash skills/smart-resume-offline-deploy/scripts/deploy.sh
@@ -124,13 +127,13 @@ bash skills/smart-resume-offline-deploy/scripts/deploy.sh
 - `DJANGO_ALLOWED_HOSTS`：生产环境填写反向代理对外域名，多个值用英文逗号分隔。
 - `BACKUP_TARGET_PATH`：默认约定为 `/mnt/smart-resume-filter-backups`。先把异机共享目录或外置磁盘挂载到这里；现场挂载点不同才修改该值。脚本会拒绝不存在、不可写或非绝对路径。
 
-确认后再次运行同一命令即可部署。`DJANGO_SECRET_KEY`、`POSTGRES_PASSWORD`、`RESTIC_PASSWORD` 和 `USAGE_METRICS_TOKEN` 由脚本从 `/dev/urandom` 自动生成且不回显。检测到旧容器或旧数据卷时，脚本绝不替换已有安全值；缺少新增的使用频率监控密钥时只补齐该项。升级或灾后重建仍必须恢复原 `.env`，否则数据库可能无法连接，既有 AI 连接密文也可能无法解密。
+确认后再次运行同一命令即可部署。`DJANGO_SECRET_KEY`、`POSTGRES_PASSWORD`、`RESTIC_PASSWORD`、`USAGE_METRICS_TOKEN` 和 `AGENT_KERNEL_TOKEN` 由脚本从 `/dev/urandom` 自动生成且不回显。检测到旧容器或旧数据卷时，脚本绝不替换已有安全值；缺少新增的监控或 Kernel 密钥时只补齐缺失项。升级或灾后重建仍必须恢复原 `.env`，否则数据库可能无法连接，既有 AI 连接密文也可能无法解密。
 
 系统生产只提供 W3 登录，因此 W3 OAuth2 是可用部署的必要条件。模板中的 `W3_OAUTH2_ENABLED=False` 只是首次生成 `.env` 的安全占位；正式部署前必须改为 `True`，填写 client id、授权/Token/UserInfo HTTPS 地址、工号和邮箱字段路径、客户端认证方式、超时、事务有效期，并把 `W3_OAUTH2_REDIRECT_URI` 设置为 W3 平台登记的精确地址，例如 `https://你的域名/api/auth/w3/callback/`。当前 W3 UserInfo 的工号和邮箱字段分别为顶层 `employeeNumber`、`email`，模板已预填；`tenantId`、`uuid`、`globalUserID` 不参与账号匹配。机密客户端还必须填写 client secret，scope 按 W3 要求填写。部署脚本会在任何 Docker 变更前强制 `DJANGO_DEBUG=False` 并校验 W3，DEBUG 开启、W3 关闭或配置不完整都会停止且不显示密钥。系统不提供本地密码登录，模板也不包含本地登录开关。
 
 源码部署到 ARM 服务器时才需要把 `DOCKER_PLATFORM` 改为 `linux/arm64`；离线发布包已经固定为 `linux/amd64`，`APP_VERSION` 也由发布脚本写入，不在部署现场决定。
 
-启用 AI 模式前，使用管理员账号进入「系统设置 → AI 模型连接」完成连接配置并执行测试。内网 DeepSeek V4 与 GLM 4.7 共用同一地址；页面配置 Base URL、可选访问令牌和 API 风格，并通过该地址的 OpenAI-compatible `GET /models` 获取模型 ID（也可直接输入），不配置服务商/Profile。模型连接只从系统设置中的数据库配置读取，部署环境变量不会参与决定。API Key 非空时仅允许写入并加密保存，页面和 API 均不会回显；无鉴权内网服务可留空。未配置可用连接时内部决策可记录 `ai_not_configured`，候选人级统一映射为 `needs_attention + ai_connection_error`，不会回退 Rule。
+启用 Agent 处理前，使用管理员账号进入「系统设置 → AI 模型连接」完成连接配置并执行测试。页面配置 Base URL、可选访问令牌和 API 风格，并通过 OpenAI-compatible `GET /models` 获取模型 ID（也可直接输入），不配置服务商/Profile。模型连接只从系统设置中的数据库配置读取。API Key 非空时仅加密保存且不会回显；无鉴权内网服务可留空。模型或 Kernel 未就绪时，导入仍会成功并保留为待处理，不会回退到另一套隐式分配模式。
 
 `RUN_SEED_BASE` 默认保持 `0`。不要在长期运行环境里把它改成 `1`，否则每次 backend 重启都可能把配置页中的参数重置为种子默认值。首次初始化请使用下一节的一次性 `init` 命令。
 
@@ -144,7 +147,7 @@ docker compose --profile init run --rm init
 docker compose up -d
 ```
 
-首次执行 `docker compose build` 会下载基础镜像、安装依赖并生成后端、前端、PostgreSQL、Redis、backup 五个项目镜像，时间会比较久。查看启动状态：
+首次执行 `docker compose build` 会下载基础镜像、安装依赖并生成 Agent Kernel、后端、前端、PostgreSQL、Redis、backup 六个项目镜像，时间会比较久。查看启动状态：
 
 ```bash
 docker compose ps
@@ -260,7 +263,7 @@ docker compose up -d
 docker compose ps
 ```
 
-当前 compose 会在服务器本机构建 `smart-resume-filter-backend:${APP_VERSION}`、`smart-resume-filter-frontend:${APP_VERSION}`、`smart-resume-filter-postgres:${POSTGRES_VERSION}`、`smart-resume-filter-redis:${REDIS_VERSION}`、`smart-resume-filter-backup:${APP_VERSION}` 五个项目镜像。只改 `.env` 时不需要重新 build，只需 `docker compose up -d`。
+当前 compose 会在服务器本机构建 `smart-resume-filter-agent-kernel:${APP_VERSION}`、`smart-resume-filter-backend:${APP_VERSION}`、`smart-resume-filter-frontend:${APP_VERSION}`、`smart-resume-filter-postgres:${POSTGRES_VERSION}`、`smart-resume-filter-redis:${REDIS_VERSION}`、`smart-resume-filter-backup:${APP_VERSION}` 六个项目镜像。只改 `.env` 时不需要重新 build，只需 `docker compose up -d`。
 
 如果新版本明确要求重新初始化基础权限或新增种子字典，再手动执行：
 
@@ -366,6 +369,7 @@ AI 运行中的连接异常会继续写入 `AgentDispatchDecision.error_code` / 
 docker compose logs --tail=200 backend
 docker compose logs --tail=200 worker
 docker compose logs --tail=200 ai-worker
+docker compose logs --tail=200 agent-kernel
 ```
 
 ### 11. 服务器安全检查
@@ -373,7 +377,7 @@ docker compose logs --tail=200 ai-worker
 上线前至少完成：
 
 - `.env` 不提交 Git，不复制到公开位置。
-- `.env` 权限为 `600`，且 `DJANGO_SECRET_KEY`、`POSTGRES_PASSWORD`、`RESTIC_PASSWORD`、`USAGE_METRICS_TOKEN` 已由首次部署脚本分别生成强随机值。
+- `.env` 权限为 `600`，且 `DJANGO_SECRET_KEY`、`POSTGRES_PASSWORD`、`RESTIC_PASSWORD`、`USAGE_METRICS_TOKEN`、`AGENT_KERNEL_TOKEN` 已由首次部署脚本分别生成强随机值。
 - `DJANGO_DEBUG=False`。
 - `DJANGO_ALLOWED_HOSTS` 只填写实际 IP/域名，避免长期使用 `*`。
 - PostgreSQL `5432` 和 Redis `6379` 不暴露到公网；如无外部访问需求，只允许内网或安全组限制。
@@ -468,7 +472,7 @@ python manage.py issue_dev_token --username admin
 
 1. 使用 `admin` 或 `hr` 登录。
 2. 在简历库、岗位需求、院校清单、部门接口人页面导入对应 Excel/简历包；岗位表的“工作职责”列必填，缺失职责的岗位行会被跳过并返回行号，其余行继续导入。也可先执行 `gen_sample` 和 `load_sample`。
-3. 上传简历和人工“处理简历”都选择本次 Rule / AI 模式并只创建一条运行：上传 Rule 执行 Step1–Step3、AI 执行 Step1–Step4，人工处理从 Step2 开始。Rule 始终可选，当前模型连接测试有效时才可选 AI。AI 运行创建时把当时的激活 Prompt 版本冻结到 `ProcessingRun.prompt_version`，后续执行和成功/失败决策都继续使用、记录该版本；发布新版不改变已创建或排队任务。AI 会把当前岗位工作职责（最多 12,000 字符）纳入岗位要求分析；历史岗位未补工作职责时转为“需处理”，不调用模型。生产 AI Step4 由有界调度器投递专用 `ai` 队列，所有 AI worker 共享 Redis 自适应并发上限。院校导入触发的省份补全任务也在投递时携带当时的激活 Prompt 版本。
+3. 上传简历后，系统在 Agent Kernel 与模型连接就绪时自动创建一条处理任务；未就绪时导入仍成功，简历保留为待处理。人工“处理简历”不再选择运行模式。任务创建时冻结 Kernel build、协议、工具集、Policy、模型连接和 Prompt 版本；发布新版不会改变已创建或排队任务。Agent 会把当前岗位工作职责（最多 12,000 字符）纳入证据化分析；历史岗位未补工作职责时转为“需处理”，不调用模型。生产 Agent 阶段由有界调度器投递专用 `ai` 队列，所有 AI worker 共享 Redis 自适应并发上限。
 4. HR 在简历库查看处理完成、需处理、模型超时失败及精确原因，并处置待下发、待复核和 AI 自动分配结果。后台智能路由不显示独立标签、原因或证据。
 5. HR 单条、批量或一键全部下发给二级接口人。
 6. 二级接口人登录后仅看到自己的分配，可导出简历并转派本部门三级接口人。
@@ -491,19 +495,18 @@ python manage.py issue_dev_token --username admin
 | GET | `/api/permissions/` | 后端预置权限树 |
 | GET | `/api/configs/`、`/api/configs/{key}/` | 查询白名单内的非敏感配置项 |
 | PATCH | `/api/configs/{key}/` | 更新白名单配置值 |
-| POST | `/api/import/` | 上传简历列表、岗位、院校、接口人和简历包；岗位缺工作职责的行跳过并在 `warnings` 返回行号；含简历数据时必须提交 `processing_mode=rule|ai` |
-| GET/POST | `/api/import/undo/` | 查看并撤销最近一次简历上传 |
+| POST | `/api/import/` | 上传简历列表、岗位、院校、接口人和简历包；岗位缺工作职责的行跳过并在 `warnings` 返回行号；不接受 `processing_mode`，Agent 未就绪时返回 `agent_processing=pending` |
 | GET | `/api/resumes/` | 投递清单 |
 | GET | `/api/resumes/{id}/preview/` | 预览单条投递 PDF |
 | GET | `/api/candidates/` | 候选人聚合列表 |
+| POST | `/api/candidates/bulk-delete/` | 按候选人 ID 批量删除；逐条校验受保护历史并返回成功/失败明细 |
 | GET | `/api/candidates/export/` | 按候选人 ID 或当前筛选条件导出；`include_resume_files=false` 返回独立 XLSX，`true` 返回组合 ZIP，缺参按 `true` 兼容旧客户端 |
 | GET/POST/PATCH | `/api/jobs/` `/api/schools/` `/api/departments/` `/api/contacts/` | 主数据维护 |
-| POST | `/api/pipeline/run/` | 提交 `step + mode + scope` 并创建唯一 Rule 或 AI 运行；缺少 `mode`、提交 `modes` 或在连接未就绪时选择 AI 返回 400。生产异步返回 202，本地 `CELERY_TASK_ALWAYS_EAGER=True` 同步完成返回 200，均返回 `processing_runs` |
+| POST | `/api/pipeline/run/` | 提交 `step + scope` 创建 Agent 运行；`mode`/`modes` 被拒绝，Kernel 或模型连接未就绪时返回 409。生产异步返回 202，本地 `CELERY_TASK_ALWAYS_EAGER=True` 同步完成返回 200，均返回 `processing_runs` |
 | GET | `/api/pipeline/runs/` | 处理运行记录 |
 | GET | `/api/analytics/recruitment-overview/` | 需要 `analytics.view`；按导入 cohort 返回招聘总览、转化、耗时、趋势和分布，默认最近 30 天，缓存 5 分钟 |
 | POST | `/api/analytics/usage/page-view/` | 登录用户静默上报页面访问；事件 ID 幂等，不用于逐条 API 审计 |
 | GET | `/api/analytics/usage/overview/` | 使用 `X-Usage-Metrics-Key`，或登录用户具有 `analytics.view`；返回 PV、会话、活跃用户、补零趋势和页面排行 |
-| GET | `/api/allocation-mode/` | 具有 `pipeline.run` 或 `resume.import` 权限时返回 `default_mode`、`available_modes` 和 `ai_ready`，不泄露模型连接信息 |
 | GET/PATCH | `/api/ai-connection/settings/`、`/api/ai-connection/settings/{key}/` | 具有 `settings.manage_ai_connection` 权限时读取/更新 AI 运行参数和“AI 专项”配置；页面按 `runtime / special_route` 分页签展示 |
 | GET | `/api/ai-prompts/` | 具有 `settings.manage_ai_connection` 权限时读取五模块定义、限制、系统默认值、只读组装预览、激活版本和共享草稿 |
 | PATCH | `/api/ai-prompts/draft/` | 携带完整五模块集合和 `lock_version` 保存共享草稿；校验失败返回 400，并发冲突返回 409 |
@@ -557,4 +560,4 @@ npm run build
 - W3 认证：非 OIDC 的 OAuth2 Authorization Code 适配层已经实现，默认使用 state 和 PKCE S256，按 UserInfo 顶层 `employeeNumber` 与 `email` 提取工号和邮箱，并同时匹配已有 `User.username + User.email`；字段仍允许通过环境变量覆盖为点路径。`tenantId`、`uuid`、`globalUserID` 当前不参与匹配或落库。仍需公司提供真实端点、客户端凭据、scope、客户端认证方式和生产 `redirect_uri` 后完成联调。
 - WeLink：当前下发流程已保留状态和消息 ID 字段，`welink_enabled` 控制是否启用真实外部下发；开关位于「数据管理 → 部门接口人」页面。真实接口确认后在服务层替换发送实现。
 - 数据库：本地默认 SQLite；生产环境通过 `POSTGRES_DB`、`POSTGRES_USER`、`POSTGRES_PASSWORD`、`POSTGRES_HOST`、`POSTGRES_PORT` 切换 PostgreSQL。
-- Celery：本地默认 `CELERY_TASK_ALWAYS_EAGER=True`；生产环境应配置 Redis broker/backend，并同时启动 `default` worker 与 threads `ai` worker。
+- Celery：本地默认 `CELERY_TASK_ALWAYS_EAGER=True`；生产环境应配置 Redis broker/backend，并同时启动 Agent Kernel、`default` worker 与 threads `ai` worker。
